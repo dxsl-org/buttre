@@ -21,7 +21,7 @@ cargo build -p buttre-platform --release --target aarch64-apple-darwin
 echo "==> Building x86_64 dylib..."
 cargo build -p buttre-platform --release --target x86_64-apple-darwin
 
-STAGING="target/macos/buttre-${VERSION}-macos-dylib"
+STAGING="target/macos/buttre-${VERSION}-macos-universal"
 rm -rf "$STAGING"
 mkdir -p "$STAGING/keyboards"
 
@@ -37,12 +37,24 @@ lipo -info "$STAGING/libbuttre_platform.dylib"
 echo "==> Copying keyboards..."
 cp keyboards/*.toml "$STAGING/keyboards/"
 
+echo "==> Copying Nôm database (if available)..."
+for NOM_SRC in \
+    "target/release/buttre_nom.db" \
+    "crates/buttre-core/resources/nom/buttre_nom.db" \
+    "buttre_nom.db"; do
+    if [ -f "$NOM_SRC" ]; then
+        cp "$NOM_SRC" "$STAGING/buttre_nom.db"
+        echo "  Included buttre_nom.db from $NOM_SRC"
+        break
+    fi
+done
+
 echo "==> Copying README..."
 cp installers/macos/ARTIFACT_README.md "$STAGING/README.md"
 
 echo "==> Zipping..."
-( cd target/macos && zip -r "buttre-${VERSION}-macos-dylib.zip" "buttre-${VERSION}-macos-dylib" )
+( cd target/macos && zip -r "buttre-${VERSION}-macos-universal.zip" "buttre-${VERSION}-macos-universal" )
 
 echo ""
-echo "Artifact: target/macos/buttre-${VERSION}-macos-dylib.zip"
-ls -lh "target/macos/buttre-${VERSION}-macos-dylib.zip"
+echo "Artifact: target/macos/buttre-${VERSION}-macos-universal.zip"
+ls -lh "target/macos/buttre-${VERSION}-macos-universal.zip"

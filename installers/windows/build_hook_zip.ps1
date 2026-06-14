@@ -20,7 +20,7 @@ try {
     $targetDir  = Join-Path $repoRoot "target\release"
     $stagingDir = Join-Path $repoRoot "target\hook-zip\buttre"
     $outDir     = Join-Path $repoRoot "target\hook-zip"
-    $zipPath    = Join-Path $outDir "buttre-$Version-windows-hook.zip"
+    $zipPath    = Join-Path $outDir "buttre-$Version-windows-x86_64-hook.zip"
 
     # Clean + stage
     if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }

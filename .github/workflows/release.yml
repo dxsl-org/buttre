@@ -56,20 +56,26 @@ jobs:
       - name: Build MSI
         run: ./installers/windows/build_installer.ps1 -Version ${{ steps.ver.outputs.version }}
 
+      - name: Rename MSI to standard filename
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          Move-Item "target/wix/buttre-$v-x86_64.msi" "target/wix/buttre-$v-windows-x86_64.msi"
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
           name: buttre ${{ steps.ver.outputs.version }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
-          files: target/wix/buttre-${{ steps.ver.outputs.version }}-x86_64.msi
+          files: target/wix/buttre-${{ steps.ver.outputs.version }}-windows-x86_64.msi
           body: |
             ## buttre v${{ steps.ver.outputs.version }}
 
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
 
             **Windows**: Run the MSI installer. SmartScreen may warn on first run (unsigned build) — click "More info → Run anyway".
-            **Linux**: `sudo dpkg -i buttre_*.deb` (Debian/Ubuntu) or `sudo dnf install buttre-*.rpm` (Fedora/RHEL).
+            **Linux**: `sudo dpkg -i buttre-*-linux-x86_64.deb` (Debian/Ubuntu) or `sudo dnf install buttre-*-linux-x86_64.rpm` (Fedora/RHEL).
             **macOS**: Developer artifact only. Extract the zip; strip quarantine with `xattr -d com.apple.quarantine libbuttre_platform.dylib` before linking.
 
   build-linux:
@@ -119,6 +125,12 @@ jobs:
                    installers/linux/debian/postrm
           ./installers/linux/build_packages.sh
 
+      - name: Rename packages to standard filenames
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          mv target/debian/buttre_*.deb "target/debian/buttre-${V}-linux-x86_64.deb"
+          mv target/generate-rpm/buttre-*.rpm "target/generate-rpm/buttre-${V}-linux-x86_64.rpm"
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
@@ -126,8 +138,8 @@ jobs:
           name: buttre ${{ steps.ver.outputs.version }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: |
-            target/debian/*.deb
-            target/generate-rpm/*.rpm
+            target/debian/buttre-${{ steps.ver.outputs.version }}-linux-x86_64.deb
+            target/generate-rpm/buttre-${{ steps.ver.outputs.version }}-linux-x86_64.rpm
 
   build-windows-hook:
     name: Build Windows hook ZIP
@@ -167,7 +179,7 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
           name: buttre ${{ steps.ver.outputs.version }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
-          files: target/hook-zip/buttre-${{ steps.ver.outputs.version }}-windows-hook.zip
+          files: target/hook-zip/buttre-${{ steps.ver.outputs.version }}-windows-x86_64-hook.zip
 
   build-macos:
     name: Build macOS dylib artifact
@@ -205,4 +217,4 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
           name: buttre ${{ steps.ver.outputs.version }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
-          files: target/macos/buttre-${{ steps.ver.outputs.version }}-macos-dylib.zip
+          files: target/macos/buttre-${{ steps.ver.outputs.version }}-macos-universal.zip
