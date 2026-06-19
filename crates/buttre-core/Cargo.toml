@@ -1,6 +1,6 @@
 [package]
 name = "buttre-core"
-version = "1.7.1-beta"
+version = "0.7.1-beta"
 edition = "2021"
 license = "MPL-2.0"
 description = "Core processing engine, state management, and language methods for Buttre"
