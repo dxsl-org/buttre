@@ -36,38 +36,76 @@ fn test_thuowr_via_keyboard() {
     assert_eq!(keyboard.buffer(), "thuở", "thuowr should produce thuở");
 }
 
-// ── Backspace resync (bug: deleting then typing merged words / ate the space) ──
+// ── Backspace: grapheme-aware, keeps the word editable, no desync ─────────────
 
 #[test]
-fn test_backspace_resets_composition_no_desync() {
+fn test_backspace_deletes_grapheme_keeps_tone() {
     use buttre_core::Action;
     let mut kb = KeyboardBuilder::telex().unwrap();
 
-    // Compose "ngày".
-    for ch in "ngayf".chars() {
+    // "vieetj" → "việt".  Backspace deletes the last grapheme 't' but KEEPS the
+    // tone → "việ" (raw order ≠ display order: the tone key 'j' is typed last).
+    for ch in "vieetj".chars() {
         kb.process(ch).unwrap();
     }
-    assert_eq!(kb.buffer(), "ngày");
+    assert_eq!(kb.buffer(), "việt");
 
-    // Backspace must reset the composition and emit exactly one backspace —
-    // NOT leave the executor believing "ngày" is still on screen.
     match kb.backspace().unwrap() {
         Action::Replace { backspace_count, text } => {
-            assert_eq!(backspace_count, 1);
+            assert_eq!(backspace_count, 1, "exactly one displayed char deleted");
             assert_eq!(text, "");
         }
         other => panic!("expected Replace{{1,\"\"}}, got {other:?}"),
     }
-    assert_eq!(kb.buffer(), "", "composition must reset after backspace");
+    assert_eq!(kb.buffer(), "việ", "tone preserved; only final consonant removed");
 
-    // The next keystroke starts a fresh syllable — a clean Commit with no
-    // backspaces reaching back into the previously committed word.
-    let acts = kb.process('x').unwrap();
-    match &acts[0] {
-        Action::Commit(t) => assert_eq!(t, "x"),
-        Action::Replace { backspace_count, .. } => {
-            assert_eq!(*backspace_count, 0, "must not backspace into prior text");
-        }
-        other => panic!("unexpected first action after backspace: {other:?}"),
+    // Composition stays alive: a tone key now re-tones the edited word.
+    kb.process('s').unwrap();
+    assert_eq!(kb.buffer(), "viế", "re-toning after backspace works");
+}
+
+#[test]
+fn test_backspace_no_desync_then_fresh_word() {
+    use buttre_core::Action;
+    let mut kb = KeyboardBuilder::telex().unwrap();
+    for ch in "ngayf".chars() {
+        kb.process(ch).unwrap();
     }
+    assert_eq!(kb.buffer(), "ngày");
+    // Each backspace deletes exactly one displayed grapheme — no over-deletion
+    // reaching into a previous word.
+    assert!(matches!(kb.backspace().unwrap(), Action::Replace { backspace_count: 1, .. }));
+    assert_eq!(kb.buffer(), "ngà");
+    assert!(matches!(kb.backspace().unwrap(), Action::Replace { backspace_count: 1, .. }));
+    assert_eq!(kb.buffer(), "ng");
+}
+
+// ── Multi-word rolling window: edit/re-tone a previous word (Cách B) ───────────
+
+#[test]
+fn test_multiword_retone_previous_word() {
+    let mut kb = KeyboardBuilder::telex().unwrap();
+    for ch in "ban cas".chars() {
+        kb.process(ch).unwrap();
+    }
+    assert_eq!(kb.buffer(), "ban cá");
+    // Backspace across the space, deleting the second word entirely.
+    kb.backspace().unwrap(); // "ban c"
+    kb.backspace().unwrap(); // "ban "
+    kb.backspace().unwrap(); // "ban"
+    assert_eq!(kb.buffer(), "ban");
+    // The previous word is still composable: apply a tone to it.
+    kb.process('f').unwrap();
+    assert_eq!(kb.buffer(), "bàn", "must re-tone the previous word after backspace");
+}
+
+#[test]
+fn test_multiword_window_cap_freezes_oldest() {
+    // Window keeps the last 3 words; a 4th word scrolls the oldest into the
+    // frozen prefix (still shown, no longer recomposed).
+    let mut kb = KeyboardBuilder::telex().unwrap();
+    for ch in "mot hai ba bon".chars() {
+        kb.process(ch).unwrap();
+    }
+    assert_eq!(kb.buffer(), "mot hai ba bon");
 }

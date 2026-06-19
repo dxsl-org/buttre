@@ -2,19 +2,23 @@
 
 Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đây. Định dạng theo [Keep a Changelog](https://keepachangelog.com); phiên bản theo SemVer.
 
-## [0.7.3-beta] — 2026-06-19
+## [0.7.4-beta] — 2026-06-19
 
-### Gõ nhanh & đồng bộ (Windows hook)
+### Gõ nhanh, xóa & sửa từ (Windows hook)
 - Sửa lỗi **rớt phím khi gõ nhanh**: đường xử lý phím trong hook dùng `try_write()` và bỏ qua phím khi tranh chấp lock, khiến phím thô lọt lên màn hình còn buffer engine tụt lại → lệch `last_output`. Nay dùng `write()` blocking, chịu poison — không bao giờ bỏ phím.
-- Sửa lỗi **xóa rồi gõ tiếp bị dính ngược, mất khoảng trắng**: `backspace()` trước đây chỉ pop chuỗi mirror, không cập nhật executor. Nay reset composition khi xóa, không thể desync xuyên ranh giới từ.
+- Sửa lỗi **nhảy ngược lên dòng/từ trên** khi nhấn Enter (hoặc Tab/mũi tên) rồi gõ tiếp: phím ranh giới từ không reset chắc chắn do read-lock giữ chéo write-lock; nay reset blocking + ép `KEYBOARD_DIRTY` để luôn reset trên ranh giới.
+- **Backspace nhận biết grapheme, giữ từ đang gõ**: xóa đúng 1 ký tự hiển thị nhưng vẫn cho phép bỏ dấu/sửa lại từ đang gõ (`việt`→xóa→`việ`→gõ `s`→`viế`), không reset sạch như trước.
+- **Cửa sổ nhiều từ (Cách B, như Unikey)**: backspace xuyên dấu cách để sửa/bỏ dấu **1–2 từ trước đó** (`ban cá`→xóa→`ban`→gõ `f`→`bàn`). Window giữ 3 từ gần nhất, từ cũ hơn đóng băng; hard-reset trên Enter/mũi tên/chuột để không lệch khi con trỏ nhảy. Chỉ áp dụng Telex/VNI backend hook (TSF/Nôm giữ đường cũ).
 - Chặn `O(n²)`: giới hạn độ dài âm tiết cho recompute (input run-on quá dài → passthrough literal).
 
 ### Bộ gõ & chính tả (engine)
 - Sửa lỗi bỏ dấu (tone toggle) với từ có phụ âm đầu trùng phím thanh Telex (`seess`→`sês`, `fanss`→`fans`, `sinff`→`sinf`): dùng trailing-run detection đúng theo Unikey/OpenKey.
 - Sửa fallback tiếng Anh với từ có nguyên âm lặp xuyên ranh giới phụ âm (`fallback`, `implement`, VNI `color`/`expect`): luật non-adjacent chỉ bắn khi phần trước là một âm tiết tiếng Việt hoàn chỉnh (một nucleus + coda hợp lệ).
 - **Bỏ luật `w`→`ư` đầu từ**: từ tiếng Anh bắt đầu bằng `w` (`won`, `with`, `will`, `water`...) gõ tự nhiên; `ư` đầu từ gõ bằng `uw` (`uwng`→`ưng`). `w` chỉ còn là modifier trong `aw`/`ow`/`uw`.
-- **Nâng cấp bảng âm vị** (port từ Unikey `VSeqList`/`VCPairList`): bổ sung đầy đủ nuclei (uê, yê, oo loanword...) và ràng buộc nucleus–coda; sửa lỗi cũ từ chối nhầm `iê`+`p/c` (tiếp/biếc).
+- **Nâng cấp bảng âm vị** (port từ Unikey `VSeqList`/`VCPairList`): bổ sung đầy đủ nuclei (uê, yê, oo loanword, các dạng bare trung gian như `ie`/`uye`...) và ràng buộc nucleus–coda; sửa lỗi cũ từ chối nhầm `iê`+`p/c` (tiếp/biếc).
 - **English fallback validation-first**: âm tiết không hợp lệ tiếng Việt sau khi áp dấu/transform → trả literal + chế độ tiếng Anh (`water`→`water`, `wonder`→`wonder`, `result`→`result`).
+- **VNI gõ sai thứ tự** (thanh trước transform): `huyen26`→`huyền`, `nguyen64`→`nguyễn`, `quyen26`→`quyền` (thêm dạng bare `uye`).
+- **Non-adjacent `đ`** (gõ `d` cuối tạo đ): `datjd`→`đạt`, `datd`→`đat` — chỉ bắn khi âm tiết có coda hoặc dấu thanh (giữ tiếng Anh `dad`→`dad`).
 - **`z` xóa dấu** (bỏ dấu) theo chuẩn Telex; `z`/`dz` đầu từ làm phụ âm cho văn phong informal (`dzí dzụ`, `zô`).
 - **Kéo dài ký tự** trong văn chương/chat: giữ âm tiết hợp lệ + nối đuôi lặp literal (`khôngggg`, `trờiii`, `ơiii`, `vèoooo`) thay vì fallback cả từ — ưu tiên linh hoạt như Unikey.
 - Sửa phiên bản hiển thị trong hộp thoại trợ giúp.

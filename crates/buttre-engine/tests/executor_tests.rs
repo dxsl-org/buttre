@@ -1205,3 +1205,32 @@ fn test_long_valid_syllable_not_capped() {
     );
     assert_eq!(executor.syllable(), "nghiềng");
 }
+
+// ── Non-adjacent đ (flexible typing): "datjd" → "đạt" ─────────────────────────
+
+#[test]
+fn test_nonadjacent_dd_with_tone() {
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "datjd".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "đạt",
+        "trailing 'd' after a toned syllable must turn the onset into đ");
+}
+
+#[test]
+fn test_nonadjacent_dd_with_coda_no_tone() {
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "datd".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "đat",
+        "trailing 'd' after a coda syllable turns the onset into đ");
+}
+
+#[test]
+fn test_bare_dad_stays_english() {
+    // No coda, no tone → non-adjacent đ must NOT fire (English "dad" preserved).
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "dad".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "dad");
+}

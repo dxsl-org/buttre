@@ -162,13 +162,18 @@ fn reset_engine() {
     }
 
     if let Some(keyboard) = KEYBOARD.get() {
-        if let Ok(mut kb_opt) = keyboard.try_write() {
-            if let Some(ref mut kb) = *kb_opt {
-                kb.reset();
-                // Mark clean after reset
-                // Mark clean after reset
-                KEYBOARD_DIRTY.store(false, Ordering::Release);
-            }
+        // Blocking, poison-tolerant write (was try_write).  A skipped reset on
+        // a word-boundary key (Enter/Tab/arrows) leaves the previous word's
+        // state in the engine, so the next line diffs against it and "jumps
+        // back" to the prior line.  No caller holds the lock when reset_engine
+        // runs, so a brief block is safe.
+        let mut kb_opt = match keyboard.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref mut kb) = *kb_opt {
+            kb.reset();
+            KEYBOARD_DIRTY.store(false, Ordering::Release);
         }
     }
 }
@@ -516,15 +521,20 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     // Consolidated check using is_buffer_reset_key() based on UniKey behavior.
     // This includes: arrows, Home, End, PgUp/Down, Enter, Tab, Escape, Insert, Delete, F1-F24
     if is_buffer_reset_key(vk) {
-        // Check if keyboard is loaded (not English mode) - use KEYBOARD, not a flag!
-        if let Some(keyboard) = KEYBOARD.get() {
-            if let Ok(kb_opt) = keyboard.try_read() {
-                if kb_opt.is_some() {
-                    reset_engine();
-                    hide_candidates(); // Hide candidate window on buffer reset
-                }
-            }
-        }
+        // Reset the composition on a word-boundary key so the next word starts
+        // fresh.  CRITICAL: do NOT hold any lock here — reset_engine() acquires
+        // the write lock itself, and a read lock held across that call makes the
+        // write fail, silently skipping the reset (the Enter "jump-back" bug).
+        // reset_engine()/hide_candidates() are no-ops in English mode or when
+        // nothing is composing, so calling them unconditionally is safe.
+        //
+        // Force the dirty flag so reset_engine() ALWAYS performs the reset on a
+        // word-boundary key — never gated by KEYBOARD_DIRTY tracking.  This is
+        // the same pattern the Nôm candidate paths use and removes any chance of
+        // a stale composition surviving Enter/Tab/arrow (the jump-back bug).
+        KEYBOARD_DIRTY.store(true, Ordering::Release);
+        reset_engine();
+        hide_candidates(); // Hide candidate window on buffer reset
         // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
         return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
     }

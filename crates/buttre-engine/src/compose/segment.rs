@@ -121,7 +121,7 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts) -> Segment {
         //      "fallback" stays literal instead of becoming "fâllback").
         // For "viet": one group + coda "t" (valid) → fires → "việt".
         // count != 2 also disables non-adjacent (English word with repeats).
-        if matches!(lc, 'a' | 'e' | 'o' | 'd') {
+        if matches!(lc, 'a' | 'e' | 'o') {
             let count = double_candidates.get(&lc).copied().unwrap_or(0);
             if count == 2
                 && *vowel_in_base.get(&lc).unwrap_or(&false)
@@ -131,6 +131,22 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts) -> Segment {
                 transforms.push(TransformMark { key: ch, base_len_at_typing: base.chars().count() });
                 continue;
             }
+        }
+
+        // ── Non-adjacent đ (flexible typing: "datjd" → "đạt") ──────────────
+        // The trailing 'd' turns the onset 'd' into 'đ'.  Unlike the vowel case,
+        // the coda/nucleus guards do not apply (đ is a consonant transform on the
+        // onset).  To avoid mangling English ("dad" → "đa"), fire ONLY when the
+        // syllable is "committed" — it already has a coda consonant OR a tone —
+        // which signals genuine Vietnamese intent.  So "datjd"/"datd"/"datdj"
+        // → đạt/đat, but bare "dad" stays "dad".
+        if lc == 'd'
+            && double_candidates.get(&'d').copied().unwrap_or(0) == 2
+            && *vowel_in_base.get(&'d').unwrap_or(&false)
+            && (!tones.is_empty() || base_ends_with_coda(&base))
+        {
+            transforms.push(TransformMark { key: ch, base_len_at_typing: base.chars().count() });
+            continue;
         }
 
         // ── Classify mark keys ─────────────────────────────────────────────
@@ -283,6 +299,21 @@ fn standalone_modifier_has_vowel(ch: char, base: &str, opts: &ComposeOpts) -> bo
         opts.transform_rules
             .contains_key(&format!("{}{}", c.to_ascii_lowercase(), key))
     })
+}
+
+/// True when `base` ends with a consonant that follows a vowel — i.e. the
+/// syllable has a coda (e.g. "dat" → coda 't'; "da" → none; "d" → none).
+fn base_ends_with_coda(base: &str) -> bool {
+    let chars: Vec<char> = base.chars().collect();
+    match chars.last() {
+        Some(&last) if !is_vowel(last.to_ascii_lowercase()) => {
+            // A consonant tail is a coda only if some vowel precedes it.
+            chars[..chars.len() - 1]
+                .iter()
+                .any(|&c| is_vowel(c.to_ascii_lowercase()))
+        }
+        _ => false,
+    }
 }
 
 /// Count maximal runs of consecutive vowels in `s`.

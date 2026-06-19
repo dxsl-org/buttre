@@ -347,7 +347,7 @@ const VALID_NUCLEI: &[&str] = &[
     // (ieu→iêu, uoi→uôi/ươi, yeu→yêu) so partial typing is not rejected.
     "iêu", "ieu",
     "oai", "oao", "oay", "oeo",
-    "uao", "uây", "uôi", "uoi", "uou", "uơi", "uya", "uyê", "uyu",
+    "uao", "uây", "uôi", "uoi", "uou", "uơi", "uya", "uye", "uyê", "uyu",
     "ươi", "ươu",
     "yêu", "yeu",
 ];
