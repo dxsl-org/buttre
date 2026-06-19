@@ -5,6 +5,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 ## [0.7.2-beta] — 2026-06-19
 - Engine — Sửa lỗi bỏ dấu (tone toggle) với từ có phụ âm đầu trùng phím thanh Telex (`seess`→`sês`, `fanss`→`fans`, `sinff`→`sinf`): thuật toán cũ tìm lần xuất hiện đầu tiên của phím thanh thay vì đếm run liên tiếp từ cuối chuỗi; nay dùng trailing-run detection đúng theo Unikey/OpenKey
 - Sửa phiên bản: `1.7.1-beta` (sai) → `0.7.1-beta`; cập nhật chuỗi hiển thị trong hộp thoại trợ giúp
+- Engine — Sửa lỗi fallback tiếng Anh với từ có nguyên âm lặp xuyên ranh giới phụ âm (`fallback`→`fallback` thay vì `fâllbck`, `implement`→`implement`, VNI `color`→`color`, `expect`→`expect`): luật "non-adjacent flexible typing" (vd `vietej`→`việt`) trước đây bắn nhầm transform cho từ tiếng Anh, sinh ra `Replace` làm lệch `last_output` → dính ngược từ kế tiếp. Nay non-adjacent chỉ bắn khi phần trước là một âm tiết tiếng Việt hoàn chỉnh: đúng một cụm nguyên âm (one nucleus) VÀ phụ âm ở giữa là coda hợp lệ (`c m n p t ch ng nh`). Thêm guard tương tự cho transform kề (`aa`/`ee`/`oo`/`dd`)
+- Engine — Cập nhật golden snapshot cho các từ tiếng Anh bị ảnh hưởng (Telex `color`, VNI `color`/`expect`)
 
 ## [0.7.1-beta] — 2026-06-14
 - Engine — Tái cấu trúc recompute (12 → 7 giai đoạn)

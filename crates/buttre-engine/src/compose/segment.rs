@@ -111,11 +111,23 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts) -> Segment {
         }
 
         // ── Non-adjacent double (flexible typing: "vietej" → "việt") ───────
-        // Fires when count == 2 AND the char is already in the base.
-        // count > 2 disables non-adjacent to avoid English false positives.
+        // The repeated vowel refers back to the nucleus of an already-complete
+        // syllable.  This is only legitimate when the earlier part really IS one
+        // complete Vietnamese syllable, which requires BOTH:
+        //   1. exactly one contiguous vowel group (one nucleus) — rejects
+        //      "implem" ('i' … 'e' = two groups, an English word); AND
+        //   2. the consonants after the rightmost matching vowel form a VALID
+        //      Vietnamese coda — rejects "fallb" (coda "llb" is invalid, so
+        //      "fallback" stays literal instead of becoming "fâllback").
+        // For "viet": one group + coda "t" (valid) → fires → "việt".
+        // count != 2 also disables non-adjacent (English word with repeats).
         if matches!(lc, 'a' | 'e' | 'o' | 'd') {
             let count = double_candidates.get(&lc).copied().unwrap_or(0);
-            if count == 2 && *vowel_in_base.get(&lc).unwrap_or(&false) {
+            if count == 2
+                && *vowel_in_base.get(&lc).unwrap_or(&false)
+                && count_vowel_groups(&base) <= 1
+                && coda_after_last_vowel_is_valid(&base, lc)
+            {
                 transforms.push(TransformMark { key: ch, base_len_at_typing: base.chars().count() });
                 continue;
             }
@@ -227,6 +239,47 @@ fn has_earlier_vowel_with_consonants(base: &str, vowel: char) -> bool {
                 .iter()
                 .any(|&x| !is_vowel(x.to_ascii_lowercase()))
     })
+}
+
+/// True when the consonants after the rightmost occurrence of `vowel` in `base`
+/// form a valid Vietnamese coda (or are empty).
+///
+/// The non-adjacent transform targets that rightmost vowel; for the earlier
+/// portion to be a complete syllable, its tail must be a legal coda.
+/// "viet" → tail after 'e' is "t" (valid). "fallb" → tail after 'a' is "llb"
+/// (invalid → not a syllable → keep "fallback" literal).
+fn coda_after_last_vowel_is_valid(base: &str, vowel: char) -> bool {
+    let chars: Vec<char> = base.chars().collect();
+    let Some(pos) = chars.iter().rposition(|&c| c.to_ascii_lowercase() == vowel) else {
+        return false;
+    };
+    let tail: String = chars[pos + 1..].iter().collect::<String>().to_ascii_lowercase();
+    // Valid Vietnamese codas (single + 2-char); empty = open syllable.
+    matches!(
+        tail.as_str(),
+        "" | "c" | "m" | "n" | "p" | "t" | "ch" | "ng" | "nh"
+    )
+}
+
+/// Count maximal runs of consecutive vowels in `s`.
+///
+/// A valid Vietnamese syllable has exactly one vowel nucleus (one group).
+/// More than one group means the base spans a consonant-separated vowel
+/// boundary — not a single syllable.
+fn count_vowel_groups(s: &str) -> usize {
+    let mut groups = 0;
+    let mut in_vowel = false;
+    for c in s.chars() {
+        if is_vowel(c.to_ascii_lowercase()) {
+            if !in_vowel {
+                groups += 1;
+                in_vowel = true;
+            }
+        } else {
+            in_vowel = false;
+        }
+    }
+    groups
 }
 
 /// A key is a *standalone* transform key when it:
@@ -393,6 +446,47 @@ mod tests {
         let seg = segment(&raw, &opts);
         assert!(seg.transforms.is_empty(), "guard must block transform in 'implemeent': {:?}", seg.transforms);
         assert_eq!(seg.base, "implemeent");
+    }
+
+    #[test]
+    fn fallback_real_word_no_transform() {
+        // Typing the real word "fallback": second 'a' must NOT transform the
+        // first ('fallb' has invalid coda "llb") — output stays "fallback".
+        let opts = telex_opts();
+        let raw: Vec<char> = "fallback".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert!(seg.transforms.is_empty(), "no transform in 'fallback': {:?}", seg.transforms);
+        assert_eq!(seg.base, "fallback");
+    }
+
+    #[test]
+    fn implement_real_word_no_transform() {
+        // Typing the real word "implement": no transform at all.
+        let opts = telex_opts();
+        let raw: Vec<char> = "implement".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert!(seg.transforms.is_empty(), "no transform in 'implement': {:?}", seg.transforms);
+        assert_eq!(seg.base, "implement");
+    }
+
+    #[test]
+    fn implemeent_no_nonadjacent_transform() {
+        // "impleme" has two vowel groups ('i' … 'e') → not one Vietnamese
+        // syllable → non-adjacent 'e' transform must NOT fire.
+        let opts = telex_opts();
+        let raw: Vec<char> = "impleme".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert!(seg.transforms.is_empty(), "non-adjacent must not fire in 'impleme': {:?}", seg.transforms);
+        assert_eq!(seg.base, "impleme");
+    }
+
+    #[test]
+    fn vietej_nonadjacent_transform_fires() {
+        // "viet" is a single vowel group ('ie') → non-adjacent 'e' fires.
+        let opts = telex_opts();
+        let raw: Vec<char> = "viete".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert_eq!(transform_keys(&seg), vec!['e'], "non-adjacent must fire in 'viete'");
     }
 
     #[test]
