@@ -82,13 +82,41 @@ fn test_is_valid_invalid_nucleus() {
 
 #[test]
 fn test_is_valid_invalid_combination() {
-    // "iê" + "p" is invalid
+    // "ưi" is open-only — "ưin" must be invalid (this is what made English "win"
+    // wrongly validate as Vietnamese before the VCPair table was added).
     let s = SyllableStructure {
         onset: "".to_string(),
-        nucleus: "iê".to_string(),
-        coda: "p".to_string(),
+        nucleus: "ưi".to_string(),
+        coda: "n".to_string(),
     };
-    assert!(!s.is_valid());
+    assert!(!s.is_valid(), "ưin must be invalid (ưi is open-only)");
+}
+
+#[test]
+fn test_iep_iec_are_valid() {
+    // Regression: the old table wrongly rejected "iê"+"p"/"c". These are real
+    // Vietnamese words — tiếp, hiếp (iếp) and biếc, tiếc (iếc).
+    assert!(SyllableStructure::parse("tiếp").is_valid(), "tiếp must be valid");
+    assert!(SyllableStructure::parse("biếc").is_valid(), "biếc must be valid");
+}
+
+#[test]
+fn test_upgraded_combination_constraints() {
+    // Valid forms across the expanded nucleus set.
+    for w in ["thuê", "yên", "yêu", "quýnh", "giếng", "boong", "xoong", "tuần", "khuê"] {
+        assert!(SyllableStructure::parse(w).is_valid(), "{w} should be valid");
+    }
+    // Invalid nucleus+coda pairs that the thin table used to let through.
+    for (nucleus, coda) in [("ư", "p"), ("ơ", "c"), ("oe", "m"), ("ăm", "")] {
+        let s = SyllableStructure {
+            onset: "".to_string(),
+            nucleus: nucleus.to_string(),
+            coda: coda.to_string(),
+        };
+        // "ăm" as a nucleus is itself invalid (not a real nucleus); the others
+        // are valid nuclei with illegal codas.
+        assert!(!s.is_valid(), "{nucleus}+{coda} should be invalid");
+    }
 }
 
 #[test]

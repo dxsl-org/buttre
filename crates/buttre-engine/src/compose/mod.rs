@@ -194,5 +194,117 @@ pub fn compose(raw: &[char], opts: &ComposeOpts) -> ComposeResult {
         transformed
     };
 
+    // Step 5 — validation-first English fallback.
+    //
+    // When a tone or transform key was consumed but the composed result is NOT a
+    // plausible Vietnamese syllable, the user is typing an English/non-Vietnamese
+    // word whose r/s/f/j/x/w keys were mis-applied as marks (e.g. "water" → "wảte",
+    // "wonder" → "wỏnde", "window" → "windơ").  Revert to the literal keystrokes
+    // and latch English passthrough.
+    //
+    // The "a mark was consumed" guard is essential: base-only sequences are never
+    // reverted, so partial Telex states on the way to a valid word are safe —
+    // e.g. "vie" (no transform yet, before the "ee"→"ê" doubling) stays "vie"
+    // instead of being misread as English.
+    if opts.validator == Validator::Vietnamese
+        && (!seg.transforms.is_empty() || !seg.tones.is_empty())
+        && !could_be_vietnamese(&text)
+    {
+        // Leniency first (Unikey-style, not aggressive spell-check): before
+        // reverting the whole word to English, try stylistic elongation — keep a
+        // valid leading syllable and append a repeated tail literally
+        // ("veofoo" → "vèooo", not "veofoo").  Only the full English fallback
+        // remains for genuinely non-Vietnamese input ("water", "result").
+        if let Some(elong) = try_elongation_fallback(raw, opts) {
+            return elong;
+        }
+        let literal: String = raw.iter().collect();
+        return ComposeResult { text: literal, temp_english: true };
+    }
+
     ComposeResult { text, temp_english: false }
+}
+
+/// Stylistic elongation fallback: when the syllable is invalid, check whether it
+/// is a valid syllable followed by a run (≥2) of one repeated character — the
+/// way people lengthen words in chat/fiction ("vèoooo", "khôngggg", "trờiii").
+///
+/// Returns the valid syllable with the repeated tail appended literally, and
+/// latches English passthrough so further repeats also append.  Returns `None`
+/// for genuinely non-Vietnamese input (e.g. "result": the tail "t" does not
+/// repeat, and "resul" is not a valid syllable), which then takes the full
+/// English fallback.
+///
+/// The two guards together protect English words: the tail must REPEAT (English
+/// rarely ends in ≥2 identical letters after a valid Vietnamese prefix), and the
+/// prefix must itself be valid Vietnamese.
+fn try_elongation_fallback(raw: &[char], opts: &ComposeOpts) -> Option<ComposeResult> {
+    use crate::vowel::cluster::normalize_vowel;
+
+    let &last = raw.last()?;
+    let run = raw.iter().rev().take_while(|&&c| c == last).count();
+    let base_raw = &raw[..raw.len() - run];
+    if base_raw.is_empty() {
+        return None;
+    }
+    let base = compose(base_raw, opts);
+    if base.temp_english || !could_be_vietnamese(&base.text) {
+        return None;
+    }
+    // Elongation is recognised when EITHER the tail repeats ≥2 times, OR it is a
+    // single repeat of the base syllable's final vowel/letter (lengthening the
+    // last sound — "vèo"+"o").  The latter is essential because a single extra
+    // vowel makes the syllable invalid, and without it the first extra key would
+    // latch the full English fallback and the elongation could never grow.
+    // The "matches the final letter" test still rejects English tails like
+    // "feel" (base "fê" ends in 'ê', tail 'l' ≠ 'ê').
+    let lengthens_final = base
+        .text
+        .chars()
+        .last()
+        .is_some_and(|c| normalize_vowel(c) == last);
+    if run < 2 && !lengthens_final {
+        return None;
+    }
+    let suffix: String = std::iter::repeat(last).take(run).collect();
+    Some(ComposeResult {
+        text: format!("{}{}", base.text, suffix),
+        temp_english: true,
+    })
+}
+
+/// True when `text` is a valid Vietnamese syllable OR a valid in-progress prefix
+/// of one (an onset typed with the nucleus not yet reached, e.g. "đ", "ng",
+/// "ngh", "th").  Used to gate the English fallback so a mark applied to a real
+/// Vietnamese base is never reverted.
+///
+/// Stylistic elongation (`khôngggg`, `trờiii`, `ơiii`) is accepted: the validity
+/// check runs on the syllable with runs of repeated identical characters
+/// collapsed.  This is safe because no valid Vietnamese syllable has two
+/// identical adjacent letters in its final orthographic form — the diacritic
+/// carries the distinction (`ô`, not `oo`; `â`, not `aa`).  The displayed text
+/// keeps the elongation; only the validity decision sees the collapsed form.
+fn could_be_vietnamese(text: &str) -> bool {
+    use crate::pipeline::validation::SyllableStructure;
+    let collapsed = collapse_adjacent_repeats(text);
+    let s = SyllableStructure::parse(&collapsed);
+    if s.is_valid() {
+        return true;
+    }
+    // Consonant-only prefix: onset present, nucleus/coda not yet typed.
+    s.nucleus.is_empty() && s.coda.is_empty() && !s.onset.is_empty()
+}
+
+/// Collapse runs of consecutive identical characters down to one
+/// ("khôngggg" → "không", "trờiii" → "trời").
+fn collapse_adjacent_repeats(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev: Option<char> = None;
+    for c in s.chars() {
+        if Some(c) != prev {
+            out.push(c);
+            prev = Some(c);
+        }
+    }
+    out
 }

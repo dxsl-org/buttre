@@ -27,14 +27,13 @@ pub fn get_rules() -> HashMap<String, String> {
     rules.insert("ow".to_string(), "ơ".to_string());
     rules.insert("uw".to_string(), "ư".to_string());
 
-    // Standalone single-char transforms.
-    // 'w' alone (as first char of a syllable) maps to 'ư' — e.g. "win"→"ưin",
-    // "w" prefix before non-aw/ow/uw vowels.  This matches stage4 hardcoded
-    // behaviour ('w' → "ư") and is needed by the compose engine which only
-    // uses the rules table (no hardcoded stage4 fallback).
-    rules.insert("w".to_string(), "ư".to_string());
-    rules.insert("W".to_string(), "Ư".to_string());
-    
+    // NOTE: standalone 'w' → 'ư' is intentionally NOT registered.
+    // A leading bare 'w' would turn every English w-word ("won", "with",
+    // "will", "want", …) into "ư…".  In this Telex layout 'w' is only the
+    // modifier in aw/ow/uw, and 'ư' at the start of a word is typed as "uw"
+    // (uwng → ưng, uwu → ưu).  See segment.rs: a standalone alphabetic modifier
+    // is treated as a literal base char unless a compatible vowel precedes it.
+
     // Uppercase variants
     rules.insert("AA".to_string(), "Â".to_string());
     rules.insert("AW".to_string(), "Ă".to_string());

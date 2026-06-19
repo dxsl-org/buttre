@@ -336,11 +336,11 @@ ang	ang	VietnameseValid
 a8ng	ăng	VietnameseValid
 a6ng	âng	VietnameseValid
 eng	eng	VietnameseValid
-e6ng	êng	VietnameseValid
+e6ng	e6ng	VietnameseValid
 ing	ing	VietnameseValid
 ong	ong	VietnameseValid
 o6ng	ông	VietnameseValid
-o7ng	ơng	VietnameseValid
+o7ng	o7ng	VietnameseValid
 ung	ung	VietnameseValid
 u7ng	ưng	VietnameseValid
 anh	anh	VietnameseValid
@@ -367,7 +367,7 @@ e6c	êc	VietnameseValid
 ic	ic	VietnameseValid
 oc	oc	VietnameseValid
 o6c	ôc	VietnameseValid
-o7c	ơc	VietnameseValid
+o7c	o7c	VietnameseValid
 uc	uc	VietnameseValid
 u7c	ưc	VietnameseValid
 ap	ap	VietnameseValid
@@ -377,12 +377,12 @@ op	op	VietnameseValid
 o6p	ôp	VietnameseValid
 o7p	ơp	VietnameseValid
 up	up	VietnameseValid
-u7p	ưp	VietnameseValid
+u7p	u7p	VietnameseValid
 ach	ach	VietnameseValid
 e6ch	êch	VietnameseValid
 ich	ich	VietnameseValid
 och	och	VietnameseValid
-o6ch	ôch	VietnameseValid
+o6ch	o6ch	VietnameseValid
 ban	ban	VietnameseValid
 ban1	bán	VietnameseValid
 ban2	bàn	VietnameseValid
@@ -804,7 +804,7 @@ Vie6t5	Việt	VietnameseValid
 Viet	Viet	VietnameseValid
 D9ung1	Đúng	VietnameseValid
 D9u7o7ng2	Đường	VietnameseValid
-Ôto6	Ôtô	VietnameseValid
+Ôto6	Ôto6	VietnameseValid
 Ân	Ân	VietnameseValid
 NGu7o7i2	NGười	VietnameseValid
 Ngu7o7i2	Người	VietnameseValid
@@ -965,7 +965,7 @@ that	that	EnglishWord
 with	with	EnglishWord
 have	have	EnglishWord
 will	will	EnglishWord
-been	bene	EnglishWord
+been	been	EnglishWord
 some	some	EnglishWord
 what	what	EnglishWord
 when	when	EnglishWord

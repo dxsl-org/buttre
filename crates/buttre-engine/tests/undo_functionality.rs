@@ -81,26 +81,28 @@ fn test_undo_tone_application() {
 
 #[test]
 fn test_undo_complex_word() {
+    // Validation-first: "viet" (bare "ie" + coda "t") is NOT valid Vietnamese —
+    // the real word "việt" needs "ê" (typed "vieet").  A tone key cannot apply
+    // to a non-Vietnamese base, so the whole sequence is English passthrough.
     let config = create_telex_config();
     let executor3 = process_sequence(&config, "vietff");
-    assert_eq!(executor3.context().syllable_buffer, "vietf",
-               "'vietff' should undo tone to 'vietf'");
+    assert_eq!(executor3.context().syllable_buffer, "vietff",
+               "'vietff' is not Vietnamese (viet≠việt) → English passthrough");
     assert!(executor3.context().temp_english_mode);
 }
 
-// ── test_no_undo_different_key: behavior change under compose ─────────────────
+// ── test_no_undo_different_key: validation-first behavior ─────────────────────
 #[test]
 fn test_no_undo_different_key() {
-    // Under compose: raw [a,a,w] → aa transform → â; w applied to â:
-    //   normalize_vowel(â)=â, lookup "âw" → no rule → w appended literally.
-    //   Result: "âw" (no undo triggered since pattern is [aa]+[w], not [aa]+[a]).
-    // This differs from the old Stage 4 which tracked the pre-transform 'a'.
+    // "aaw" composes to "âw" (aa→â, then dangling w), which is NOT a valid
+    // Vietnamese syllable (â + dangling w).  Validation-first reverts it to the
+    // literal keystrokes and latches English passthrough.
     let config = create_telex_config();
     let executor = process_sequence(&config, "aaw");
-    assert_eq!(executor.context().syllable_buffer, "âw",
-               "compose: aaw → âw (w cannot apply to already-transformed â via rule lookup)");
-    assert!(!executor.context().temp_english_mode,
-            "temp_english_mode should NOT be set (no undo pattern)");
+    assert_eq!(executor.context().syllable_buffer, "aaw",
+               "aaw → âw is invalid Vietnamese → literal English passthrough");
+    assert!(executor.context().temp_english_mode,
+            "temp_english_mode latches on the invalid-syllable fallback");
 }
 
 #[test]

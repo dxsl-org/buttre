@@ -602,12 +602,20 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // Fallback to sync if queue not available
         }
         
-        // SYNC MODE: Process in callback
-        // Check if keyboard is loaded via KEYBOARD.is_some() (not a flag!)
-        // CRITICAL: Use try_write() with short timeout - NEVER block in hook callback!
-        
+        // SYNC MODE: Process in callback.
+        // Blocking, poison-tolerant write() — see the char path for the full
+        // rationale.  A dropped backspace here would let the SYSTEM delete a
+        // character while the engine buffer stayed unchanged (the exact desync
+        // the comment below warns about), so the lock must not be skipped.
         if let Some(keyboard) = KEYBOARD.get() {
-            let result = if let Ok(mut kb_opt) = keyboard.try_write() {
+            let result = {
+                let mut kb_opt = match keyboard.write() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        warn!("Keyboard RwLock poisoned — recovering");
+                        poisoned.into_inner()
+                    }
+                };
                 if let Some(ref mut kb) = *kb_opt {
                     // Keyboard loaded - handle backspace through engine
                     match kb.backspace() {
@@ -623,9 +631,6 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     // English mode - no keyboard, let system handle backspace
                     Action::DoNothing
                 }
-            } else {
-                // Lock busy - pass through to avoid blocking
-                Action::DoNothing
             };
             
             match result {
@@ -819,14 +824,30 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         // Fallback to sync if queue not available
     }
     
-    // SYNC MODE: Process in callback (original behavior)
-    // CRITICAL: Use try_write() - NEVER block in hook callback!
+    // SYNC MODE: Process in callback (original behavior).
+    //
+    // Lock acquisition is a BLOCKING, poison-tolerant write() — NOT try_write().
+    // try_write() silently dropped the keystroke on contention, but because the
+    // raw key is not blocked in that case (block_key stays false on DoNothing),
+    // the unprocessed character leaked to the screen while the engine buffer
+    // stayed behind.  That desynced last_output and corrupted the rest of the
+    // word under fast typing.  Every lock holder is µs-scale (kb.process / a
+    // config write on the pipe thread), so a brief block here is safe — this is
+    // the synchronous model mature IMEs (OpenKey, GoNhanh) rely on, and the OS
+    // LowLevelHooksTimeout remains the ultimate backstop.
     let result = if let Some(keyboard) = KEYBOARD.get() {
-        if let Ok(mut kb_opt) = keyboard.try_write() {
+        let mut kb_opt = match keyboard.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("Keyboard RwLock poisoned — recovering");
+                poisoned.into_inner()
+            }
+        };
+        {
             if let Some(ref mut kb) = *kb_opt {
                 // Mark as Vietnamese input for profiling
                 _timer.mark_vietnamese();
-                
+
                 match kb.process(ch) {
                     Ok(actions) => {
                         // Mark dirty - engine state changed (or at least processed input)
@@ -900,11 +921,6 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 // No keyboard loaded (English mode)
                 Action::DoNothing
             }
-        } else {
-            // Lock busy - skip this keystroke to avoid blocking
-            debug!("Keyboard lock busy, skipping keystroke");
-            HOOK_PROFILER.record_lock_busy();
-            Action::DoNothing
         }
     } else {
         Action::DoNothing

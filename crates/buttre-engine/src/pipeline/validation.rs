@@ -106,23 +106,64 @@ impl SyllableStructure {
         VALID_CODAS.contains(&self.coda.as_str())
     }
     
-    /// Check if onset-nucleus-coda combination is valid
+    /// Check if the onset-nucleus-coda combination is valid Vietnamese.
     ///
-    /// Some combinations are invalid in Vietnamese:
-    /// - "iê" + "p/c" → invalid (but "iê" + "t" is valid: việt, tiết)
+    /// ## Source
+    ///
+    /// Ported from Unikey `ukengine` `VCPairList` (the exhaustive vowel×coda
+    /// table) plus the `isValidCVC` onset exceptions.  Three layers:
+    ///
+    /// 1. **Open syllable** (empty coda) → always valid.
+    /// 2. **Onset exceptions** — an onset that rescues an otherwise-invalid VC:
+    ///    `qu` + `y` + `n`/`nh` (quýnh, quynh); `gi` + `e`/`ê` + `n`/`ng`
+    ///    (giếng — the `gi` onset absorbs the `i`).
+    /// 3. **Per-nucleus allowed-coda set** — every nucleus that can take a coda
+    ///    lists exactly which codas are legal; nuclei ending in a glide
+    ///    (`i`/`o`/`u`/`y`) or otherwise open-only fall through to `false`.
+    ///
+    /// This makes invalid forms like `ưin`, `ưan`, `ơc`, `oem` correctly invalid
+    /// while keeping `việt`, `tiếp`, `biếc`, `thường`, `quýnh`, `giếng` valid.
     fn is_valid_combination(&self) -> bool {
-        // Check invalid nucleus-coda combinations
-        match (self.nucleus.as_str(), self.coda.as_str()) {
-            // "iê" cannot have "p" or "c" codas (but "t" is ok: việt, tiết)
-            ("iê", "p" | "c") => false,
-            
-            // "uơ" and "ưu" only appear in open syllables (no coda)
-            ("uơ" | "ưu", coda) if !coda.is_empty() => false,
-            
-            // All other combinations are valid
-            // Note: "ươ" + "ng" is valid (thường, lường, etc.)
-            // "ương" is a different nucleus entirely
-            _ => true,
+        let (n, c) = (self.nucleus.as_str(), self.coda.as_str());
+
+        // Layer 1: open syllable is always structurally valid.
+        if c.is_empty() {
+            return true;
+        }
+
+        // Layer 2: onset-rescued exceptions (Unikey isValidCVC).
+        if self.onset == "qu" && n == "y" && matches!(c, "n" | "nh") {
+            return true;
+        }
+        if self.onset == "gi" && matches!(n, "e" | "ê") && matches!(c, "n" | "ng") {
+            return true;
+        }
+
+        // Layer 3: per-nucleus allowed coda set (Unikey VCPairList).
+        match n {
+            "a" => matches!(c, "c" | "ch" | "m" | "n" | "ng" | "nh" | "p" | "t"),
+            "ă" | "â" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            "e" => matches!(c, "c" | "ch" | "m" | "n" | "ng" | "nh" | "p" | "t"),
+            "ê" => matches!(c, "c" | "ch" | "m" | "n" | "nh" | "p" | "t"),
+            "i" => matches!(c, "c" | "ch" | "m" | "n" | "nh" | "p" | "t"),
+            "o" | "ô" | "oo" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            "ơ" => matches!(c, "m" | "n" | "p" | "t"),
+            "u" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            "ư" => matches!(c, "c" | "m" | "n" | "ng" | "t"),
+            "y" => c == "t",
+            "iê" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            "oa" => matches!(c, "c" | "ch" | "m" | "n" | "ng" | "nh" | "p" | "t"),
+            "oă" => matches!(c, "c" | "m" | "n" | "ng" | "t"),
+            "oe" => matches!(c, "n" | "t"),
+            "uâ" | "ua" => matches!(c, "n" | "ng" | "t"),
+            "uê" | "ue" => matches!(c, "c" | "ch" | "n" | "nh"),
+            "uô" | "uo" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            "ươ" | "ưo" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            "uy" => matches!(c, "c" | "ch" | "n" | "nh" | "p" | "t"),
+            "yê" | "ye" => matches!(c, "m" | "n" | "ng" | "p" | "t"),
+            "uyê" | "uye" => matches!(c, "n" | "t"),
+            // Every other nucleus is open-only; a non-empty coda makes it invalid.
+            _ => false,
         }
     }
 }
@@ -238,23 +279,25 @@ const VALID_ONSETS_3CHAR: &[&str] = &[
     "ngh", // nghệ, nghĩa
 ];
 
-/// Valid 2-character onsets
+/// Valid 2-character onsets.
+/// `dz` is non-standard but common in informal/stylized writing (dzô, dzậy, dzui).
 const VALID_ONSETS_2CHAR: &[&str] = &[
-    "ch", "gh", "gi", "kh", "ng", "nh", "ph", "qu", "th", "tr",
+    "ch", "gh", "gi", "kh", "ng", "nh", "ph", "qu", "th", "tr", "dz",
 ];
 
-/// Valid 1-character onsets
+/// Valid 1-character onsets.
+/// `z` is non-standard but common in informal writing (zô, zui, zậy).
 const VALID_ONSETS_1CHAR: &[&str] = &[
-    "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "x",
+    "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "x", "z",
 ];
 
 /// All valid onsets (including empty)
 const VALID_ONSETS: &[&str] = &[
     "", // Empty onset (vowel-initial)
     // 1-char
-    "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "x",
+    "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "x", "z",
     // 2-char
-    "ch", "gh", "gi", "kh", "ng", "nh", "ph", "qu", "th", "tr",
+    "ch", "gh", "gi", "kh", "ng", "nh", "ph", "qu", "th", "tr", "dz",
     // 3-char
     "ngh",
 ];
@@ -278,23 +321,34 @@ const VALID_CODAS: &[&str] = &[
     "ch", "ng", "nh",
 ];
 
-/// Valid vowel nuclei
+/// Valid vowel nuclei — written base forms (lowercase, tones removed).
+///
+/// ## Source
+///
+/// Ported from Unikey `ukengine` `VSeqList` (the exhaustive vowel-sequence
+/// table), cross-checked against Bamboo `vowelSeqs` and OpenKey `_vowelForMark`.
+/// Includes the loanword monophthong `oo` (boong/soong/xoong — present in
+/// Bamboo/OpenKey, absent from Unikey) and the diacritic-incomplete intermediate
+/// forms (`uo`, `ưo`, …) so partially-typed buffers are not rejected mid-compose.
 const VALID_NUCLEI: &[&str] = &[
-    // Single vowels
+    // Monophthongs
     "a", "ă", "â", "e", "ê", "i", "o", "ô", "ơ", "u", "ư", "y",
-    
-    // Diphthongs (2 vowels)
+    // Loanword monophthong
+    "oo",
+    // Diphthongs (2 letters)
     "ai", "ao", "au", "ay", "âu", "ây",
     "eo", "êu",
-    "ia", "iê", "iu",
+    "ia", "ie", "iê", "iu",
     "oa", "oă", "oe", "oi", "ôi", "ơi",
-    "ua", "uâ", "ue", "ui", "uo", "uy", "uô", "uơ", "ươ",
-    "ưa", "ưi", "ưu",
-    
-    // Triphthongs (3 vowels)
-    "iêu",
+    "ua", "uâ", "ue", "uê", "ui", "uo", "uô", "uơ", "uy",
+    "ưa", "ưi", "ưo", "ươ", "ưu",
+    "ye", "yê",
+    // Triphthongs (3 letters) — including diacritic-incomplete bare transients
+    // (ieu→iêu, uoi→uôi/ươi, yeu→yêu) so partial typing is not rejected.
+    "iêu", "ieu",
     "oai", "oao", "oay", "oeo",
-    "uao", "uây", "uôi", "ươi", "ươu",
-    "uyê",
+    "uao", "uây", "uôi", "uoi", "uou", "uơi", "uya", "uyê", "uyu",
+    "ươi", "ươu",
+    "yêu", "yeu",
 ];
 

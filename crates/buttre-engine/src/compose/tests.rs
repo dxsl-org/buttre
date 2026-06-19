@@ -173,10 +173,17 @@ fn telex_fin_stays_fin() {
 }
 
 #[test]
-fn telex_win_yields_uhorn_in() {
-    // 'w' is a standalone transform key (not a tone key), so it does not need
-    // the "vowel must precede" guard.  "win" → 'w' transforms to 'ư', yielding "ưin".
-    assert_eq!(compose(&raw("win"), &telex_opts()).text, "ưin");
+fn telex_win_stays_win() {
+    // Leading bare 'w' has no preceding a/o/u vowel to modify, so it is a literal
+    // consonant — English w-words type naturally ("win" → "win", not "ưin").
+    // 'ư' at word start is typed as "uw".
+    assert_eq!(compose(&raw("win"), &telex_opts()).text, "win");
+}
+
+#[test]
+fn telex_uw_still_yields_uhorn() {
+    // 'ư' at word start is reached via "uw" (the w modifies the preceding u).
+    assert_eq!(compose(&raw("uwng"), &telex_opts()).text, "ưng");
 }
 
 #[test]

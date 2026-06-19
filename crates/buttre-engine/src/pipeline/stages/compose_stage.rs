@@ -28,6 +28,12 @@ use crate::pipeline::config::PipelineConfig;
 use crate::pipeline::context::{CharInfo, CharInfoBufferExt};
 use crate::pipeline::{PipelineStage, StageResult, TypingContext};
 
+/// Maximum raw keystrokes a single Vietnamese syllable can occupy before the
+/// recompute path treats the buffer as run-on input and falls back to literal
+/// passthrough.  Set generously above the real maximum (~10: "nghieengf",
+/// "truwowngf", VNI "nghie6ng2") so it never clips a legitimate syllable.
+const MAX_VIET_SYLLABLE_RAW: usize = 16;
+
 /// Stage: Compose (replaces stages 4–8).
 ///
 /// Built once from `PipelineConfig`; holds the derived `ComposeOpts` for the
@@ -70,6 +76,36 @@ impl PipelineStage for ComposeStage {
         // ── Normal recompute path ─────────────────────────────────────────────
         // Extract lowercase raw keys from the char buffer Stage 1 populated.
         let raw: Vec<char> = ctx.char_buffer.to_char_vec(); // normalized (lowercase)
+
+        // ── Defensive syllable-length cap ─────────────────────────────────────
+        // A single Vietnamese syllable never exceeds ~10 raw keystrokes, even at
+        // its longest with tone + transform keys ("nghieengf", "truwowngf",
+        // VNI "nghie6ng2").  Past a generous cap the buffer is unavoidably run-on
+        // input — multiple syllables typed with no separator.  Recomputing the
+        // whole thing from raw on every keystroke is wasted O(n²) work, and it
+        // makes the entire long buffer a single desync unit (one leaked/dropped
+        // key corrupts all of it).  Switch to literal passthrough — the same path
+        // temp_english uses — to bound both the cost and the blast radius.
+        //
+        // Skipped in Nôm multi-keyword candidate mode, where a space-joined query
+        // ("thien thuong …") legitimately grows past the cap.
+        if !ctx.showing_candidates
+            && raw.len() > MAX_VIET_SYLLABLE_RAW
+            && !raw.iter().any(|c| c.is_whitespace())
+        {
+            if let Some(last) = ctx.char_buffer.last() {
+                let ch = if last.is_uppercase {
+                    last.ch.to_uppercase().next().unwrap_or(last.ch)
+                } else {
+                    last.ch
+                };
+                ctx.syllable_buffer.push(ch);
+            }
+            // Latch passthrough so the rest of the run-on word also appends
+            // literally until the next separator resets the engine.
+            ctx.temp_english_mode = true;
+            return StageResult::Continue;
+        }
 
         // Run the pure recompute engine.
         let result = compose(&raw, &self.opts);

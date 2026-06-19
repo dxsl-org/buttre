@@ -84,9 +84,11 @@ fn test_sequential_tone_undo_o333() {
 
 #[test]
 fn test_word_level_undo_viet5() {
-    // viet5 → việt, then viet55 → viet5 (undo)
+    // Validation-first: VNI "viet" (bare "ie" + coda "t") is NOT valid — the real
+    // word "việt" needs "ê" (e6: "viet65"/"vie65t").  The dot tone can't apply to
+    // a non-Vietnamese base, so "viet55" is English passthrough (both 5s literal).
     let result = process_sequence("viet55");
-    assert_eq!(result, "viet5", "Expected 'viet5' after tone undo, got '{}'", result);
+    assert_eq!(result, "viet55", "viet is not Vietnamese (≠việt) → English passthrough, got '{}'", result);
 }
 
 #[test]

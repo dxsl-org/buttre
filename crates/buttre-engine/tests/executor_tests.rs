@@ -1170,3 +1170,38 @@ fn test_multiple_tone_keys_after_fallback() {
                 executor.syllable(), executor.is_temp_english_mode());
     assert_eq!(executor.syllable(), "tissot", "After 't' should be 'tissot'");
 }
+
+// ── Defensive syllable-length cap (bounds O(n²) + desync blast radius) ────────
+
+#[test]
+fn test_syllable_length_cap_latches_passthrough() {
+    // A run-on buffer with no separator, no undo, no Vietnamese transform:
+    // 20 distinct letters. Past the 16-raw cap the engine must stop recomputing
+    // from raw and latch literal passthrough.
+    let config = create_telex_config();
+    let mut executor = PipelineExecutor::new(config);
+    for ch in "bcdfghklmnpqrtvzbcdf".chars() {
+        executor.process(ch);
+    }
+    assert!(
+        executor.is_temp_english_mode(),
+        "run-on buffer past the cap must latch literal passthrough"
+    );
+}
+
+#[test]
+fn test_long_valid_syllable_not_capped() {
+    // "nghieengf" (9 raw) → nghiềng. A legitimate long syllable must NOT trip
+    // the cap or be treated as run-on English.
+    let config = create_telex_config();
+    let mut executor = PipelineExecutor::new(config);
+    for ch in "nghieengf".chars() {
+        executor.process(ch);
+    }
+    assert!(
+        !executor.is_temp_english_mode(),
+        "a legitimate long syllable must not be capped: got '{}'",
+        executor.syllable()
+    );
+    assert_eq!(executor.syllable(), "nghiềng");
+}

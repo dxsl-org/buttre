@@ -378,14 +378,15 @@ fn test_valid_onset_nucleus_coda() {
 #[test]
 fn test_invalid_nucleus_coda_combination() {
     let stage = ValidationStage::new();
-    
-    // "iê" + "p" is invalid per Vietnamese phonology
-    assert!(!stage.is_valid_syllable("iêp"));
-    
-    // "iê" + "c" is also invalid
-    assert!(!stage.is_valid_syllable("iêc"));
-    
-    // But "iê" + "t" is valid
+
+    // "ưi" is open-only → "ưin" invalid (the constraint that fixes English "win").
+    assert!(!stage.is_valid_syllable("ưin"));
+    // "ơ" cannot take "c".
+    assert!(!stage.is_valid_syllable("ơc"));
+
+    // "iê" + "p"/"c"/"t" are ALL valid (tiếp/hiếp, biếc/tiếc, việt/tiết).
+    assert!(stage.is_valid_syllable("iêp"));
+    assert!(stage.is_valid_syllable("iêc"));
     assert!(stage.is_valid_syllable("iêt"));
     assert!(stage.is_valid_syllable("viêt"));
 }
@@ -469,9 +470,9 @@ fn test_strict_mode_blocks_invalid_combination() {
     let stage = ValidationStage::with_strict_mode(true);
     let mut ctx = TypingContext::new();
 
-    // Try to type "iêp" (invalid combination)
-    ctx.syllable_buffer = "iê".to_string();
-    assert_eq!(stage.process(&mut ctx, 'p'), StageResult::PassThrough);
+    // Try to type "ưin" (invalid: "ưi" is open-only and cannot take a coda).
+    ctx.syllable_buffer = "ưi".to_string();
+    assert_eq!(stage.process(&mut ctx, 'n'), StageResult::PassThrough);
 }
 
 #[test]

@@ -154,13 +154,20 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts) -> Segment {
         // ambiguous consonants and non-ambiguous-but-leading tone keys (e.g.
         // leading 'f' in "fan", leading 'j' in "jin").
         //
-        // Standalone transform keys (e.g. 'w') do NOT need this guard because
-        // they carry diacritic intent independently of vowel position
-        // (e.g. "win" → 'w' transforms the implicit nucleus, giving "ưin").
+        // An *alphabetic* standalone modifier (Telex 'w') acts as a transform
+        // ONLY when a compatible base vowel precedes it — i.e. some earlier base
+        // char `v` forms a 2-char rule `"{v}w"` (aw/ow/uw).  A leading bare 'w'
+        // (or 'w' after a consonant with no a/o/u) is a literal consonant, so
+        // English w-words ("won", "with", "will", "want") are typed naturally and
+        // 'ư' at word start is reached via "uw".  Non-alphabetic standalone keys
+        // (VNI digits 6–9) keep their unconditional behaviour.
 
-        if is_standalone_transform {
+        if is_standalone_transform && standalone_modifier_has_vowel(ch, &base, opts) {
             // Record base length at time of this mark so transform can pick the right vowel.
             transforms.push(TransformMark { key: ch, base_len_at_typing: base.chars().count() });
+        } else if is_standalone_transform {
+            // Alphabetic modifier with no compatible preceding vowel → literal.
+            base.push(ch);
         } else if is_tone_key_char {
             if !has_seen_vowel {
                 // No vowel yet — this tone key has no nucleus to act on; treat as literal.
@@ -259,6 +266,23 @@ fn coda_after_last_vowel_is_valid(base: &str, vowel: char) -> bool {
         tail.as_str(),
         "" | "c" | "m" | "n" | "p" | "t" | "ch" | "ng" | "nh"
     )
+}
+
+/// True when a standalone modifier key may act as a transform at this position.
+///
+/// Non-alphabetic keys (VNI digits) always may.  An alphabetic modifier (Telex
+/// 'w') may only when some earlier base char `v` forms a 2-char transform rule
+/// `"{v}{key}"` (i.e. aw/ow/uw) — otherwise a leading bare 'w' would wrongly
+/// become 'ư' and break English w-words.
+fn standalone_modifier_has_vowel(ch: char, base: &str, opts: &ComposeOpts) -> bool {
+    if !ch.is_alphabetic() {
+        return true;
+    }
+    let key = ch.to_ascii_lowercase();
+    base.chars().any(|c| {
+        opts.transform_rules
+            .contains_key(&format!("{}{}", c.to_ascii_lowercase(), key))
+    })
 }
 
 /// Count maximal runs of consecutive vowels in `s`.

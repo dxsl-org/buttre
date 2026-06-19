@@ -95,14 +95,34 @@ impl Keyboard {
         Ok(result)
     }
     
-    /// Process backspace
+    /// Process backspace.
+    ///
+    /// ## Why this resets the composition
+    ///
+    /// The engine is stateless recompute-from-raw and tracks ONLY the current
+    /// in-progress syllable (committed text on screen was never part of engine
+    /// state).  The previous implementation popped just this mirror buffer and
+    /// left the executor's `char_buffer` / `syllable_buffer` / `last_output`
+    /// untouched — so after one backspace the engine still believed the full
+    /// pre-backspace syllable was on screen.  The next keystroke then diffed
+    /// against that stale `last_output`, producing a backspace count that reached
+    /// back into the previous word and ate the separator ("một ngày" → delete +
+    /// type → words merged, space lost).
+    ///
+    /// A correct raw-key pop is ambiguous (one displayed grapheme can map to
+    /// several keys, e.g. "ư" ← "uw"), so we take the safe path: delete the one
+    /// displayed char and reset the composition.  Subsequent keystrokes start a
+    /// fresh syllable, which can never desync with the screen.  Returns
+    /// `DoNothing` when nothing is composing so the host handles the backspace.
     pub fn backspace(&mut self) -> anyhow::Result<Action> {
         if self.buffer.is_empty() {
             return Ok(Action::DoNothing);
         }
-        
-        self.buffer.pop();
-        
+
+        // Drop all in-progress composition state (mirror + executor context),
+        // then emit a single backspace to remove the last displayed char.
+        self.reset();
+
         Ok(Action::Replace {
             backspace_count: 1,
             text: String::new(),
