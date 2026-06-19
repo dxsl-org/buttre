@@ -118,57 +118,61 @@ pub fn check_fallback(raw: &[char], opts: &ComposeOpts) -> FallbackResult {
 /// Detect patterns like "as", "ass", "a11", "a111", …  and also the
 /// "same-tone repress after coda" pattern like "vie65t5".
 ///
-/// ## Contiguous-suffix pattern (a11, a611, u7o711)
+/// ## Contiguous-suffix pattern (a11, a611, u7o711, seess, fanss)
 ///
-/// The tone toggle works on the **suffix** of raw: the non-tone prefix (base
-/// + transforms) ends at the first tone key.  When the suffix has an even
-/// count of identical tone keys, undo fires: apply transforms to the base
-/// portion (without tone), then append `n/2` literal tone key chars.
+/// Counts the **trailing** identical tone keys at the END of raw (not from the
+/// first tone key occurrence).  This is critical for Telex words like "seess"
+/// or "fanss" where the same letter is both a leading consonant and a tone key:
+/// trailing_count("seess", 's') = 2, base_part = ['s','e','e'] → "sês".
+///
+/// When trailing_count is even → undo fires: apply transforms to base_part
+/// (no tone), then append `n/2` literal tone key chars.
 ///
 /// ## Same-tone repress after coda (vie65t5)
 ///
-/// When the last char is a tone key `tk` and the same key appeared earlier in
-/// raw (with non-tone chars in between), compose the raw-without-last-char to
-/// see if it produces a toned vowel with the same tone mark as `tk`.  If so,
-/// undo: strip the tone mark from the composed result and append literal `tk`.
+/// When trailing_count == 1 and the same tone key appeared earlier in raw
+/// (with non-tone chars in between), compose raw-without-last to see if it
+/// produced a vowel with the same tone mark.  If so, strip that tone and
+/// append the literal key.
 fn check_tone_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackResult> {
-    // ── Path 1: contiguous suffix of identical tone keys ──────────────────────
-    // Find the index of the first tone key in raw.
-    let first_tone_idx = raw.iter()
-        .position(|&c| opts.tone_map.contains_key(&c.to_ascii_lowercase()))?;
-
-    let base_part = &raw[..first_tone_idx];
-    let tone_part = &raw[first_tone_idx..];
-
-    if tone_part.len() >= 2 {
-        let tone_key = tone_part[0].to_ascii_lowercase();
-        if tone_part.iter().all(|&c| c.to_ascii_lowercase() == tone_key) {
-            let n = tone_part.len();
-            // Even count → undo.  Odd count >= 3 → compose handles (re-apply via normal path).
-            if n % 2 == 0 {
-                // Apply transforms to base_part (no tone) to preserve diacritics.
-                let transformed_base = apply_transforms_only(base_part, opts);
-                let suffix: String = std::iter::repeat(tone_key).take(n / 2).collect();
-                let text = format!("{transformed_base}{suffix}");
-                return Some(FallbackResult::handled(text, true));
-            }
-            // Odd n >= 3: let normal compose handle (it applies tone from last key, extras ignored).
-            return None;
-        }
-    }
-
-    // ── Path 2: same-tone repress after coda consonant(s) ────────────────────
-    // Pattern: last char is tone key `tk`, and the same key appeared earlier
-    // in raw (not as the very last adjacent key, i.e. there are non-tone-key
-    // chars between the first and last occurrence).
-    //
-    // Detection: compose raw[..-1] and check if it produced a tone == opts.tone_map[tk].
-    // If yes → undo: strip tone from that result, append literal tk.
     let last = *raw.last()?;
     let last_lc = last.to_ascii_lowercase();
+
+    // Only proceed if the last character is a tone key.
     if !opts.tone_map.contains_key(&last_lc) {
         return None;
     }
+
+    // ── Path 1: trailing contiguous run of identical tone keys ────────────────
+    // Count from the END, not from the first occurrence.  This correctly handles
+    // words like "seess" (Telex 's' is tone key *and* leading consonant) where
+    // the first-occurrence approach would find index 0 and fail to detect the
+    // trailing "ss" undo pair.
+    let trailing_count = raw.iter().rev()
+        .take_while(|&&c| c.to_ascii_lowercase() == last_lc)
+        .count();
+
+    if trailing_count >= 2 {
+        let n = trailing_count;
+        let base_part = &raw[..raw.len() - n];
+
+        if n % 2 == 0 {
+            // Even count → undo: apply transforms to base_part (no tone) to
+            // preserve diacritics, then append n/2 literal tone key chars.
+            let transformed_base = apply_transforms_only(base_part, opts);
+            let suffix: String = std::iter::repeat(last_lc).take(n / 2).collect();
+            let text = format!("{transformed_base}{suffix}");
+            return Some(FallbackResult::handled(text, true));
+        }
+        // Odd n >= 3: let normal compose handle (applies tone from last key).
+        return None;
+    }
+
+    // trailing_count == 1: fall through to Path 2.
+
+    // ── Path 2: same-tone repress after coda consonant(s) ────────────────────
+    // Pattern: last char is tone key `tk` and the same key appeared earlier in
+    // raw with non-tone chars in between (e.g. "vie65t5").
     let raw_without_last = &raw[..raw.len() - 1];
     if raw_without_last.is_empty() {
         return None;
@@ -181,27 +185,22 @@ fn check_tone_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackResult>
         return None;
     }
 
-    // The second-to-last character must NOT be the same tone key (to avoid
-    // re-triggering the contiguous-suffix path which already handled n=2).
+    // trailing_count == 1 already guarantees second_last != last_lc, but keep
+    // the check to make the invariant explicit and guard against future changes.
     let second_last = raw.get(raw.len() - 2).copied()?;
     if second_last.to_ascii_lowercase() == last_lc {
-        // This is already handled by the contiguous-suffix path above.
         return None;
     }
 
     // Compose raw-without-last to get the candidate toned syllable.
     let candidate = compose_base_and_transforms_with_tone(raw_without_last, opts)?;
 
-    // Check whether the candidate's last toned vowel carries the same tone mark.
     let expected_tone = *opts.tone_map.get(&last_lc)?;
     if expected_tone == ToneMark::None {
         return None;
     }
 
-    // Strip the tone from the candidate (walk each char, strip any that have
-    // the expected tone mark, stop at first match).
     let stripped = strip_tone_from_text(&candidate, expected_tone)?;
-
     let text = format!("{stripped}{last_lc}");
     Some(FallbackResult::handled(text, true))
 }
@@ -271,6 +270,10 @@ fn check_transform_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackRe
 ///
 /// Used by the tone-undo path to reconstruct the transformed base vowels
 /// (e.g. `[a, 6]` → `"â"`) before appending the literal tone key suffix.
+///
+/// Any tone keys that `segment()` collects from `raw` are intentionally
+/// discarded — when this function is called, the caller has already decided
+/// that all tone marks in `raw` should be stripped (the undo has fired).
 fn apply_transforms_only(raw: &[char], opts: &ComposeOpts) -> String {
     if raw.is_empty() {
         return String::new();
@@ -548,5 +551,57 @@ mod tests {
 
     fn telex_opts_with_oo() -> ComposeOpts {
         telex_opts_with_ee() // same config includes oo
+    }
+
+    // ── Regression guards: leading-consonant == tone-key (the trailing-run fix) ─
+    // Words where the same letter is both a leading consonant and a Telex tone key.
+    // The old first-occurrence algorithm found index 0 and failed to detect the
+    // trailing "ss"/"ff" undo pair.  These tests guard the trailing-count fix.
+
+    #[test]
+    fn telex_fanss_triggers_tone_undo() {
+        // "fans" typed with trailing "ss": 'f' is Telex Grave key *and* consonant.
+        // trailing run of 's' = 2, base_part = ['f','a','n'] → "fan", text = "fans".
+        let opts = telex_opts();
+        let raw: Vec<char> = "fanss".chars().collect();
+        let result = check_fallback(&raw, &opts);
+        assert!(result.is_handled, "fanss should trigger tone undo (trailing-run fix)");
+        assert_eq!(result.text, "fans", "fanss → fans + temp_english");
+        assert!(result.temp_english);
+    }
+
+    #[test]
+    fn telex_seess_triggers_tone_undo_with_ee_transform() {
+        // "see" (ee→ê transform) typed with trailing "ss": 's' is Telex Acute key *and* consonant.
+        // trailing run of 's' = 2, base_part = ['s','e','e'] → "sê" (ee transform applied), text = "sês".
+        let opts = telex_opts_with_ee();
+        let raw: Vec<char> = "seess".chars().collect();
+        let result = check_fallback(&raw, &opts);
+        assert!(result.is_handled, "seess should trigger tone undo (trailing-run fix)");
+        assert_eq!(result.text, "sês", "seess → sês + temp_english (ee transform preserved)");
+        assert!(result.temp_english);
+    }
+
+    #[test]
+    fn telex_sass_triggers_tone_undo() {
+        // Simple case: 's' as leading consonant, 'a' vowel, then "ss" undo pair.
+        let opts = telex_opts();
+        let raw: Vec<char> = "sass".chars().collect();
+        let result = check_fallback(&raw, &opts);
+        assert!(result.is_handled, "sass should trigger tone undo");
+        assert_eq!(result.text, "sas");
+        assert!(result.temp_english);
+    }
+
+    #[test]
+    fn telex_sinff_triggers_tone_undo() {
+        // "sin" + "ff" undo pair: 'f' before vowel stays literal, trailing "ff" undoes the tone.
+        // base_part = ['s','i','n'] → "sin", text = "sinf".
+        let opts = telex_opts();
+        let raw: Vec<char> = "sinff".chars().collect();
+        let result = check_fallback(&raw, &opts);
+        assert!(result.is_handled, "sinff should trigger tone undo (trailing-run fix)");
+        assert_eq!(result.text, "sinf", "sinff → sinf + temp_english");
+        assert!(result.temp_english);
     }
 }
