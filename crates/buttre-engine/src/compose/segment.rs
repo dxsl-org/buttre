@@ -6,8 +6,9 @@
 //!
 //! Port of `PermutationStage::extract_base_and_marks` (stage6, lines 111-196).
 //! Context-aware: r/s/x/j are only treated as tone keys **after** a vowel.
-//! Non-adjacent double-letter detection: "vietej" → 'e' appears twice → second
-//! 'e' becomes a transform mark.
+//! Adjacent double-letter detection: `aa`→`â`, `ee`→`ê`, `oo`→`ô`, `dd`→`đ`.
+//! A guard prevents false triggers in English words where the same vowel letter
+//! appears on both sides of a consonant (e.g. "fallbaack", "implemeent").
 //!
 //! ### `DirectMap` (Cham, Khmer, …)
 //!
@@ -69,8 +70,11 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts) -> Segment {
     let mut tones: Vec<char> = Vec::new();
     let mut has_seen_vowel = false;
 
-    // Pre-scan: count each potentially-doubling char (a/e/o/d) to detect
-    // non-adjacent double transforms (flexible typing: "vietej" → ee → ê).
+    // Pre-scan: count each potentially-doubling char (a/e/o/d).
+    // Non-adjacent flexible typing fires ONLY when count == 2 — meaning the
+    // raw buffer has exactly one base char + one transform mark intended.
+    // Three or more occurrences (e.g. "implemeent" has 3 'e') indicate an
+    // English word with accidental repeats, not a Vietnamese transform intent.
     let mut double_candidates: HashMap<char, usize> = HashMap::new();
     for &ch in raw {
         let lc = ch.to_ascii_lowercase();
@@ -89,20 +93,29 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts) -> Segment {
         }
 
         // ── Adjacent double-letter transform (Telex: aa/ee/oo/dd) ──────────
-        // Check against last base char; this handles the standard aa→â case.
+        // Fires when the current key equals the last base char and is in the
+        // doubling set.  A guard prevents false triggers in English words where
+        // the same vowel appears on both sides of a consonant boundary
+        // (e.g. "fallbaack": earlier 'a' at pos 1, consonants "llb" before the
+        // adjacent "aa"; "implemeent": earlier 'e' at pos 4, 'm' before "ee").
         if !base.is_empty() {
             let last_base_lc = base.chars().last().unwrap().to_ascii_lowercase();
             if last_base_lc == lc && matches!(lc, 'a' | 'e' | 'o' | 'd') {
-                // base_len is the char count at time of this mark (base already has the first char).
-                transforms.push(TransformMark { key: ch, base_len_at_typing: base.chars().count() });
-                continue;
+                if !has_earlier_vowel_with_consonants(&base, lc) {
+                    transforms.push(TransformMark { key: ch, base_len_at_typing: base.chars().count() });
+                    continue;
+                }
+                // Guard fired — same vowel already exists with consonants between;
+                // fall through to treat this key as a literal base character.
             }
         }
 
-        // ── Non-adjacent double (flexible typing: "vietej") ────────────────
+        // ── Non-adjacent double (flexible typing: "vietej" → "việt") ───────
+        // Fires when count == 2 AND the char is already in the base.
+        // count > 2 disables non-adjacent to avoid English false positives.
         if matches!(lc, 'a' | 'e' | 'o' | 'd') {
             let count = double_candidates.get(&lc).copied().unwrap_or(0);
-            if count >= 2 && *vowel_in_base.get(&lc).unwrap_or(&false) {
+            if count == 2 && *vowel_in_base.get(&lc).unwrap_or(&false) {
                 transforms.push(TransformMark { key: ch, base_len_at_typing: base.chars().count() });
                 continue;
             }
@@ -193,6 +206,28 @@ fn segment_direct_map(raw: &[char], opts: &ComposeOpts) -> Segment {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Returns `true` when `base` already contains an earlier occurrence of `vowel`
+/// that is separated from the last character of `base` by at least one consonant.
+///
+/// This guards the adjacent-double transform against English words like
+/// "fallbaack" (earlier 'a' at pos 1, consonants "llb" before the adjacent "aa")
+/// or "implemeent" (earlier 'e' at pos 4, consonant 'm' before the adjacent "ee").
+fn has_earlier_vowel_with_consonants(base: &str, vowel: char) -> bool {
+    let chars: Vec<char> = base.chars().collect();
+    let last_idx = match chars.len().checked_sub(1) {
+        Some(i) => i,
+        None => return false,
+    };
+    // For each earlier position with the same vowel, check if there is a
+    // consonant between that position and the last position.
+    chars[..last_idx].iter().enumerate().any(|(i, &c)| {
+        c.to_ascii_lowercase() == vowel
+            && chars[i + 1..last_idx]
+                .iter()
+                .any(|&x| !is_vowel(x.to_ascii_lowercase()))
+    })
+}
 
 /// A key is a *standalone* transform key when it:
 /// 1. Is NOT a tone key, AND
@@ -334,6 +369,48 @@ mod tests {
         assert_eq!(seg.base, "o");
         assert_eq!(transform_keys(&seg), vec!['w']);
         assert!(seg.tones.is_empty());
+    }
+
+    // ── English fallback guard (vowel-consonant-vowel boundary) ──────────────
+
+    #[test]
+    fn fallbaack_no_transform() {
+        // "fallbaack": 'aa' at positions 5-6, but earlier 'a' at pos 1 with
+        // consonants "llb" between — guard must prevent transform.
+        let opts = telex_opts();
+        let raw: Vec<char> = "fallbaack".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert!(seg.transforms.is_empty(), "guard must block transform in 'fallbaack': {:?}", seg.transforms);
+        assert_eq!(seg.base, "fallbaack");
+    }
+
+    #[test]
+    fn implemeent_no_transform() {
+        // "implemeent": 'ee' at positions 7-8, but earlier 'e' at pos 4 with
+        // consonant 'm' between — guard must prevent transform.
+        let opts = telex_opts();
+        let raw: Vec<char> = "implemeent".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert!(seg.transforms.is_empty(), "guard must block transform in 'implemeent': {:?}", seg.transforms);
+        assert_eq!(seg.base, "implemeent");
+    }
+
+    #[test]
+    fn viet_ee_transform_fires() {
+        // "vieetj": 'ee' adjacent with NO earlier 'e' before it → must fire.
+        let opts = telex_opts();
+        let raw: Vec<char> = "vieet".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert_eq!(transform_keys(&seg), vec!['e'], "ee transform must fire in 'vieet'");
+    }
+
+    #[test]
+    fn baan_aa_transform_fires() {
+        // "baan": no earlier 'a' before the adjacent pair → must fire.
+        let opts = telex_opts();
+        let raw: Vec<char> = "baan".chars().collect();
+        let seg = segment(&raw, &opts);
+        assert_eq!(transform_keys(&seg), vec!['a'], "aa transform must fire in 'baan'");
     }
 
     #[test]
