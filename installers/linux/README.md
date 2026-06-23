@@ -11,9 +11,7 @@
 ### Automated Build (Recommended)
 
 ```bash
-cd installers/linux
-chmod +x build_packages.sh
-./build_packages.sh
+bash installers/linux/build_packages.sh
 ```
 
 This will create both:
@@ -53,9 +51,10 @@ Output: `target/generate-rpm/buttre-<version>.x86_64.rpm`
 ### Debian/Ubuntu
 
 ```bash
-sudo dpkg -i buttre_<version>_amd64.deb
-sudo apt-get install -f  # Fix dependencies if needed
+sudo apt install ./buttre_<version>_amd64.deb
 ```
+
+Note: The "./" is required for `apt` to distinguish file path and package name.
 
 ### Fedora/RHEL/CentOS
 
@@ -85,6 +84,8 @@ killall ibus-daemon
 ibus-daemon -drx &
 ```
 
+TODO: Manual installation should use `/usr/local/bin/` and `/usr/local/share/` instead of `/usr/bin/` and `/usr/share/`, as the latter paths are reserved for system package managers.
+
 ## Post-Installation
 
 ### 1. Restart IBus
@@ -97,7 +98,8 @@ ibus-daemon -drx &
 ### 2. Add Input Method
 
 **GNOME/Ubuntu:**
-1. Open Settings → Region & Language
+1. Open "Language Supports" app, then set "Keyboard input method system" to "ibus".
+1. Open "Settings" app → Keyboard
 2. Click "+" under Input Sources
 3. Select "Vietnamese → buttre"
 
@@ -107,6 +109,9 @@ ibus-daemon -drx &
 3. Select "Vietnamese → buttre"
 
 **Command Line:**
+
+Not recommended if you are using GNOME.
+
 ```bash
 ibus-setup
 # Then click "Add" → "Vietnamese" → "buttre"
@@ -183,16 +188,6 @@ sudo dnf remove buttre
 ```
 
 ## Distribution
-
-### Upload to PPA (Ubuntu)
-
-```bash
-# Sign package
-debsign buttre_<version>_amd64.deb
-
-# Upload to Launchpad PPA
-dput ppa:your-ppa buttre_<version>_source.changes
-```
 
 ### Upload to COPR (Fedora)
 
