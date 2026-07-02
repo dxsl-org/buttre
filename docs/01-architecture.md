@@ -254,6 +254,9 @@ Phím Đầu Vào
 │  2. segment — base + transforms + tones   │
 │  3. transform — áp dụng dấu phụ (gated)  │
 │  4. assemble — đặt tone lên nucleus       │
+│  5. attestation gate — non-adjacent marks  │
+│     phải match attested syllables          │
+│  6. English fallback — nếu không phải VN  │
 │ Ghi syllable_buffer; đặt temp_english     │
 └────────────────┬───────────────────────────┘
                  ↓
@@ -282,6 +285,24 @@ Phím Đầu Vào
                  ↓
                 Action Đầu Ra
 ```
+
+### Giai Đoạn 3: Compose — Recompute-From-Raw Engine
+
+**Mô đun**: `crates/buttre-engine/src/compose/`
+
+Giai đoạn này là **lõi xử lý của buttre**. Khác với các pipeline tinh chỉnh từng bước, compose **tái tính toán toàn bộ âm tiết từ raw key buffer** trên mỗi phím bấm:
+
+- **Quy trình**: Segment → Transform (validation-gated) → Assemble → **Attestation Gate** → English Fallback
+- **Attestation Gate**: Non-adjacent marks (delayed diacritics like Telex 'viete' → 'việt') chỉ được chấp nhận nếu âm tiết cuối cùng là một **từ tiếng Việt có thực** trong bảng attested-syllables. Điều này sửa lỗi `"data"` → `"dât"` (falsepositive) mà không ảnh hưởng đến gõ adjacent/thông thường.
+
+**Bảng Attested Syllables**:
+- **Nguồn**: ibus-bamboo vietnamese.cm.dict (GPLv3); 7,642 âm tiết sau khi lọc vowel-less/k-coda
+- **Format**: Bitset (~13 KB) tối ưu `(onset_id, nucleus_id, coda_id, tone_id)`
+- **File**: `crates/buttre-engine/src/pipeline/attested_data.rs` (generated)
+- **Tạo lại**: `cargo run -p buttre-engine --example gen_attested_syllables`
+- **Accessors**: `validation::is_attested(text)` (exact tone) + `validation::is_shape_attested(text)` (any tone)
+
+**Trade-off**: Delayed-mark Telex (không tone) không hiển thị dấu live — thay vào đó dấu xuất hiện sau khi gõ tone key. Ví dụ: `viete` → `viete` (literal) + `j` (tone sắc) → `việt`. Đây là cách duy nhất để chặn `data→dât` mà không mở lại lỗi trong VNI/VIQR.
 
 ### Kết Quả Giai Đoạn
 
