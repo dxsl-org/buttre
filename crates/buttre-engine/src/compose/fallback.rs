@@ -58,13 +58,75 @@
 //! After an undo resolves to a literal key sequence with no valid Vietnamese
 //! transforms remaining, `temp_english = true` signals the executor to pass
 //! subsequent input through (Phase 4 only — this module just sets the flag).
+//!
+//! ### Non-adjacent transform undo (Phase 4)
+//!
+//! Extends the retype-to-undo reflex to NON-ADJACENT marks (see
+//! `segment::TransformMark::non_adjacent`) — the escape hatch for an accepted
+//! attested collision (`"cana"` → `"cân"`; retype `a` → literal `"cana"`,
+//! English latched). Unlike the adjacent toggles above, a non-adjacent mark's
+//! trigger key is not necessarily the syllable's last RAW character at the
+//! moment it fires (`"dodong"`'s đ fires on the 3rd raw char, well before the
+//! word ends) — so "retype to undo" only makes sense as an IMMEDIATE reflex:
+//! the very next keystroke after the firing one. `check_nonadjacent_transform_toggle`
+//! enforces this precisely (see its doc).
+//!
+//! ## Ordering contract
+//!
+//! Runs strictly AFTER `check_tone_toggle` and `check_transform_toggle` in
+//! `check_fallback` below. Adjacent toggles keep priority: `"aaa"` → `"aa"`
+//! must always resolve via `check_transform_toggle`'s tail-triple match and
+//! must never reach this check (verified by a regression test — adjacent
+//! toggle claims `"aaa"`/`"canaa"`-shaped tails before this function ever
+//! runs). This check runs BEFORE `segment`/`transform`/`assemble` — it is
+//! step 1 of `compose_internal`, same as the other two toggles.
+//!
+//! ## Equivalence note (red-team AD-minor)
+//!
+//! On undo, the output is the LITERAL prefix raw keys, always — never a
+//! recomposed form. Unlike `check_transform_toggle` above (which calls
+//! `apply_transforms_only` to PRESERVE any earlier, unrelated completed
+//! transform in the prefix — e.g. `"ddaaa"` → `"đaa"`, not `"ddaa"`), this
+//! check does NOT recompose the prefix when reverting: an earlier, unrelated
+//! transform that had already fired within the SAME prefix would also revert
+//! to its literal keys for this one keystroke, rather than surviving in
+//! composed form.
+//!
+//! This simplification is safe ONLY because `compose()` is a pure, stateless
+//! recompute: the very next keystroke reprocesses the ENTIRE buffer from
+//! scratch, so an independent earlier transform re-fires exactly as it would
+//! typing from a cold start — there is no stale state for it to have been
+//! lost FROM. It also is not a new class of transient loss this check
+//! introduces: `compose_internal`'s own step 6 (English fallback,
+//! `could_be_vietnamese`) already reverts an ENTIRE word — including any
+//! earlier adjacent transforms — to literal `raw.iter().collect()` whenever
+//! the whole composed result fails to look Vietnamese, on exactly the same
+//! "self-heals next keystroke" assumption. `"dodongd"`-shaped inputs (an
+//! earlier non-adjacent mark, followed later by an unrelated retype) do NOT
+//! actually reach this code path in practice — the immediacy contract
+//! (below) requires the retyped key to equal the raw key immediately
+//! preceding it, which is never true once other keys have been typed in
+//! between (that shape is exactly what `"vieteje"`'s "must NOT undo" case
+//! demonstrates) — so this note documents the underlying design principle
+//! for the general case, not a claim that `"dodongd"` itself exercises it.
 
 use super::ComposeOpts;
 use super::assemble;
 use super::segment;
+use super::segment::AppliedMark;
 use super::transform;
 use crate::tone;
 use crate::pipeline::config::ToneMark;
+
+// Test-only instrumentation (red-team M4, perf): counts how many times
+// `recompute_prefix_marks` actually ran segment+transform on a prefix. Used
+// to PROVE the non-vacuous pre-filter in `check_nonadjacent_transform_toggle`
+// skips the prefix compose entirely for non-matching keystrokes, rather than
+// merely returning the right answer after doing the work anyway.
+#[cfg(test)]
+thread_local! {
+    static PREFIX_COMPOSE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // ── Output ────────────────────────────────────────────────────────────────────
 
@@ -117,6 +179,13 @@ pub fn check_fallback(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
 
     // Check transform toggle (e.g. "aaa", "aww", "awww").
     if let Some(result) = check_transform_toggle(raw, opts, allow_nonadjacent) {
+        return result;
+    }
+
+    // Check non-adjacent transform undo (e.g. "cana"+"a" → "cana" literal).
+    // Must run LAST: adjacent toggles above always keep priority (ordering
+    // contract, module doc).
+    if let Some(result) = check_nonadjacent_transform_toggle(raw, opts, allow_nonadjacent) {
         return result;
     }
 
@@ -272,6 +341,150 @@ fn check_transform_toggle(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: b
     }
 
     None
+}
+
+// ── Non-adjacent transform undo ────────────────────────────────────────────────
+
+/// Detect the non-adjacent-mark undo reflex: retyping the trigger key of a
+/// just-fired non-adjacent transform reverts it to literal keystrokes and
+/// latches English passthrough.
+///
+/// ## Non-vacuous pre-filter (red-team M4, perf)
+///
+/// Before ever composing anything, two O(1)-on-`raw` checks must BOTH hold:
+/// (a) the new key `K` repeats the raw key immediately before it, and
+/// (b) that repeated key can ever trigger a transform at all (config-driven —
+/// see [`is_transform_trigger_char`]). A non-matching keystroke — the
+/// overwhelming majority typed — returns `None` right here, before
+/// [`recompute_prefix_marks`] runs. `nonadjacent_undo_prefilter_skips_*`
+/// below prove this with call-count instrumentation, not just the right
+/// answer.
+///
+/// ## Immediacy contract (red-team M3)
+///
+/// Undo fires iff there is a mark in the prefix's OWN applied-marks report
+/// (P2's [`AppliedMark`]) with `non_adjacent == true`, whose `raw_pos` is the
+/// LAST index of the prefix (the fired mark's trigger WAS the prefix's final
+/// keystroke), and whose `key` matches `K` case-insensitively. This is what
+/// the pre-filter's condition (a) already establishes at the character level
+/// — the deeper check additionally confirms the mark that fired there is the
+/// one being retyped, not merely that some other mark fired earlier in the
+/// word. `"vieteje"`: prefix `"vietej"`'s last raw key is tone `'j'`, not the
+/// `'e'` mark (fired at position 4) — pre-filter condition (a) already fails
+/// (`K='e' != prefix-last='j'`), so no prefix compose is attempted and no
+/// undo fires.
+///
+/// ## Gate interaction (`"dataa"` — no double-strip)
+///
+/// The prefix is recomposed via [`recompute_prefix_marks`], which runs the
+/// SAME attestation gate as the main pipeline. If the prefix's own
+/// non-adjacent mark fails attestation (`"data"`'s `'a'` → unattested
+/// `"dât"`), the gate demotes it to literal WITHIN the prefix recompute —
+/// the report comes back with `applied_marks` empty, no eligible mark is
+/// found, and this function no-ops (`None`). The main `compose_internal`
+/// path then handles the FULL raw (`"dataa"`) on its own terms — no double
+/// strip, because this function never touched the output.
+///
+/// ## Recursion bound
+///
+/// Only ever attempted from a genuine top-level call — identical guard to
+/// `try_elongation_fallback` in `compose::mod`. A demoted recompute
+/// (`allow_nonadjacent == false`) is already resolving a DIFFERENT gate
+/// failure for this same raw buffer; re-entering here would double-process
+/// the same keystroke. [`recompute_prefix_marks`] deliberately bypasses
+/// `check_fallback` entirely (same pattern as `apply_transforms_only`), so
+/// composing the prefix can NEVER re-enter this function — total additional
+/// depth from the gate-demote inside it is bounded at 1, exactly like every
+/// other re-entry point threaded on `allow_nonadjacent`.
+fn check_nonadjacent_transform_toggle(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> Option<FallbackResult> {
+    if !allow_nonadjacent {
+        return None;
+    }
+
+    let k_lc = nonadjacent_undo_candidate(raw, opts)?;
+
+    let prefix = &raw[..raw.len() - 1];
+    let (_, applied) = recompute_prefix_marks(prefix, opts, true);
+    let prefix_last_idx = prefix.len() - 1;
+    let fired_here = applied.iter().any(|m| {
+        m.non_adjacent && m.raw_pos == prefix_last_idx && m.key.to_ascii_lowercase() == k_lc
+    });
+    if !fired_here {
+        return None;
+    }
+
+    // K is consumed (not appended): the literal is exactly the prefix's raw
+    // keystrokes, never the prefix's composed/transformed text (equivalence
+    // note, module doc).
+    let literal: String = prefix.iter().collect();
+    Some(FallbackResult::handled(literal, true))
+}
+
+/// The non-vacuous pre-filter's two O(1) checks (module doc, red-team M4).
+/// Returns the lowercased candidate key when BOTH hold, else `None` without
+/// touching `opts.transform_rules` more than once.
+fn nonadjacent_undo_candidate(raw: &[char], opts: &ComposeOpts) -> Option<char> {
+    let n = raw.len();
+    if n < 2 {
+        return None;
+    }
+    let k_lc = raw[n - 1].to_ascii_lowercase();
+    if raw[n - 2].to_ascii_lowercase() != k_lc {
+        return None;
+    }
+    if !is_transform_trigger_char(k_lc, opts) {
+        return None;
+    }
+    Some(k_lc)
+}
+
+/// True when `key_lc` (already lowercased) can EVER trigger a transform: it
+/// is the trigger — the second character of a 2-char rule, or the sole
+/// character of a 1-char rule — of some entry in `opts.transform_rules`.
+/// Config-driven: covers Telex doubling letters (a/e/o/d, via `"aa"`/`"dd"`/…),
+/// Telex `'w'` (via `"aw"`/`"ow"`/`"uw"`/standalone `"w"`), and VNI digits (via
+/// `"a6"`/`"o7"`/…) uniformly, with no hardcoded key set.
+fn is_transform_trigger_char(key_lc: char, opts: &ComposeOpts) -> bool {
+    opts.transform_rules.keys().any(|rule| {
+        rule.chars().last().is_some_and(|c| c.to_ascii_lowercase() == key_lc)
+    })
+}
+
+/// Recompute `raw` through segment + transform + tone + the attestation gate
+/// — the same steps `compose::mod::compose_internal` runs at its steps 2-5 —
+/// WITHOUT step 1 (`check_fallback`) or step 6 (English-fallback).
+///
+/// Skipping step 1 is what bounds recursion: this is the dedicated
+/// fallback-bypass helper (same pattern as `apply_transforms_only` /
+/// `compose_base_and_transforms_with_tone` above), so composing a prefix here
+/// can never re-enter [`check_nonadjacent_transform_toggle`] a second time.
+///
+/// Skipping step 6 (`could_be_vietnamese` English-fallback) is safe: any mark
+/// that survives the attestation gate below already implies
+/// `could_be_vietnamese(text)` would also hold — `is_attested`/
+/// `is_shape_attested` both imply structural validity — so step 6 could never
+/// additionally revert a mark this function reports as fired.
+fn recompute_prefix_marks(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> (String, Vec<AppliedMark>) {
+    #[cfg(test)]
+    PREFIX_COMPOSE_CALLS.with(|c| c.set(c.get() + 1));
+
+    if raw.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let seg = segment::segment(raw, opts, allow_nonadjacent);
+    let (transformed, applied) = transform::apply_transforms(&seg.base, &seg.transforms, opts);
+    let text = if let Some(&last_tone_key) = seg.tones.last() {
+        assemble::apply_tone(&transformed, last_tone_key, opts).unwrap_or(transformed)
+    } else {
+        transformed
+    };
+    if allow_nonadjacent
+        && opts.attest_non_adjacent
+        && !super::passes_attestation_gate(&text, &applied)
+    {
+        return recompute_prefix_marks(raw, opts, false);
+    }
+    (text, applied)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -635,5 +848,132 @@ mod tests {
         assert!(result.is_handled, "sinff should trigger tone undo (trailing-run fix)");
         assert_eq!(result.text, "sinf", "sinff → sinf + temp_english");
         assert!(result.temp_english);
+    }
+
+    // ── Phase 4: non-adjacent transform undo ──────────────────────────────────
+    // See the module-level deviation note in `compose::tests` for why "can6"
+    // (not the matrix's "cana7") and "dand" (not "dodongd") are used here —
+    // both verified empirically against this build's actual rule tables.
+
+    #[test]
+    fn nonadjacent_undo_cana_a_fires() {
+        // Pre-condition: "cana" is an attested collision (verified in
+        // compose::tests::medium_cana_collision_canal_self_heals: "cana"->"cân").
+        let opts = telex_opts();
+        let raw: Vec<char> = "canaa".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled, "canaa should undo the non-adjacent â mark");
+        assert_eq!(result.text, "cana");
+        assert!(result.temp_english);
+    }
+
+    #[test]
+    fn nonadjacent_undo_uppercase_trigger_fires() {
+        let opts = telex_opts();
+        let raw: Vec<char> = "canaA".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled, "uppercase retype of the trigger must still undo");
+        assert_eq!(result.text, "cana");
+    }
+
+    #[test]
+    fn nonadjacent_undo_dand_d_consonant_class_fires() {
+        // đ analogue of "cana"+"a": "dand" fires đ on ITS OWN final raw key
+        // (base_ends_with_coda("dan")), so retyping 'd' right after satisfies
+        // immediacy. Composes to attested "đan" (to knit/weave).
+        let opts = telex_opts();
+        let raw: Vec<char> = "dandd".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled, "dandd should undo the non-adjacent đ mark");
+        assert_eq!(result.text, "dand");
+        assert!(result.temp_english);
+    }
+
+    #[test]
+    fn nonadjacent_undo_vni_digit_parity_fires() {
+        // Method parity (S8): VNI digit-triggered equivalent of "cana"+"a".
+        let opts = vni_opts();
+        let raw: Vec<char> = "can66".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled, "VNI digit retype must undo exactly like Telex");
+        assert_eq!(result.text, "can6");
+        assert!(result.temp_english);
+    }
+
+    #[test]
+    fn nonadjacent_undo_dataa_no_ops_no_double_strip() {
+        // "data"'s own 'a' mark is already gate-demoted at the top level
+        // (see compose::tests::critical_data_stays_literal). The prefix
+        // recompute inside the undo check independently re-derives the same
+        // demotion (fresh count-of-'a' == 2 there, but "dât" fails
+        // attestation), finds zero eligible marks, and no-ops — this whole
+        // check must return `not_handled` so compose_internal's normal path
+        // (not this check) decides the final literal text, dropping no keys.
+        let opts = telex_opts();
+        let raw: Vec<char> = "dataa".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(!result.is_handled, "dataa's prefix mark was already demoted — no-op, no double-strip");
+    }
+
+    #[test]
+    fn nonadjacent_undo_vieteje_immediacy_violated() {
+        // "vietej" fires the 'e' mark at raw index 4, but "vieteje"'s prefix
+        // ("vietej") ends in tone key 'j' (index 5) — the pre-filter's
+        // same-key-repeat condition already fails (K='e' != prefix-last='j'),
+        // so no undo may fire.
+        let opts = telex_opts();
+        let raw: Vec<char> = "vieteje".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(!result.is_handled, "vieteje must not undo: immediacy violated");
+    }
+
+    #[test]
+    fn nonadjacent_undo_aaa_adjacent_toggle_claims_tail_first() {
+        // Ordering contract: a crafted input where the LAST THREE raw chars
+        // form an adjacent undo triple ("aaa") must be claimed by
+        // `check_transform_toggle` before this check ever runs, even when a
+        // non-adjacent mark exists earlier in the same word ("cana"'s â).
+        let opts = telex_opts();
+        let raw: Vec<char> = "canaaa".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled);
+        assert_eq!(result.text, "canaa",
+            "adjacent toggle must claim the trailing 'aaa' triple; must not be 'cana' (non-adjacent undo's answer)");
+    }
+
+    // ── Non-vacuous pre-filter (red-team M4, perf) ────────────────────────────
+    // Prove — via call-count instrumentation, not just the returned answer —
+    // that a non-matching keystroke performs ZERO prefix composes.
+
+    #[test]
+    fn nonadjacent_undo_prefilter_skips_compose_for_non_repeat_key() {
+        let opts = telex_opts();
+        PREFIX_COMPOSE_CALLS.with(|c| c.set(0));
+        let raw: Vec<char> = "canan".chars().collect(); // 'n' does not repeat 'a'
+        let _ = check_fallback(&raw, &opts, true);
+        assert_eq!(PREFIX_COMPOSE_CALLS.with(|c| c.get()), 0,
+            "a non-repeating final key must never trigger a prefix compose");
+    }
+
+    #[test]
+    fn nonadjacent_undo_prefilter_skips_compose_for_non_trigger_repeat() {
+        let opts = telex_opts();
+        PREFIX_COMPOSE_CALLS.with(|c| c.set(0));
+        let raw: Vec<char> = "cannn".chars().collect(); // 'n' repeats but can never trigger a transform
+        let _ = check_fallback(&raw, &opts, true);
+        assert_eq!(PREFIX_COMPOSE_CALLS.with(|c| c.get()), 0,
+            "repeating a non-transform-capable key must never trigger a prefix compose");
+    }
+
+    #[test]
+    fn nonadjacent_undo_prefilter_allows_compose_for_matching_key() {
+        // Sanity check for the instrumentation itself: a genuinely eligible
+        // retype DOES perform (at least) one prefix compose.
+        let opts = telex_opts();
+        PREFIX_COMPOSE_CALLS.with(|c| c.set(0));
+        let raw: Vec<char> = "canaa".chars().collect();
+        let _ = check_fallback(&raw, &opts, true);
+        assert!(PREFIX_COMPOSE_CALLS.with(|c| c.get()) > 0,
+            "an eligible retype must perform at least one prefix compose");
     }
 }

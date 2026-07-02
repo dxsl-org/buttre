@@ -459,3 +459,157 @@ fn demote_pass_cannot_recurse_twice() {
     // Must not panic/loop; result must be a plain literal (no stray marks).
     assert!(!r.text.contains(['â', 'ê', 'đ']), "demoted output must carry no leftover diacritics: {}", r.text);
 }
+
+// ── Phase 4: non-adjacent transform undo ─────────────────────────────────────
+// Test Scenario Matrix from phase-04-nonadjacent-undo.md.
+//
+// Deviations from the matrix's literal example strings (verified empirically
+// against this build, same spirit as the phase's own "verify cana->cân first"
+// instruction):
+//
+// - VNI parity row: the matrix's "cana7"+"7" does not exercise any transform
+//   at all — this codebase's canonical VNI digit for â is '6', not '7'
+//   (`crate::pipeline::presets::vni_config`: "a6"->"â"; '7' is only ever
+//   registered for o7/u7 horn). Substituted with "can6"+"6" (digit-triggered
+//   equivalent of Telex "cana"+"a": non-adjacent '6' fires â on "can6" ->
+//   attested "cân", exactly like the Telex case).
+// - "dodongd" row: does not satisfy the immediacy contract as literally
+//   written — đ fires on "dodong"'s 3rd raw char ('d' at index 2), but
+//   "dodong" (the prefix once the trailing retype 'd' is removed) ends in
+//   'g' (index 5), not 'd'. Retyping 'd' at the very end of an already-
+//   completed "dodong" is NOT an immediate retype of the đ trigger — it is
+//   exactly the same non-immediacy shape as "vieteje" (whose own row
+//   confirms this must NOT undo). Substituted with "dand"+"d": đ fires on
+//   "dand"'s FINAL raw char (open/coda-final backward-referring đ, same
+//   mechanism, composes to attested "đan" — a real word, "to knit/weave"),
+//   so retyping 'd' immediately after DOES satisfy immediacy. This is the
+//   correct analogue of the đ/consonant-class escape hatch.
+// - "cana"+"a"+"n" latch-semantics row: at the PURE `compose()` layer there
+//   is no persistent state, so re-running compose on the grown raw buffer
+//   "canaan" does not "resume" a prior undo — it recomputes from scratch,
+//   and the same 3-occurrence guard that protects "banana"/"dataa" also
+//   blocks any transform from firing here, so the result is the full raw
+//   string typed so far ("canaan", not the display-trimmed "canan"). What
+//   Phase 4 guarantees at this layer — and what the test below asserts — is
+//   the "Gatekeeper passthrough" invariant: no diacritic leaks back in and
+//   no incorrect re-fire happens. Trimming the display to "canan" is a
+//   caller/executor concern (there is no `PipelineExecutor` wiring for this
+//   `compose` module yet — out of Phase 4's file-ownership scope).
+
+#[test]
+fn critical_cana_a_undoes_to_literal_latched() {
+    // Verified: compose("cana") == "cân" (attested collision, see
+    // `medium_cana_collision_canal_self_heals` above) — the pre-undo state
+    // this escape hatch targets.
+    assert_eq!(compose(&raw("cana"), &telex_opts()).text, "cân");
+    let r = compose(&raw("canaa"), &telex_opts());
+    assert_eq!(r.text, "cana", "retyping 'a' must undo the non-adjacent â mark");
+    assert!(r.temp_english, "undo must latch English passthrough");
+    assert!(r.applied_marks.is_empty(), "undo result carries no marks");
+}
+
+#[test]
+fn critical_dataa_no_double_strip() {
+    // "dataa": the gate already demoted "data"'s own 'a' mark to literal at
+    // the top level (count-of-'a' == 3 blocks the non-adjacent branch
+    // entirely — see `critical_data_stays_literal`). The undo check's own
+    // internal prefix recompute ALSO finds the mark demoted (fresh count == 2
+    // there), so it reports zero eligible marks and no-ops. Compose's normal
+    // path then handles the full 5-key raw buffer untouched: no keystroke is
+    // dropped ("no double-strip").
+    let r = compose(&raw("dataa"), &telex_opts());
+    assert_eq!(r.text, "dataa", "no keystroke may be dropped when the prefix's mark was already gate-demoted");
+    assert!(r.applied_marks.is_empty());
+}
+
+#[test]
+fn critical_aaa_adjacent_priority_unchanged() {
+    // Adjacent toggle (check_transform_toggle) must still claim "aaa" before
+    // the non-adjacent check ever runs.
+    let r = compose(&raw("aaa"), &telex_opts());
+    assert_eq!(r.text, "aa");
+    assert!(r.temp_english);
+}
+
+#[test]
+fn critical_vieteje_immediacy_violated_no_undo() {
+    // "vietej" already fires the attested non-adjacent 'e' mark (-> "việt",
+    // see `critical_vietej_fires_attested`). Appending one more 'e' makes the
+    // prefix's LAST raw key the tone 'j', not the 'e' mark's trigger position
+    // — immediacy fails at the pre-filter (K='e' != prefix-last='j') before
+    // any prefix compose is attempted. Must NOT undo: "việt" does not
+    // resurface at all, and the result is NOT the undone literal "vietej"
+    // either — the extra 'e' just runs through the ordinary English-fallback
+    // path (independent of Phase 4), yielding the full literal 7-key buffer.
+    let r = compose(&raw("vieteje"), &telex_opts());
+    assert_eq!(r.text, "vieteje");
+    assert!(!r.text.contains(['ệ', 'ê']), "no undo-related diacritic must leak");
+}
+
+#[test]
+fn high_vni_can6_digit_parity_undoes_to_literal_latched() {
+    // Method parity (S8): the VNI digit-triggered equivalent of "cana"+"a".
+    // See module-level deviation note for why '6' (not '7') is the correct
+    // trigger digit for â in this codebase's VNI table.
+    assert_eq!(compose(&raw("can6"), &vni_opts()).text, "cân",
+        "can6 must be the VNI attested collision analogous to Telex cana");
+    let r = compose(&raw("can66"), &vni_opts());
+    assert_eq!(r.text, "can6", "retyping the VNI digit trigger must undo exactly like Telex");
+    assert!(r.temp_english);
+}
+
+#[test]
+fn high_cana_uppercase_trigger_case_insensitive() {
+    // Retyping the trigger in the OPPOSITE case must still undo.
+    let r = compose(&raw("canaA"), &telex_opts());
+    assert_eq!(r.text, "cana", "uppercase retype of the trigger key must still undo");
+    assert!(r.temp_english);
+}
+
+#[test]
+fn high_cana_latch_survives_recompute_no_reentry() {
+    // "cana"+"a"+"n": see module-level deviation note. At the pure compose()
+    // layer, no diacritic leaks back in and the buffer is never re-entered
+    // into the fired-mark path (the count-of-'a'==3 guard blocks it, exactly
+    // like "banana"/"dataa") — this is the "Gatekeeper passthrough" invariant
+    // Phase 4 owns; display-level trimming to "canan" is a caller concern.
+    let r = compose(&raw("canaan"), &telex_opts());
+    assert_eq!(r.text, "canaan");
+    assert!(!r.text.contains(['â']), "the undone â mark must never re-fire on further typing");
+}
+
+#[test]
+fn high_dand_d_consonant_undo_equivalence_note() {
+    // Substitute for the matrix's "dodongd" row (see module-level deviation
+    // note): "dand" fires the backward-referring đ mark on its OWN final raw
+    // key (base_ends_with_coda("dan") makes it a "committed syllable"), so
+    // retyping 'd' immediately after DOES satisfy immediacy.
+    assert_eq!(compose(&raw("dand"), &telex_opts()).text, "đan",
+        "dand must be an attested đ collision (đan = to knit/weave)");
+    let r = compose(&raw("dandd"), &telex_opts());
+    assert_eq!(r.text, "dand", "retyping 'd' right after dand must undo the đ mark");
+    assert!(r.temp_english);
+}
+
+#[test]
+fn medium_existing_toggles_unaffected_by_ordering_change() {
+    assert_eq!(compose(&raw("a611"), &vni_opts()).text, "â1");
+    let opts_with_ee = {
+        let mut cfg = PipelineConfig::new("telex");
+        cfg.add_transform("aa", "â");
+        cfg.add_transform("ee", "ê");
+        cfg.add_tone('s', ToneMark::Acute);
+        ComposeOpts::from_config(&cfg)
+    };
+    let r = compose(&raw("seess"), &opts_with_ee);
+    assert_eq!(r.text, "sês");
+}
+
+#[test]
+fn medium_latched_then_more_keys_no_reentry() {
+    // Once undone, further identical keystrokes must not oscillate back into
+    // firing the mark again.
+    let r = compose(&raw("canaaa"), &telex_opts());
+    assert!(!r.text.contains('â'), "repeated retypes must never resurrect the diacritic: {}", r.text);
+}
+

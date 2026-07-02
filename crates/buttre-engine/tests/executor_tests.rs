@@ -1305,3 +1305,103 @@ fn test_vietess_no_bypass_diacritic() {
     for ch in "vietess".chars() { ex.process(ch); }
     assert_eq!(ex.context().syllable_buffer, "vietes");
 }
+
+// ── Phase 4: non-adjacent transform undo (executor level) ────────────────────
+// Test Scenario Matrix from phase-04-nonadjacent-undo.md. See the deviation
+// note in `compose::tests` (src/compose/tests.rs) for why "can6" (not the
+// matrix's "cana7") and "dand" (not "dodongd") are used — both verified
+// empirically against this build's real rule tables.
+
+#[test]
+fn test_cana_a_undoes_to_literal_latched() {
+    // Pre-condition: "cana" alone is the attested collision "cân" this escape
+    // hatch targets (see compose::tests::medium_cana_collision_canal_self_heals).
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "cana".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "cân");
+    ex.process('a');
+    assert_eq!(ex.context().syllable_buffer, "cana",
+        "retyping 'a' right after the collision must undo it to the literal keystrokes");
+    assert!(ex.context().temp_english_mode, "undo must latch English passthrough");
+}
+
+#[test]
+fn test_cana_a_n_latches_until_separator() {
+    // Once undone, ComposeStage's temp_english branch appends subsequent keys
+    // LITERALLY onto the already-undone buffer instead of recomputing from
+    // raw — "cana"+"a" undoes to "cana", then "n" appends directly: "canan".
+    // (The one-shot `compose()` unit test on the full 6-key raw buffer gives
+    // a different literal — "canaan" — because it has no persistent latch
+    // state; seeing this diverge from the executor's "canan" is expected and
+    // documented in `compose::tests::high_cana_latch_survives_recompute_no_reentry`.)
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "canaan".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "canan",
+        "latched passthrough must append literally, not re-recompute from raw");
+}
+
+#[test]
+fn test_cana_uppercase_trigger_undoes_case_insensitively() {
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "canaA".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "cana",
+        "an uppercase retype of the trigger key must still undo");
+    assert!(ex.context().temp_english_mode);
+}
+
+#[test]
+fn test_vni_digit_undo_parity_with_telex() {
+    // Method parity (S8): VNI digit-triggered equivalent of "cana"+"a". This
+    // codebase's canonical VNI digit for â is '6' (`presets::vni_config`),
+    // not '7' as the matrix's literal example string states — '7' is only
+    // ever registered for the o7/u7 horn, never for 'a'.
+    let mut ex = PipelineExecutor::new(buttre_engine::pipeline::presets::vni_config());
+    for ch in "can6".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "cân",
+        "can6 must be the VNI attested collision analogous to Telex cana");
+    ex.process('6');
+    assert_eq!(ex.context().syllable_buffer, "can6",
+        "retyping the VNI digit trigger must undo exactly like Telex");
+    assert!(ex.context().temp_english_mode);
+}
+
+#[test]
+fn test_dand_d_consonant_class_undo_equivalence_note() {
+    // Substitute for the matrix's "dodongd" row: đ analogue of "cana"+"a".
+    // "dodongd" does not satisfy the immediacy contract (đ fires on
+    // "dodong"'s 3rd raw key, but "dodong" itself ends in 'g', not 'd' — the
+    // same non-immediacy shape "vieteje" demonstrates must NOT undo). "dand"
+    // fires đ on its OWN final raw key (backward-referring đ with a coda —
+    // see `test_nonadjacent_dd_with_coda_no_tone_demotes_to_literal` above
+    // for the sibling unattested case), so retyping 'd' right after DOES
+    // satisfy immediacy.
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "dand".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "đan",
+        "dand must be an attested đ collision (đan = to knit/weave)");
+    ex.process('d');
+    assert_eq!(ex.context().syllable_buffer, "dand",
+        "retyping 'd' right after dand must undo the đ mark");
+    assert!(ex.context().temp_english_mode);
+}
+
+#[test]
+fn test_vieteje_immediacy_violated_no_undo() {
+    // "vietej" self-heals to attested "việt" (test_viete_then_j_self_heals_to_viet
+    // above). Appending one more 'e' makes the retyped key's predecessor the
+    // tone 'j', not the fired 'e' mark's own position — immediacy fails, so
+    // no undo fires; the extra key instead runs the ordinary (Phase-4-
+    // unrelated) English-fallback path on the full 7-key buffer.
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "vietej".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "việt");
+    ex.process('e');
+    assert_eq!(ex.context().syllable_buffer, "vieteje",
+        "must not undo: immediacy violated (retyped key does not follow the fired mark)");
+    assert!(ex.context().temp_english_mode);
+}
