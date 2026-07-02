@@ -60,6 +60,7 @@
 //! subsequent input through (Phase 4 only — this module just sets the flag).
 
 use super::ComposeOpts;
+use super::assemble;
 use super::segment;
 use super::transform;
 use crate::tone;
@@ -94,19 +95,28 @@ impl FallbackResult {
 /// Check whether the raw key sequence triggers an undo/toggle pattern.
 ///
 /// Returns `FallbackResult::not_handled()` when normal compose should proceed.
-pub fn check_fallback(raw: &[char], opts: &ComposeOpts) -> FallbackResult {
+///
+/// `allow_nonadjacent` is the SAME recursion-guard flag `compose::mod` threads
+/// through every re-entry (see `compose_internal`'s doc). It is forwarded
+/// unchanged into the prefix-reconstruction helpers below so they run through
+/// the attestation gate too — closing the red-team C2 bypass where
+/// `apply_transforms_only`/`compose_base_and_transforms_with_tone` used to
+/// rebuild a prefix straight from `segment`+`transform`, ungated, and return
+/// from `compose()` before the gate ever ran (`"dataeee"` → `"dâtee"`,
+/// `"vietess"` → `"viêts"`, `"databaaa"` → `"dâtbaa"`).
+pub fn check_fallback(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> FallbackResult {
     // We only act when there are at least 2 keys (minimum for a toggle).
     if raw.len() < 2 {
         return FallbackResult::not_handled();
     }
 
     // Check tone toggle first (e.g. "a11", "a111", "a1111").
-    if let Some(result) = check_tone_toggle(raw, opts) {
+    if let Some(result) = check_tone_toggle(raw, opts, allow_nonadjacent) {
         return result;
     }
 
     // Check transform toggle (e.g. "aaa", "aww", "awww").
-    if let Some(result) = check_transform_toggle(raw, opts) {
+    if let Some(result) = check_transform_toggle(raw, opts, allow_nonadjacent) {
         return result;
     }
 
@@ -134,7 +144,7 @@ pub fn check_fallback(raw: &[char], opts: &ComposeOpts) -> FallbackResult {
 /// (with non-tone chars in between), compose raw-without-last to see if it
 /// produced a vowel with the same tone mark.  If so, strip that tone and
 /// append the literal key.
-fn check_tone_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackResult> {
+fn check_tone_toggle(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> Option<FallbackResult> {
     let last = *raw.last()?;
     let last_lc = last.to_ascii_lowercase();
 
@@ -159,7 +169,7 @@ fn check_tone_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackResult>
         if n % 2 == 0 {
             // Even count → undo: apply transforms to base_part (no tone) to
             // preserve diacritics, then append n/2 literal tone key chars.
-            let transformed_base = apply_transforms_only(base_part, opts);
+            let transformed_base = apply_transforms_only(base_part, opts, allow_nonadjacent);
             let suffix: String = std::iter::repeat(last_lc).take(n / 2).collect();
             let text = format!("{transformed_base}{suffix}");
             return Some(FallbackResult::handled(text, true));
@@ -193,7 +203,7 @@ fn check_tone_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackResult>
     }
 
     // Compose raw-without-last to get the candidate toned syllable.
-    let candidate = compose_base_and_transforms_with_tone(raw_without_last, opts)?;
+    let candidate = compose_base_and_transforms_with_tone(raw_without_last, opts, allow_nonadjacent)?;
 
     let expected_tone = *opts.tone_map.get(&last_lc)?;
     if expected_tone == ToneMark::None {
@@ -219,7 +229,7 @@ fn check_tone_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackResult>
 ///
 /// This is the same orthogonal-transform principle applied by the tone-undo path:
 /// undoing ONE transform must NEVER revert unrelated earlier transforms.
-fn check_transform_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackResult> {
+fn check_transform_toggle(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> Option<FallbackResult> {
     if raw.len() < 3 {
         return None;
     }
@@ -255,7 +265,7 @@ fn check_transform_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackRe
             // Re-compose the prefix so earlier completed transforms (e.g. "dd"→"đ")
             // are preserved.  Only the undone cluster reverts to literal rc1+rc2.
             let prefix_raw = &raw[..n - 3];
-            let composed_prefix = apply_transforms_only(prefix_raw, opts);
+            let composed_prefix = apply_transforms_only(prefix_raw, opts, allow_nonadjacent);
             let text = format!("{composed_prefix}{rc1}{rc2}");
             return Some(FallbackResult::handled(text, true));
         }
@@ -266,7 +276,12 @@ fn check_transform_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackRe
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Apply segment + transform steps to `raw` (no tone application).
+/// Apply segment + transform steps to `raw` (no tone application), GATED on
+/// attestation exactly like the main `compose_internal` path (red-team C2:
+/// this prefix-reconstruction helper used to call `segment`+`transform`
+/// directly and return from `compose()` before the gate ever ran, letting
+/// `"dataeee"`/`"databaaa"` resurface the `"data"`→`"dât"` bug through the
+/// tone/transform-toggle back door).
 ///
 /// Used by the tone-undo path to reconstruct the transformed base vowels
 /// (e.g. `[a, 6]` → `"â"`) before appending the literal tone key suffix.
@@ -274,32 +289,49 @@ fn check_transform_toggle(raw: &[char], opts: &ComposeOpts) -> Option<FallbackRe
 /// Any tone keys that `segment()` collects from `raw` are intentionally
 /// discarded — when this function is called, the caller has already decided
 /// that all tone marks in `raw` should be stripped (the undo has fired).
-fn apply_transforms_only(raw: &[char], opts: &ComposeOpts) -> String {
+///
+/// `allow_nonadjacent=false` recurses at most once (mirrors
+/// `compose_internal`'s demote bound): the recursive call passes `false`
+/// again, and a `false` call never re-enters the gate.
+fn apply_transforms_only(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> String {
     if raw.is_empty() {
         return String::new();
     }
-    let seg = segment::segment(raw, opts);
-    transform::apply_transforms(&seg.base, &seg.transforms, opts)
+    let seg = segment::segment(raw, opts, allow_nonadjacent);
+    let (text, applied) = transform::apply_transforms(&seg.base, &seg.transforms, opts);
+    if allow_nonadjacent
+        && opts.attest_non_adjacent
+        && !super::passes_attestation_gate(&text, &applied)
+    {
+        return apply_transforms_only(raw, opts, false);
+    }
+    text
 }
 
-/// Run segment + transform + tone on `raw` and return the result text.
+/// Run segment + transform + tone on `raw` and return the result text, GATED
+/// on attestation like `apply_transforms_only` above (same C2 concern).
 ///
 /// Returns `None` if `raw` is empty or composition produces no output.
 /// Used by the same-tone-repress path to evaluate `raw[..-1]`.
-fn compose_base_and_transforms_with_tone(raw: &[char], opts: &ComposeOpts) -> Option<String> {
+fn compose_base_and_transforms_with_tone(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    let seg = segment::segment(raw, opts);
-    let transformed = transform::apply_transforms(&seg.base, &seg.transforms, opts);
-    if seg.tones.is_empty() {
-        return Some(transformed);
+    let seg = segment::segment(raw, opts, allow_nonadjacent);
+    let (transformed, applied) = transform::apply_transforms(&seg.base, &seg.transforms, opts);
+    let text = if let Some(&last_tone_key) = seg.tones.last() {
+        // Apply the last tone key (mirrors the compose() main path).
+        assemble::apply_tone(&transformed, last_tone_key, opts).unwrap_or(transformed)
+    } else {
+        transformed
+    };
+    if allow_nonadjacent
+        && opts.attest_non_adjacent
+        && !super::passes_attestation_gate(&text, &applied)
+    {
+        return compose_base_and_transforms_with_tone(raw, opts, false);
     }
-    // Apply the last tone key (mirrors the compose() main path).
-    let last_tone_key = *seg.tones.last().unwrap();
-    use super::assemble;
-    assemble::apply_tone(&transformed, last_tone_key, opts)
-        .or(Some(transformed))
+    Some(text)
 }
 
 /// Strip the first vowel carrying `expected_tone` in `text` (walk chars left
@@ -363,7 +395,7 @@ mod tests {
     fn aaa_triggers_undo() {
         let opts = telex_opts();
         let raw: Vec<char> = "aaa".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "aaa should trigger undo");
         assert_eq!(result.text, "aa");
         assert!(result.temp_english);
@@ -373,7 +405,7 @@ mod tests {
     fn aww_triggers_undo() {
         let opts = telex_opts();
         let raw: Vec<char> = "aww".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "aww should trigger undo");
         assert_eq!(result.text, "aw");
     }
@@ -382,7 +414,7 @@ mod tests {
     fn ass_triggers_tone_undo() {
         let opts = telex_opts();
         let raw: Vec<char> = "ass".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "ass should trigger tone undo");
         assert_eq!(result.text, "as");
         assert!(result.temp_english);
@@ -392,7 +424,7 @@ mod tests {
     fn as_does_not_trigger() {
         let opts = telex_opts();
         let raw: Vec<char> = "as".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(!result.is_handled);
     }
 
@@ -400,7 +432,7 @@ mod tests {
     fn ddd_triggers_dd_undo() {
         let opts = telex_opts();
         let raw: Vec<char> = "ddd".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "ddd should trigger undo");
         assert_eq!(result.text, "dd");
     }
@@ -409,7 +441,7 @@ mod tests {
     fn a11_triggers_tone_undo() {
         let opts = telex_opts();
         let raw: Vec<char> = "a11".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "a11 should trigger tone undo");
         assert_eq!(result.text, "a1");
     }
@@ -421,7 +453,7 @@ mod tests {
         // a6 → â, then 11 undo pair → strip tone, keep â. Output: â1.
         let opts = vni_opts();
         let raw: Vec<char> = "a611".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "a611 should trigger transform-preserving undo");
         assert_eq!(result.text, "â1", "a611: should keep â and strip tone to give â1");
     }
@@ -431,7 +463,7 @@ mod tests {
         // a8 → ă, then 22 undo pair → ă2.
         let opts = vni_opts();
         let raw: Vec<char> = "a822".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "a822 should trigger transform-preserving undo");
         assert_eq!(result.text, "ă2", "a822: should keep ă and strip tone to give ă2");
     }
@@ -441,7 +473,7 @@ mod tests {
         // u7 → ư, then 33 undo pair → ư3.
         let opts = vni_opts();
         let raw: Vec<char> = "u733".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "u733 should trigger transform-preserving undo");
         assert_eq!(result.text, "ư3", "u733: should keep ư and strip tone to give ư3");
     }
@@ -451,7 +483,7 @@ mod tests {
         // o7 → ơ, then 44 undo pair → ơ4.
         let opts = vni_opts();
         let raw: Vec<char> = "o744".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "o744 should trigger transform-preserving undo");
         assert_eq!(result.text, "ơ4", "o744: should keep ơ and strip tone to give ơ4");
     }
@@ -461,7 +493,7 @@ mod tests {
         // u7o7 → ươ (compound), then 11 undo pair → ươ1.
         let opts = vni_opts();
         let raw: Vec<char> = "u7o711".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "u7o711 should trigger transform-preserving undo");
         assert_eq!(result.text, "ươ1", "u7o711: should keep ươ and strip tone to give ươ1");
     }
@@ -475,7 +507,7 @@ mod tests {
         // This is intentional standard behaviour, not a missing feature.
         let opts = vni_opts();
         let raw: Vec<char> = "a111".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         // Odd n=3: fallback returns not_handled; compose handles it as tone application
         // on the base, which then gives a11 via temp_english in PipelineExecutor.
         // The unit-level fallback check for n=3 returns None (let compose handle).
@@ -489,7 +521,7 @@ mod tests {
         // Matches Unikey: no re-apply after undo.
         let opts = vni_opts();
         let raw: Vec<char> = "a66".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "a66 should fire transform undo");
         assert_eq!(result.text, "a6", "a66 → a6 + temp_english (Unikey standard)");
     }
@@ -503,7 +535,7 @@ mod tests {
         // dd→đ (prefix), then aaa undo: â reverts to aa, đ survives. Output: đaa.
         let opts = telex_opts();
         let raw: Vec<char> = "ddaaa".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "ddaaa should trigger transform undo");
         assert_eq!(result.text, "đaa",
             "ddaaa → đaa: dd prefix re-composed to đ, aa literal (transform-preserving undo)");
@@ -515,7 +547,7 @@ mod tests {
         // dd→đ (prefix), then eee undo (ee→ê, third e reverts): ê→ee, đ survives. Output: đee.
         let opts = telex_opts_with_ee();
         let raw: Vec<char> = "ddeee".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "ddeee should trigger transform undo");
         assert_eq!(result.text, "đee",
             "ddeee → đee: dd prefix re-composed to đ, ee literal (transform-preserving undo)");
@@ -527,7 +559,7 @@ mod tests {
         // dd→đ (prefix), then ooo undo (oo→ô, third o reverts): ô→oo, đ survives. Output: đoo.
         let opts = telex_opts_with_oo();
         let raw: Vec<char> = "ddooo".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "ddooo should trigger transform undo");
         assert_eq!(result.text, "đoo",
             "ddooo → đoo: dd prefix re-composed to đ, oo literal (transform-preserving undo)");
@@ -564,7 +596,7 @@ mod tests {
         // trailing run of 's' = 2, base_part = ['f','a','n'] → "fan", text = "fans".
         let opts = telex_opts();
         let raw: Vec<char> = "fanss".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "fanss should trigger tone undo (trailing-run fix)");
         assert_eq!(result.text, "fans", "fanss → fans + temp_english");
         assert!(result.temp_english);
@@ -576,7 +608,7 @@ mod tests {
         // trailing run of 's' = 2, base_part = ['s','e','e'] → "sê" (ee transform applied), text = "sês".
         let opts = telex_opts_with_ee();
         let raw: Vec<char> = "seess".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "seess should trigger tone undo (trailing-run fix)");
         assert_eq!(result.text, "sês", "seess → sês + temp_english (ee transform preserved)");
         assert!(result.temp_english);
@@ -587,7 +619,7 @@ mod tests {
         // Simple case: 's' as leading consonant, 'a' vowel, then "ss" undo pair.
         let opts = telex_opts();
         let raw: Vec<char> = "sass".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "sass should trigger tone undo");
         assert_eq!(result.text, "sas");
         assert!(result.temp_english);
@@ -599,7 +631,7 @@ mod tests {
         // base_part = ['s','i','n'] → "sin", text = "sinf".
         let opts = telex_opts();
         let raw: Vec<char> = "sinff".chars().collect();
-        let result = check_fallback(&raw, &opts);
+        let result = check_fallback(&raw, &opts, true);
         assert!(result.is_handled, "sinff should trigger tone undo (trailing-run fix)");
         assert_eq!(result.text, "sinf", "sinff → sinf + temp_english");
         assert!(result.temp_english);

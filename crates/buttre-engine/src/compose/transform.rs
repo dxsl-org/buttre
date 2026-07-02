@@ -19,26 +19,36 @@
 //!   applies to 'u' individually, second mark applies to 'o' individually.
 
 use crate::vowel::cluster::normalize_vowel;
-use super::{ComposeOpts, segment::TransformMark};
+use super::{ComposeOpts, segment::{AppliedMark, TransformMark}};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Apply all `transforms` to `base` in order.
 ///
-/// Returns the transformed string; unapplied marks are appended literally.
-pub fn apply_transforms(base: &str, transforms: &[TransformMark], opts: &ComposeOpts) -> String {
+/// Returns the transformed string plus a report of the marks that actually
+/// changed it (an unmatched mark falls back to appending its trigger key
+/// literally and is NOT included in the report — there is nothing for the
+/// attestation gate or Phase 4's undo to act on).
+///
+/// The report's `non_adjacent`/`raw_pos` fields are copied unchanged from
+/// each `TransformMark` — `apply_one_transform`'s leftward retry (see module
+/// doc) may change WHICH vowel receives the diacritic, but it never changes
+/// whether the trigger key itself was typed adjacently.
+pub fn apply_transforms(base: &str, transforms: &[TransformMark], opts: &ComposeOpts) -> (String, Vec<AppliedMark>) {
     let mut result = base.to_string();
+    let mut applied = Vec::new();
     for (idx, tm) in transforms.iter().enumerate() {
         // Build the remaining mark keys slice for compound-suppression check.
         let remaining_keys: Vec<char> = transforms[idx + 1..].iter().map(|t| t.key).collect();
         let new = apply_one_transform(&result, tm.key, tm.base_len_at_typing, &remaining_keys, opts);
         if let Some(new_result) = new {
             result = new_result;
+            applied.push(AppliedMark { key: tm.key, raw_pos: tm.raw_pos, non_adjacent: tm.non_adjacent });
         } else {
             result.push(tm.key);
         }
     }
-    result
+    (result, applied)
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -209,7 +219,6 @@ fn preserve_case(original: char, new_char: char) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::compose::{ComposeOpts, segment::TransformMark};
     use crate::pipeline::config::{PipelineConfig, ToneMark};
 
@@ -227,7 +236,14 @@ mod tests {
     }
 
     fn tm(key: char, base_len: usize) -> TransformMark {
-        TransformMark { key, base_len_at_typing: base_len }
+        TransformMark { key, base_len_at_typing: base_len, raw_pos: base_len, non_adjacent: false }
+    }
+
+    /// Test-only convenience: most tests here only care about the resulting
+    /// text, not the applied-marks report (that report is covered by
+    /// `compose::mod`'s gate tests).
+    fn apply_transforms(base: &str, transforms: &[TransformMark], opts: &ComposeOpts) -> String {
+        super::apply_transforms(base, transforms, opts).0
     }
 
     #[test]

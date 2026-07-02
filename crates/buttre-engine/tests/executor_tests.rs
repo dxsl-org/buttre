@@ -1218,12 +1218,19 @@ fn test_nonadjacent_dd_with_tone() {
 }
 
 #[test]
-fn test_nonadjacent_dd_with_coda_no_tone() {
+fn test_nonadjacent_dd_with_coda_no_tone_demotes_to_literal() {
+    // Phase 2 (attestation gate): "đat" (ngang tone) is not a real Vietnamese
+    // word — Vietnamese checked syllables (coda p/t/c/ch) never take ngang
+    // tone, so "đat" can never be attested. The backward-referring đ mark is
+    // always flagged non-adjacent (see `segment::mark_non_adjacent`), so it
+    // now demotes to a literal 'd' — the exact same bug class as
+    // `"data"` → `"dât"`. It still self-heals once a tone key arrives
+    // (`test_nonadjacent_dd_with_tone` above: "datjd" → "đạt", attested).
     let config = create_telex_config();
     let mut ex = PipelineExecutor::new(config);
     for ch in "datd".chars() { ex.process(ch); }
-    assert_eq!(ex.context().syllable_buffer, "đat",
-        "trailing 'd' after a coda syllable turns the onset into đ");
+    assert_eq!(ex.context().syllable_buffer, "datd",
+        "unattested 'đat' must demote to the literal keystrokes");
 }
 
 #[test]
@@ -1235,4 +1242,66 @@ fn test_bare_dad_stays_english() {
     let mut ex = PipelineExecutor::new(config);
     for ch in "dad".chars() { ex.process(ch); }
     assert_eq!(ex.context().syllable_buffer, "dad");
+}
+
+// ── Phase 2: attestation gate self-heal (executor-level) ──────────────────────
+
+#[test]
+fn test_viete_then_j_self_heals_to_viet() {
+    // "viete" alone: non-adjacent 'e' produces unattested "viêt" → demotes to
+    // literal "viete". Recompute-from-raw means the NEXT keystroke ('j') sees
+    // the whole raw buffer again ("vietej") and re-derives from scratch —
+    // "viet" is one vowel group with a valid coda, so the non-adjacent 'e'
+    // fires again, and this time "việt" (with the dot tone) IS attested.
+    // Self-heal across keystrokes, mark-typed-last ordering (see phase doc:
+    // the reverse order "vietj"+"e" is pre-existing known-broken, unrelated
+    // to this phase).
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "viete".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "viete",
+        "'viete' alone must demote to literal (unattested 'viêt')");
+    ex.process('j');
+    assert_eq!(ex.context().syllable_buffer, "việt",
+        "'vietej' must self-heal to attested 'việt' once the tone key arrives");
+}
+
+// ── Phase 2: fallback bypass regression (red-team C2) — executor level ───────
+
+#[test]
+fn test_dataeee_no_bypass_diacritic() {
+    // Differs from the one-shot `compose()` unit test (which sees only the
+    // final 7-key raw buffer and gives "dataee" via the gated
+    // `check_transform_toggle` path): the INCREMENTAL executor reaches the
+    // gate-then-demote-then-literal-fallback path already at 6 keys
+    // ("dataee" fails `could_be_vietnamese` even after demoting, and
+    // elongation is intentionally not attempted from a demoted pass — see
+    // `try_elongation_fallback`), latching `temp_english_mode` with the
+    // CLEAN literal "dataee" one key early. The 7th key then appends
+    // literally per `ComposeStage`'s temp-English contract, giving the full
+    // literal "dataeee" — strictly better than the pre-Phase-2 baseline,
+    // which latched at the same point with the spurious diacritic "dâtee"
+    // and ended on "dâteee".
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "dataeee".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "dataeee");
+    assert!(!ex.context().syllable_buffer.contains(['â', 'ê']),
+        "no diacritic must leak through the bypass at any keystroke");
+}
+
+#[test]
+fn test_databaaa_no_bypass_diacritic() {
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "databaaa".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "databaa");
+}
+
+#[test]
+fn test_vietess_no_bypass_diacritic() {
+    let config = create_telex_config();
+    let mut ex = PipelineExecutor::new(config);
+    for ch in "vietess".chars() { ex.process(ch); }
+    assert_eq!(ex.context().syllable_buffer, "vietes");
 }

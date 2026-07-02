@@ -199,6 +199,7 @@ fn empty_raw() {
     assert_eq!(compose(&[], &telex_opts()), ComposeResult {
         text: String::new(),
         temp_english: false,
+        applied_marks: Vec::new(),
     });
 }
 
@@ -271,4 +272,165 @@ fn telex_dodong_yields_dong() {
 fn telex_dodongf_yields_dong_grave() {
     assert_eq!(compose(&raw("dodongf"), &telex_opts()).text, "đồng",
         "Telex dodongf (fast-type onset slip) must produce đồng");
+}
+
+// ── Phase 2: attestation gate on non-adjacent transforms ─────────────────────
+// Test Scenario Matrix from phase-02-attestation-gate-compose.md.
+
+#[test]
+fn critical_data_stays_literal() {
+    // The flagship bug: "data" — non-adjacent 'a' would produce unattested
+    // "dât" — must demote to the literal keystrokes.
+    let r = compose(&raw("data"), &telex_opts());
+    assert_eq!(r.text, "data", "unattested 'dât' must demote to literal 'data'");
+}
+
+#[test]
+fn critical_vietej_fires_attested() {
+    assert_eq!(compose(&raw("vietej"), &telex_opts()).text, "việt",
+        "flexible non-adjacent typing must still produce attested 'việt'");
+}
+
+#[test]
+fn critical_nasa_stays_literal() {
+    // "nấ" (raw-adjacency bug: tone key 's' sits between the two 'a's) is
+    // unattested — must demote to literal, not leak a spurious diacritic
+    // through the elongation fallback either (see `try_elongation_fallback`).
+    let r = compose(&raw("nasa"), &telex_opts());
+    assert_eq!(r.text, "nasa", "unattested 'nấ' must demote to literal 'nasa'");
+}
+
+#[test]
+fn critical_luuw_huuw_no_demote() {
+    // Retry inherits the segment-level adjacent flag unchanged — no demote.
+    assert_eq!(compose(&raw("luuw"), &telex_opts()).text, "lưu");
+    assert_eq!(compose(&raw("huuw"), &telex_opts()).text, "hưu");
+}
+
+#[test]
+fn critical_vni_nhat61_shape_attested_no_flicker() {
+    // Non-alphabetic (VNI digit) trigger relaxes to shape-attestation: the
+    // intermediate "nhât" (no tone yet) is not itself attested, but its
+    // SHAPE is (nhất exists) — no literal flicker before '1' arrives.
+    assert_eq!(compose(&raw("nhat61"), &vni_opts()).text, "nhất");
+    assert_eq!(compose(&raw("nhat6"), &vni_opts()).text, "nhât",
+        "mid-typing 'nhât' must not flicker to literal before the tone key");
+}
+
+#[test]
+fn high_reset_accepted_attested_collision() {
+    // "rết" (centipede) happens to be a real word — the gate cannot and must
+    // not distinguish this from a deliberate non-adjacent transform. Escape
+    // is via undo (Phase 4) or adjacent retyping.
+    assert_eq!(compose(&raw("reset"), &telex_opts()).text, "rết");
+}
+
+#[test]
+fn high_data_class_words_stay_literal() {
+    for word in ["meme", "photo", "papa"] {
+        let r = compose(&raw(word), &telex_opts());
+        assert_eq!(r.text, word, "'{word}' must stay literal (unattested non-adjacent result)");
+    }
+}
+
+#[test]
+fn high_tuongw_no_misflag_or_underflow() {
+    // "tuongw": the compound trigger 'w' is separated from the vowel cluster
+    // by the coda "ng" — flagged non-adjacent, but "tương" is attested so it
+    // passes the gate unchanged. Must not panic/underflow either way.
+    assert_eq!(compose(&raw("tuongw"), &telex_opts()).text, "tương");
+}
+
+#[test]
+fn high_vni_6a_prefix_forward_apply() {
+    // base_len_at_typing == 0 prefix mark: adjacent by definition, no underflow.
+    assert_eq!(compose(&raw("6a"), &vni_opts()).text, "â");
+}
+
+#[test]
+fn high_uw_no_misflag() {
+    assert_eq!(compose(&raw("uw"), &telex_opts()).text, "ư");
+}
+
+#[test]
+fn high_adjacent_typing_unchanged() {
+    // Adjacent-typing behavior must be byte-for-byte unchanged by the gate.
+    // Default ToneStyle is Old, so "hoas" → "hóa" (not "hoá").
+    assert_eq!(compose(&raw("vieet"), &telex_opts()).text, "viêt");
+    assert_eq!(compose(&raw("hoas"), &telex_opts()).text, "hóa");
+    assert_eq!(compose(&raw("how"), &telex_opts()).text, "hơ");
+}
+
+#[test]
+fn medium_cana_collision_canal_self_heals() {
+    // "cân" is attested — the gate cannot distinguish this collision from a
+    // deliberate transform (accepted, matches the "reset" row). Continuing to
+    // type "canal" makes the composed form "cânl" (invalid), so the whole
+    // mark demotes and the word self-heals to the literal keystrokes.
+    assert_eq!(compose(&raw("cana"), &telex_opts()).text, "cân");
+    assert_eq!(compose(&raw("canal"), &telex_opts()).text, "canal");
+}
+
+#[test]
+fn medium_elongation_unchanged_by_gate() {
+    // "không" is attested, so the elongation fallback's own attestation
+    // check (added to close the "nasa" false-positive, see
+    // `try_elongation_fallback`) does not affect this legitimate case.
+    assert_eq!(compose(&raw("khoongggg"), &telex_opts()).text, "khôngggg");
+}
+
+#[test]
+fn medium_hmong_config_gate_off() {
+    // `attest_non_adjacent` is false for non-Vietnamese validators — the
+    // exact same raw sequence that demotes under Telex/Vietnamese ("nasa")
+    // must fire UNGATED under a Hmong-validated config (re-entry + gate-off).
+    use crate::pipeline::config::ValidationSettings;
+    let mut cfg = PipelineConfig::new("hmong-test");
+    cfg.add_transform("aa", "â");
+    cfg.add_tone('s', ToneMark::Acute);
+    cfg.validation = Some(ValidationSettings { syllable_structure: "hmong".to_string(), allow_invalid: true });
+    let opts = ComposeOpts::from_config(&cfg);
+    assert!(!opts.attest_non_adjacent, "Hmong validator must not enable the attestation gate");
+    assert_eq!(compose(&raw("nasa"), &opts).text, "nấ",
+        "gate-off: the non-adjacent mark fires ungated, unaffected by attestation");
+}
+
+// ── Fallback bypass regression (red-team C2) ──────────────────────────────────
+// `check_tone_toggle`/`check_transform_toggle`'s prefix reconstruction must be
+// gated exactly like the main compose() path — no â/ê leaking through.
+
+#[test]
+fn c2_dataeee_no_bypass() {
+    let r = compose(&raw("dataeee"), &telex_opts());
+    assert_eq!(r.text, "dataee");
+    assert!(!r.text.contains(['â', 'ê']), "no diacritic must leak through the transform-toggle bypass");
+}
+
+#[test]
+fn c2_vietess_no_bypass() {
+    // "viet" + demoted literal 'e' + literal 's' suffix = "vietes".
+    let r = compose(&raw("vietess"), &telex_opts());
+    assert_eq!(r.text, "vietes");
+    assert!(!r.text.contains(['â', 'ê']), "no diacritic must leak through the tone-toggle bypass");
+}
+
+#[test]
+fn c2_databaaa_no_bypass() {
+    let r = compose(&raw("databaaa"), &telex_opts());
+    assert_eq!(r.text, "databaa");
+    assert!(!r.text.contains(['â', 'ê']), "no diacritic must leak through the transform-toggle bypass");
+}
+
+// ── Recursion bound: demote pass cannot itself demote ─────────────────────────
+
+#[test]
+fn demote_pass_cannot_recurse_twice() {
+    // A word with TWO independently-unattested non-adjacent marks must still
+    // terminate in a single demote pass (both suppressed at once — per-mark
+    // subset search is explicitly out of scope, see phase Risk Notes).
+    // "papa" already covers one flavor (Telex 'a' x2); this forces multiple
+    // marks by combining an unattested đ with an unattested vowel double.
+    let r = compose(&raw("dedeng"), &telex_opts());
+    // Must not panic/loop; result must be a plain literal (no stray marks).
+    assert!(!r.text.contains(['â', 'ê', 'đ']), "demoted output must carry no leftover diacritics: {}", r.text);
 }

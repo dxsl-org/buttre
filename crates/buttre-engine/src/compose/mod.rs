@@ -27,9 +27,10 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 use crate::pipeline::config::{PipelineConfig, ToneMark, ToneStyle};
+use crate::pipeline::validation::{is_attested, is_shape_attested};
 
 // Re-export public types only.
-pub use segment::SegmentMode;
+pub use segment::{AppliedMark, SegmentMode};
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -79,6 +80,19 @@ pub struct ComposeOpts {
     /// Only non-alphabetic trigger chars are included; letter triggers (like Telex
     /// `w`, `a`) are omitted because they are content chars in their own right.
     pub transform_trigger_chars: HashSet<char>,
+
+    /// Gate INFERRED NON-ADJACENT transforms (see [`segment::TransformMark::non_adjacent`])
+    /// on attestation of the composed syllable — fixes the `"data"` → `"dât"`
+    /// class of false transforms without touching adjacent-typing behavior.
+    ///
+    /// `true` only for `Validator::Vietnamese` (the attested-syllable table is
+    /// Vietnamese-lexical by definition): the `telex`/`vni`/`simple_telex` presets,
+    /// AND any custom `MarkBased` config whose `validation.syllable_structure`
+    /// is unset or unrecognized — `from_config` defaults those to
+    /// `Validator::Vietnamese` too (documented there). `false` for
+    /// `Hmong`/`Custom`/`None`, which have no attested-syllable table to
+    /// check against.
+    pub attest_non_adjacent: bool,
 }
 
 impl ComposeOpts {
@@ -107,6 +121,7 @@ impl ComposeOpts {
             "none"   => Validator::None,
             _        => Validator::Vietnamese,
         };
+        let attest_non_adjacent = validator == Validator::Vietnamese;
 
         // Collect non-alphabetic transform trigger chars (e.g. VNI '6', '7', '8', '9').
         // Letter triggers (Telex 'w', 'a', etc.) are intentionally excluded — they are
@@ -126,6 +141,7 @@ impl ComposeOpts {
             validator,
             tone_enabled: !config.tone_map.is_empty(),
             transform_trigger_chars,
+            attest_non_adjacent,
         }
     }
 }
@@ -141,6 +157,14 @@ pub struct ComposeResult {
     /// `true` when the key sequence looks like an English/non-Vietnamese word
     /// (after undo/toggle detection).  Phase 4 executor uses this to passthrough.
     pub temp_english: bool,
+
+    /// Marks that successfully fired to produce `text` (see
+    /// [`transform::apply_transforms`]). Empty for the undo/toggle fallback
+    /// paths and for empty raw input — those outputs are not the result of
+    /// marks firing against the CURRENT raw buffer. A later phase's undo
+    /// detection consumes this to test "was the fired mark's trigger the
+    /// last key of the raw prefix".
+    pub applied_marks: Vec<AppliedMark>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -160,29 +184,48 @@ pub struct ComposeResult {
 /// 2. [`segment::segment`] — split raw into (base, transforms, tones).
 /// 3. [`transform::apply_transforms`] — apply diacritic marks, validation-gated.
 /// 4. [`assemble::apply_tone`] — place + apply the last tone key (if any).
+/// 5. Attestation gate on INFERRED NON-ADJACENT transforms (see module doc).
+/// 6. Existing structural English-fallback gate (`could_be_vietnamese`).
 ///
 /// ## DirectMap mode (native scripts)
 ///
 /// Segment returns the full base from the transform table; no tone step.
 pub fn compose(raw: &[char], opts: &ComposeOpts) -> ComposeResult {
+    compose_internal(raw, opts, true)
+}
+
+/// Core recompute engine, parameterized by `allow_nonadjacent` — the ONE
+/// recursion-guard flag threaded through every re-entry point: the
+/// attestation-gate demote below, [`try_elongation_fallback`]'s internal
+/// recompute, and the fallback prefix reconstruction in
+/// [`fallback::check_fallback`] (closing the red-team C2 bypass: those
+/// helpers no longer rebuild prefixes ungated).
+///
+/// `false` means "this call is already a demoted/gated recompute — do not
+/// gate or demote again". Since [`segment::segment`] with
+/// `allow_nonadjacent=false` extracts NO mark that would be flagged
+/// non-adjacent, the gate condition below (`applied.iter().any(non_adjacent)`)
+/// can never be true inside a `false` call — recursion is bounded at depth 1.
+fn compose_internal(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> ComposeResult {
     if raw.is_empty() {
-        return ComposeResult { text: String::new(), temp_english: false };
+        return ComposeResult { text: String::new(), temp_english: false, applied_marks: Vec::new() };
     }
 
     // Step 1 — fallback / undo detection (reads raw counts only).
-    let fb = fallback::check_fallback(raw, opts);
+    let fb = fallback::check_fallback(raw, opts, allow_nonadjacent);
     if fb.is_handled {
         return ComposeResult {
             text: fb.text,
             temp_english: fb.temp_english,
+            applied_marks: Vec::new(),
         };
     }
 
     // Step 2 — segment.
-    let seg = segment::segment(raw, opts);
+    let seg = segment::segment(raw, opts, allow_nonadjacent);
 
     // Step 3 — apply transform marks.
-    let transformed = transform::apply_transforms(&seg.base, &seg.transforms, opts);
+    let (transformed, applied) = transform::apply_transforms(&seg.base, &seg.transforms, opts);
 
     // Step 4 — apply tone (skip for DirectMap / no tone_map).
     let text = if opts.tone_enabled && !seg.tones.is_empty() {
@@ -194,7 +237,29 @@ pub fn compose(raw: &[char], opts: &ComposeOpts) -> ComposeResult {
         transformed
     };
 
-    // Step 5 — validation-first English fallback.
+    // Step 5 — attestation gate on INFERRED NON-ADJACENT transforms.
+    //
+    // A mark whose trigger was NOT typed immediately after its target (in RAW
+    // order — see `segment::TransformMark::non_adjacent`) survives only if the
+    // composed syllable is a real, attested word. This is what fixes
+    // `"data"` → `"dât"`: the non-adjacent `a` produces a structurally valid
+    // but nonexistent syllable, so it demotes back to a literal `'a'`.
+    //
+    // `allow_nonadjacent` guards re-entry: this branch is only ever taken from
+    // a call where it is still `true`, and it always recurses with `false`,
+    // so it can fire at most once per top-level `compose()` call.
+    if allow_nonadjacent
+        && opts.attest_non_adjacent
+        && !passes_attestation_gate(&text, &applied)
+    {
+        // Demote: recompose with non-adjacent mark extraction disabled at the
+        // source (segment). This re-derives the base/marks split from raw —
+        // it does NOT mutate `text` — so already-completed ADJACENT
+        // transforms elsewhere in the word are preserved untouched.
+        return compose_internal(raw, opts, false);
+    }
+
+    // Step 6 — validation-first English fallback.
     //
     // When a tone or transform key was consumed but the composed result is NOT a
     // plausible Vietnamese syllable, the user is typing an English/non-Vietnamese
@@ -215,14 +280,39 @@ pub fn compose(raw: &[char], opts: &ComposeOpts) -> ComposeResult {
         // valid leading syllable and append a repeated tail literally
         // ("veofoo" → "vèooo", not "veofoo").  Only the full English fallback
         // remains for genuinely non-Vietnamese input ("water", "result").
-        if let Some(elong) = try_elongation_fallback(raw, opts) {
+        if let Some(elong) = try_elongation_fallback(raw, opts, allow_nonadjacent) {
             return elong;
         }
         let literal: String = raw.iter().collect();
-        return ComposeResult { text: literal, temp_english: true };
+        return ComposeResult { text: literal, temp_english: true, applied_marks: Vec::new() };
     }
 
-    ComposeResult { text, temp_english: false }
+    ComposeResult { text, temp_english: false, applied_marks: applied }
+}
+
+/// True when `text` passes the non-adjacent attestation gate: either no
+/// applied mark is flagged non-adjacent, or the composed syllable is
+/// attested.
+///
+/// Telex-style alphabetic triggers require an EXACT match (`is_attested`,
+/// whatever tone `text` currently carries) — they can never collide with an
+/// English word, since a real Telex mark key is also a base letter or a tone
+/// key, so a false alphabetic match would already have to look like a real
+/// Vietnamese word. VNI-style non-alphabetic (digit) triggers relax to a
+/// SHAPE match (`is_shape_attested`, any tone): the tone key often arrives
+/// AFTER the digit mark (`nhat61`), so the exact tone is not yet known when
+/// the gate must decide. Mixed marks (any non-alphabetic trigger present)
+/// use the relaxed check, per the phase spec.
+fn passes_attestation_gate(text: &str, applied: &[AppliedMark]) -> bool {
+    let mut flagged = applied.iter().filter(|m| m.non_adjacent).peekable();
+    if flagged.peek().is_none() {
+        return true;
+    }
+    if flagged.all(|m| m.key.is_alphabetic()) {
+        is_attested(text)
+    } else {
+        is_shape_attested(text)
+    }
 }
 
 /// Stylistic elongation fallback: when the syllable is invalid, check whether it
@@ -238,8 +328,27 @@ pub fn compose(raw: &[char], opts: &ComposeOpts) -> ComposeResult {
 /// The two guards together protect English words: the tail must REPEAT (English
 /// rarely ends in ≥2 identical letters after a valid Vietnamese prefix), and the
 /// prefix must itself be valid Vietnamese.
-fn try_elongation_fallback(raw: &[char], opts: &ComposeOpts) -> Option<ComposeResult> {
+///
+/// Only attempted from a TOP-LEVEL call (`allow_nonadjacent == true`) — never
+/// from within an attestation-gate demote. A demoted pass has already
+/// conceded "this raw sequence, once the unattested mark is stripped, is not
+/// clean Vietnamese"; re-discovering a DIFFERENT, unrelated short word via
+/// elongation's own heuristics is not a case this phase needs to support, and
+/// doing so is actively wrong for inputs like `"nasa"`: demoting the flagged
+/// `a` leaves literal base `"naa"` + tone `'s'`, `assemble::apply_tone` places
+/// the tone on the FIRST of the two literal a's (open 2-vowel syllable, no
+/// special-cased pair), giving `"ná"` — which is itself a real, attested word
+/// (`"ná"` = slingshot) — and the trailing lone `'a'` then satisfies the
+/// `lengthens_final` single-repeat allowance below, producing the spurious
+/// `"náa"`. Restricting elongation to top-level calls closes this without
+/// touching the heuristic itself (legitimate top-level elongation — a
+/// non-demoted `"khoongggg"` — never sets `allow_nonadjacent = false`).
+fn try_elongation_fallback(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> Option<ComposeResult> {
     use crate::vowel::cluster::normalize_vowel;
+
+    if !allow_nonadjacent {
+        return None;
+    }
 
     let &last = raw.last()?;
     let run = raw.iter().rev().take_while(|&&c| c == last).count();
@@ -247,7 +356,7 @@ fn try_elongation_fallback(raw: &[char], opts: &ComposeOpts) -> Option<ComposeRe
     if base_raw.is_empty() {
         return None;
     }
-    let base = compose(base_raw, opts);
+    let base = compose_internal(base_raw, opts, allow_nonadjacent);
     if base.temp_english || !could_be_vietnamese(&base.text, opts) {
         return None;
     }
@@ -270,6 +379,7 @@ fn try_elongation_fallback(raw: &[char], opts: &ComposeOpts) -> Option<ComposeRe
     Some(ComposeResult {
         text: format!("{}{}", base.text, suffix),
         temp_english: true,
+        applied_marks: Vec::new(),
     })
 }
 
