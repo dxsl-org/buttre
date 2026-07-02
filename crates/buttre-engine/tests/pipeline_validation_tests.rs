@@ -248,3 +248,30 @@ fn test_duoc_variants() {
     assert_eq!(duoc_incorrect.coda, "c");
     assert!(!duoc_incorrect.is_valid(), "đuợc should be INVALID (uơ + coda)");
 }
+
+// ── P6: coda "k" — per-nucleus rows only (u, ă), not a blanket allowance ────
+
+#[test]
+fn coda_k_valid_for_ak_and_uk_nuclei() {
+    // Đắk Lắk place-name class: nucleus "ă"/"u" + coda "k" is now structurally
+    // valid — derived from the 9 dict entries (búk, lăk, lắk, măk, úk, ăk,
+    // đăk, đắk, ắk) that used to fail to decompose entirely.
+    for w in ["đắk", "đăk", "lắk", "lăk", "măk", "ắk", "ăk", "búk", "úk"] {
+        let s = SyllableStructure::parse(w);
+        assert_eq!(s.coda, "k", "{w}: coda should extract as 'k'");
+        assert!(s.is_valid(), "{w} should be structurally valid with coda 'k'");
+    }
+}
+
+#[test]
+fn coda_k_still_invalid_for_other_nuclei() {
+    // The coda-k table entry exists, but per-nucleus combination rows gate
+    // it to "u"/"ă" only — "đik"/"đok" have no dict evidence and must stay
+    // structurally invalid (guards against a blanket "k" allowance leaking
+    // English words like "book"/"desk"-shaped input into Vietnamese).
+    for w in ["đik", "đok", "đek", "đêk", "đơk"] {
+        let s = SyllableStructure::parse(w);
+        assert_eq!(s.coda, "k", "{w}: 'k' still extracts as a coda structurally");
+        assert!(!s.is_valid(), "{w} must stay invalid — coda 'k' is not allowed for nucleus '{}'", s.nucleus);
+    }
+}

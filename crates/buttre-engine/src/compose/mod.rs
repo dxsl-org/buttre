@@ -36,6 +36,12 @@ use crate::pipeline::validation::{is_attested, is_shape_attested};
 // Re-export public types only.
 pub use segment::{AppliedMark, SegmentMode};
 
+// Crate-internal re-export: the P6 last-event parity fold P2's evidence-based
+// un-latch condition (d) will consume (see `plan.md`'s Combined Contract).
+// Not wired into any decision here — P6 only defines and pins the predicate.
+#[allow(unused_imports)] // consumed by P2; re-exported now so its path is stable.
+pub(crate) use fallback::is_last_event_undo;
+
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Validator strategy for transformation gating.
@@ -302,19 +308,31 @@ fn compose_internal(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -
 /// applied mark is flagged non-adjacent, or the composed syllable is
 /// attested.
 ///
-/// Telex-style alphabetic triggers require an EXACT match (`is_attested`,
-/// whatever tone `text` currently carries) — they can never collide with an
-/// English word, since a real Telex mark key is also a base letter or a tone
-/// key, so a false alphabetic match would already have to look like a real
-/// Vietnamese word. VNI-style non-alphabetic (digit) triggers relax to a
-/// SHAPE match (`is_shape_attested`, any tone): the tone key often arrives
-/// AFTER the digit mark (`nhat61`), so the exact tone is not yet known when
-/// the gate must decide. Mixed marks (any non-alphabetic trigger present)
-/// use the relaxed check, per the phase spec.
+/// ## Trigger classification (P6 gate hardening)
+///
+/// ASCII-digit triggers relax to a SHAPE match (`is_shape_attested`, any
+/// tone): the tone key often arrives AFTER the digit mark (`nhat61`), so the
+/// exact tone is not yet known when the gate must decide, and a real VNI
+/// digit trigger cannot occur inside an English word anyway. EVERYTHING ELSE
+/// — Telex-style alphabetic triggers AND any non-alphabetic, non-digit
+/// trigger (punctuation, in a hypothetical custom config) — requires an EXACT
+/// match (`is_attested`, whatever tone `text` currently carries): a real
+/// Telex mark key is also a base letter or a tone key, so a false alphabetic
+/// match would already have to look like a real Vietnamese word, and a
+/// punctuation trigger has no VNI-style "tone hasn't arrived yet" excuse for
+/// relaxing to shape.
+///
+/// Before this hardening, the classification was inverted — `is_alphabetic()
+/// → exact, else → shape` — which correctly handled Telex (alphabetic) and
+/// VNI (digit) but wrongly RELAXED any non-digit, non-alphabetic trigger
+/// (e.g. a punctuation trigger in a custom config) to shape-attestation too.
+/// Classifying on `is_ascii_digit()` instead closes that gap while leaving
+/// Telex and VNI byte-identical (Telex triggers are never digits; VNI
+/// triggers are always digits).
 ///
 /// ## Intrinsic trade-off (delayed-mark Telex live feedback)
 ///
-/// The exact-tone requirement for alphabetic triggers means a Telex
+/// The exact-match requirement for non-digit triggers means a Telex
 /// delayed/non-adjacent mark whose toneless form is unattested does NOT show
 /// its diacritic until the tone key is typed: `viete` composes to literal
 /// `viete` at that frame (bare `viêt` is not a word), then `+j` recomputes to
@@ -329,18 +347,18 @@ fn compose_internal(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -
 /// ## Assumption
 ///
 /// Relies on each method being single-trigger-kind (Telex: all alphabetic;
-/// VNI: all digit). A hypothetical custom config mixing both would relax a
-/// co-occurring alphabetic mark to the shape check. No shipped preset does
-/// this.
+/// VNI: all digit). A hypothetical custom config mixing digit and non-digit
+/// triggers would relax a co-occurring non-digit mark to the shape check. No
+/// shipped preset does this.
 fn passes_attestation_gate(text: &str, applied: &[AppliedMark]) -> bool {
     let mut flagged = applied.iter().filter(|m| m.non_adjacent).peekable();
     if flagged.peek().is_none() {
         return true;
     }
-    if flagged.all(|m| m.key.is_alphabetic()) {
-        is_attested(text)
-    } else {
+    if flagged.all(|m| m.key.is_ascii_digit()) {
         is_shape_attested(text)
+    } else {
+        is_attested(text)
     }
 }
 

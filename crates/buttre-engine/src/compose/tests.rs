@@ -613,3 +613,67 @@ fn medium_latched_then_more_keys_no_reentry() {
     assert!(!r.text.contains('â'), "repeated retypes must never resurrect the diacritic: {}", r.text);
 }
 
+// ── Phase 6: coda "k" (Đắk Lắk class) ─────────────────────────────────────────
+
+#[test]
+fn p6_telex_ddawks_yields_dak_acute() {
+    // dd→đ, aw→ă (both adjacent, ungated), literal 'k' coda, s→sắc tone.
+    // "đắk" is now attested (P6 re-embed) and structurally valid (per-nucleus
+    // coda-k row for "ă") — no English revert.
+    assert_eq!(compose(&raw("ddawks"), &telex_opts()).text, "đắk",
+        "ddawks (đ + ă + k + sắc) must compose to đắk");
+}
+
+#[test]
+fn p6_vni_dak_acute_via_digits() {
+    // VNI equivalent: d9 -> đ, a8 -> ă, literal 'k', '1' -> sắc.
+    assert_eq!(compose(&raw("d9a8k1"), &vni_opts()).text, "đắk",
+        "VNI d9a8k1 must compose to đắk exactly like Telex ddawks");
+}
+
+// ── Phase 6: gate hardening — trigger classification (digit vs. everything else) ──
+
+/// Synthetic custom config: apostrophe (`'`) registered as a non-alphabetic,
+/// non-digit transform trigger — same non-adjacent-firing shape as VNI's
+/// digit `'6'` in `"nhat6"`, but punctuation instead of a digit. No shipped
+/// preset does this; it exists purely to exercise `passes_attestation_gate`'s
+/// trigger classification in isolation.
+fn punctuation_trigger_opts() -> ComposeOpts {
+    let mut cfg = PipelineConfig::new("custom-punct");
+    cfg.add_transform("a'", "â");
+    ComposeOpts::from_config(&cfg)
+}
+
+#[test]
+fn p6_gate_hardening_punctuation_trigger_gets_exact_check() {
+    // "nhat'" fires â non-adjacently, giving "nhât" — whose SHAPE is attested
+    // (via "nhất") but whose EXACT (toneless) form is not (see
+    // `critical_vni_nhat61_shape_attested_no_flicker`'s doc for the same
+    // shape/exact distinction). Before the P6 hardening, the gate's
+    // classification was `is_alphabetic() -> exact, else -> shape`, which
+    // wrongly relaxed ANY non-alphabetic trigger — including punctuation —
+    // to the shape check. After hardening (`is_ascii_digit() -> shape, else
+    // -> exact`), only digit triggers get that relaxation; a punctuation
+    // trigger must get the EXACT check and demote to literal.
+    let opts = punctuation_trigger_opts();
+    let r = compose(&raw("nhat'"), &opts);
+    assert_eq!(r.text, "nhat'", "punctuation trigger must get the EXACT check, not shape-relaxed");
+    assert!(!r.text.contains('â'), "no diacritic may leak through a punctuation trigger's shape-relaxation");
+}
+
+#[test]
+fn p6_coda_k_invalid_nucleus_reverts_to_literal() {
+    // "ddik"/"ddok": dd->đ fires (attested prefix "đi"/"đo" alone), but the
+    // FULL word "đik"/"đok" has coda 'k' on nucleus "i"/"o" — no per-nucleus
+    // row for those (only "u"/"ă" do) — so `could_be_vietnamese` rejects it
+    // and the whole word reverts to the literal raw keys. Guards against the
+    // blanket-allowance risk called out in the phase's Risk Notes (English
+    // "-ik"/"-ok" endings must not start composing just because coda 'k'
+    // exists in the structural table).
+    for word in ["ddik", "ddok"] {
+        let r = compose(&raw(word), &telex_opts());
+        assert_eq!(r.text, word, "'{word}' must revert to literal — coda 'k' invalid for this nucleus");
+        assert!(!r.text.contains('đ'), "no partial đ transform may leak through: {}", r.text);
+    }
+}
+

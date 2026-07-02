@@ -203,6 +203,22 @@ pub const SYLLABLES: &[&str] = &[
 /// escape is the undo above, and frequency-based collision tiering was
 /// explicitly descoped. Entries here are the ones surfaced by this corpus.
 ///
+/// P6 addition — coda-"k" leak (red-team M1, accept-with-pins): adding coda
+/// "k" (Đắk Lắk class, `pipeline::validation`) also structurally validates
+/// nucleus "ă"/"u" + "k", which the ADJACENT `aw`→`ă` / tone-`r`→hook-on-`u`
+/// paths reach ungated (same as `how`→`hơ` — deliberately not gated by the
+/// non-adjacent attestation check):
+/// - `hawk` → `hăk`, `gawk` → `găk` — Telex only (`aw` doubling has no VNI
+///   equivalent; VNI has no letter-doubling transform at all).
+/// - `murk` → `mủk` — Telex only (`r` is a Telex hook-tone key after a vowel;
+///   VNI's tone keys are digits, so VNI `murk` never fires any mark and stays
+///   literal).
+///
+/// This documents the leak as KNOWN behavior; it is not fixed here (the
+/// per-nucleus coda-k rows are load-bearing for the Đắk Lắk place-name class
+/// and cannot distinguish "English word" from "real Vietnamese word" any more
+/// than the rest of the attestation-collision list above can).
+///
 /// The remaining new entries (`meme`, `photo`, `papa`, `salsa`, `radar`,
 /// `banana`, `canal`, `media`, `dad`, `dads`, `nasa`) compose to their literal
 /// ASCII form in both methods.
@@ -213,7 +229,7 @@ pub const ENGLISH_WORDS: &[&str] = &[
     "some", "what", "when", "where", "which", "would", "could", "should",
     "Claus", "hello", "world", "class", "style", "color", "width", "height",
     "meme", "photo", "papa", "salsa", "radar", "banana", "canal", "media",
-    "dad", "dads", "reset", "nasa", "mama",
+    "dad", "dads", "reset", "nasa", "mama", "hawk", "gawk", "murk",
 ];
 
 /// Telex sequences testing undo / double-key toggle behaviour.

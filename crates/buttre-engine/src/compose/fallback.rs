@@ -192,6 +192,49 @@ pub fn check_fallback(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
     FallbackResult::not_handled()
 }
 
+// ── Last-event parity fold (shared contract with P2) ───────────────────────────
+
+/// Table-driven parity fold: is the tail of `raw` — AS TYPED SO FAR — a
+/// just-fired undo/toggle event?
+///
+/// ## Why "table-driven"
+///
+/// Every detector this predicate goes through is driven entirely by the
+/// method's OWN tables — `opts.tone_map` (the trailing tone-key-run parity in
+/// `check_tone_toggle`'s Path 1, plus the same-tone-repress-after-coda Path
+/// 2) and `opts.transform_rules` (the trailing transform-trigger-run parity
+/// in `check_transform_toggle`, and the retype-immediacy check in
+/// `check_nonadjacent_transform_toggle`) — never a hardcoded key list.
+///
+/// ## Why delegation, not a second formula
+///
+/// An earlier proposal collapsed multi-step undo/redo to a single rule —
+/// "even trailing run of the same key ⇒ undo, odd ⇒ the mark stays on" — and
+/// red-teamed it: `vie65t5`'s trailing run of `'5'` is exactly 1 (odd), yet
+/// the syllable STILL undoes, via the separate same-tone-repress-after-coda
+/// path (`check_tone_toggle`'s Path 2), not trailing parity. One formula
+/// cannot express both paths at once. Delegating to the SAME functions
+/// [`check_fallback`] already dispatches through — rather than re-deriving
+/// the rule a second time — is what guarantees this predicate reproduces
+/// every existing detector outcome EXACTLY, by construction, not by
+/// coincidence: `a611`, `seess`, `vie65t5`, `aaa`, and `dessign`'s undo point
+/// (`"dess"`) are all pinned by the unit tests below.
+///
+/// ## Consumer (P2 — not implemented here)
+///
+/// This is the shared LAST-EVENT predicate P2's evidence-based un-latch
+/// condition (d) consumes: "is the word, as typed so far, sitting in a
+/// just-undone state" (see `plan.md`'s Combined Contract — "(d) is a
+/// LAST-EVENT parity fold sharing P6's rule", the reason P2 depends on this
+/// phase). This phase defines and pins the predicate only; deciding what to
+/// DO with an undone state (un-latch, redo, …) is P2's job — no redo
+/// behavior is implemented here, and `a6116` keeps its literal
+/// undo-is-final outcome (see `tests/vni_edge_cases.rs`).
+#[allow(dead_code)] // consumed by P2 (out of this phase's scope); exercised by unit tests until then.
+pub(crate) fn is_last_event_undo(raw: &[char], opts: &ComposeOpts) -> bool {
+    check_fallback(raw, opts, true).is_handled
+}
+
 // ── Tone toggle ───────────────────────────────────────────────────────────────
 
 /// Detect patterns like "as", "ass", "a11", "a111", …  and also the
@@ -975,5 +1018,67 @@ mod tests {
         let _ = check_fallback(&raw, &opts, true);
         assert!(PREFIX_COMPOSE_CALLS.with(|c| c.get()) > 0,
             "an eligible retype must perform at least one prefix compose");
+    }
+
+    // ── Last-event parity fold: base cases (P6) ───────────────────────────────
+    // `is_last_event_undo` must reproduce every existing detector outcome
+    // EXACTLY — these mirror the regression-critical cases from the module
+    // doc / phase spec, including the red-team `vie65t5` counter-case that
+    // falsified a naive single-parity-rule design.
+
+    #[test]
+    fn parity_fold_a611_is_undo() {
+        let opts = vni_opts();
+        let raw: Vec<char> = "a611".chars().collect();
+        assert!(is_last_event_undo(&raw, &opts), "a611's tail is a fired tone-undo (-> â1)");
+    }
+
+    #[test]
+    fn parity_fold_seess_is_undo() {
+        let opts = telex_opts_with_ee();
+        let raw: Vec<char> = "seess".chars().collect();
+        assert!(is_last_event_undo(&raw, &opts), "seess's tail is a fired tone-undo (-> sês)");
+    }
+
+    #[test]
+    fn parity_fold_vie65t5_same_tone_repress_is_undo() {
+        // Red-team counter-case: trailing run of '5' is exactly 1 (odd) — a
+        // naive one-rule parity formula would say "tone stays on", but this
+        // fires via the same-tone-repress-after-coda path (check_tone_toggle
+        // Path 2), not trailing-run parity.
+        let opts = vni_opts();
+        let raw: Vec<char> = "vie65t5".chars().collect();
+        assert!(is_last_event_undo(&raw, &opts),
+            "vie65t5 undoes via same-tone repress (-> viêt5), not trailing parity");
+    }
+
+    #[test]
+    fn parity_fold_aaa_is_undo() {
+        let opts = telex_opts();
+        let raw: Vec<char> = "aaa".chars().collect();
+        assert!(is_last_event_undo(&raw, &opts), "aaa's tail is a fired transform-undo (-> aa)");
+    }
+
+    #[test]
+    fn parity_fold_dessign_undo_fires_at_dess_not_full_word() {
+        // "dessign": the undo fires the instant raw == "dess" (2nd 's').
+        // Further typing ("ign") no longer forms an undo pattern at the
+        // tail — those keys are a literal append at the EXECUTOR level
+        // (temp_english_mode, `ComposeStage`), not a repeated undo event,
+        // so the predicate correctly says "no" once the tail has moved on.
+        let opts = telex_opts();
+        assert!(is_last_event_undo(&"dess".chars().collect::<Vec<_>>(), &opts),
+            "the 2nd 's' in dessign is the undo-firing instant");
+        assert!(!is_last_event_undo(&"dessign".chars().collect::<Vec<_>>(), &opts),
+            "the full word's tail is no longer an undo pattern");
+    }
+
+    #[test]
+    fn parity_fold_plain_compose_is_not_undo() {
+        let opts = telex_opts();
+        assert!(!is_last_event_undo(&"viet".chars().collect::<Vec<_>>(), &opts));
+        assert!(!is_last_event_undo(&"a".chars().collect::<Vec<_>>(), &opts));
+        assert!(!is_last_event_undo(&"cana".chars().collect::<Vec<_>>(), &opts),
+            "cana composes to the attested collision 'cân' — not itself an undo event");
     }
 }

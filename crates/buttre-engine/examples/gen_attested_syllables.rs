@@ -47,15 +47,14 @@ fn main() {
 /// Print per-category skip accounting to stderr, plus the full skipped-word
 /// lists so the counts can be cross-checked against `data/attested-syllables.txt`'s header.
 fn report(result: &attested_gen::GenerationResult) {
-    let (mut vowel_less, mut k_coda, mut other) = (0usize, 0usize, 0usize);
+    let (mut vowel_less, mut other) = (0usize, 0usize);
     for (_, reason) in &result.skipped {
         match reason {
             SkipReason::VowelLess => vowel_less += 1,
-            SkipReason::KCoda => k_coda += 1,
             SkipReason::Other => other += 1,
         }
     }
-    let total_skipped = vowel_less + k_coda + other;
+    let total_skipped = vowel_less + other;
     let unexplained_pct = 100.0 * other as f64 / result.total_lines.max(1) as f64;
 
     eprintln!("[gen_attested_syllables] dict lines: {}", result.total_lines);
@@ -68,7 +67,6 @@ fn report(result: &attested_gen::GenerationResult) {
         result.gi_family_fixed
     );
     eprintln!("[gen_attested_syllables] skipped vowel-less: {vowel_less}");
-    eprintln!("[gen_attested_syllables] skipped k-coda: {k_coda}");
     eprintln!("[gen_attested_syllables] skipped other (loan/typo, review manually): {other} ({unexplained_pct:.3}%)");
     eprintln!(
         "[gen_attested_syllables] total skipped: {total_skipped} ({:.3}% of {})",
@@ -78,7 +76,6 @@ fn report(result: &attested_gen::GenerationResult) {
 
     print_words("other (loan/typo)", &result.skipped, SkipReason::Other);
     print_words("vowel-less", &result.skipped, SkipReason::VowelLess);
-    print_words("k-coda", &result.skipped, SkipReason::KCoda);
 }
 
 fn print_words(label: &str, skipped: &[(String, SkipReason)], want: SkipReason) {

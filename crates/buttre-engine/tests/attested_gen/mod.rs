@@ -12,20 +12,21 @@
 //! place that owns the phonology tables.
 
 use buttre_engine::pipeline::validation::{
-    bit_index, decompose_ids, normalize_vietnamese, nucleus_id, SyllableStructure, NUM_CODAS,
-    NUM_NUCLEI, NUM_ONSETS, NUM_TONES,
+    bit_index, decompose_ids, normalize_vietnamese, SyllableStructure, NUM_CODAS, NUM_NUCLEI,
+    NUM_ONSETS, NUM_TONES,
 };
 
 /// Why a dict line failed to decompose into a structurally valid syllable.
+///
+/// P6 retired the `KCoda` category: coda "k" now has table entries
+/// (`pipeline::validation::VALID_CODAS`), so every word that used to fail
+/// decomposition ONLY because of a trailing "k" (e.g. "đắk") now decomposes
+/// successfully and is never passed to [`classify_skip`] at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     /// No Vietnamese vowel letter anywhere in the word — a consonant-only
     /// abbreviation (e.g. "đtbxh").
     VowelLess,
-    /// A trailing "k" was swallowed into the nucleus because coda "k" has no
-    /// table entry (pre-existing structural gap, tracked for P5) — place
-    /// names like "đắk".
-    KCoda,
     /// Everything else: loanwords, typos, non-standard consonant clusters.
     Other,
 }
@@ -87,7 +88,7 @@ pub fn generate(dict_text: &str) -> Result<GenerationResult, String> {
                 }
                 bits[idx / 64] |= mask;
             }
-            None => skipped.push((line.to_string(), classify_skip(line, &structure))),
+            None => skipped.push((line.to_string(), classify_skip(line))),
         }
     }
 
@@ -100,9 +101,12 @@ pub fn generate(dict_text: &str) -> Result<GenerationResult, String> {
     })
 }
 
-/// Categorize a decompose failure using the same structural signals a human
-/// reviewer would use — never a per-word lookup table.
-fn classify_skip(word: &str, structure: &SyllableStructure) -> SkipReason {
+/// Categorize a decompose failure using the same structural signal a human
+/// reviewer would use — never a per-word lookup table. The only remaining
+/// category (`VowelLess`) is a property of the raw word text; P6 retired the
+/// structural `KCoda` category (see `SkipReason` doc), so this no longer
+/// needs the parsed `SyllableStructure`.
+fn classify_skip(word: &str) -> SkipReason {
     let has_vowel = normalize_vietnamese(word).chars().any(|c| {
         matches!(
             c,
@@ -111,14 +115,6 @@ fn classify_skip(word: &str, structure: &SyllableStructure) -> SkipReason {
     });
     if !has_vowel {
         return SkipReason::VowelLess;
-    }
-    // Coda "k" is absent from VALID_CODAS, so extract_coda never matches it —
-    // the trailing "k" is swallowed into the nucleus. Detect that shape: the
-    // nucleus ends in "k" and stripping it yields a nucleus that IS valid.
-    if let Some(stripped) = structure.nucleus.strip_suffix('k') {
-        if !stripped.is_empty() && nucleus_id(stripped).is_some() {
-            return SkipReason::KCoda;
-        }
     }
     SkipReason::Other
 }

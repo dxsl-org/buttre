@@ -21,21 +21,23 @@
 #     cargo run -p buttre-engine --example gen_attested_syllables
 #
 # Skip accounting (upstream 7884 raw entries, after NFC+lowercase+dedup):
-#   embedded tuples (popcount)         : 7642
+#   embedded tuples (popcount)         : 7651
 #   gi-family (gì, gìn, gích, gíp, …)  : 11  (FIXED by extract_onset parser change, embedded — not a skip)
 #   skipped: vowel-less abbreviations  : 24  (no vowel letter at all, e.g. đtbxh — listed below)
-#   skipped: k-coda place names        : 9  (coda "k" has no table entry — structural gap, pre-existing, tracked for P5; e.g. đắk — listed below)
 #   skipped: loan/typo entries         : 142  (non-standard consonant clusters / loanwords / ethnic-minority place names / typos — listed below)
-#   total skipped                      : 175 (2.220% of 7884)
+#   total skipped                      : 166 (2.106% of 7884)
 #   unexplained remainder              : 0 (0.000%, well under the 0.5% blocker threshold — every skip below was
-#                                        manually reviewed and falls into one of the three categories above)
+#                                        manually reviewed and falls into one of the two categories above)
+#
+# P6 update: the former "k-coda place names" skip category (9 entries: búk,
+# lăk, lắk, măk, úk, ăk, đăk, đắk, ắk) is RESOLVED — coda "k" now has
+# per-nucleus table rows for "u" and "ă" (see pipeline/validation.rs,
+# `is_valid_combination`), so these 9 lines (already present in the sorted
+# body below — nothing moved) decompose and embed like any other entry.
 #
 # Skipped — vowel-less abbreviations (24):
 #   v, đ, đqg, đqgtnn, đqt, đs, đsp, đt, đtb, đtbxh, đtl, đtlx, đtm, đtntl,
 #   đtpt, đts, đtt, đttp, đttpmt, đttqg, đv, đvn, đvqg, đxx
-#
-# Skipped — k-coda place names (9):
-#   búk, lăk, lắk, măk, úk, ăk, đăk, đắk, ắk
 #
 # Skipped — loan/typo entries (142):
 #   aỏi, basoi, bayơ, blô, brâu, brôm, bìh, cacxtơ, calô, campôt, canô, clông,

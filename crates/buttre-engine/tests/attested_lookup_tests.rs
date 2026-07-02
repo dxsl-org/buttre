@@ -70,3 +70,24 @@ fn attested_rejects_conflicting_double_tone() {
     // decompose_ids must fail closed (return false) rather than pick one.
     assert!(!is_attested("việtầ"));
 }
+
+#[test]
+fn attested_true_for_reembedded_k_coda_place_names() {
+    // P6: the former "k-coda" skip category (data/attested-syllables.txt
+    // header) is resolved — these 9 dict entries now decompose and are
+    // embedded in the bitset, same as any other attested syllable.
+    for w in ["đắk", "đăk", "lắk", "lăk", "măk", "ắk", "ăk", "búk", "úk"] {
+        assert!(is_attested(w), "{w} should now be attested (P6 coda-k re-embed)");
+    }
+}
+
+#[test]
+fn attested_false_for_unattested_k_coda_shapes() {
+    // No dict evidence exists for these — the per-nucleus gate in
+    // `is_valid_combination` keeps them off the bitset AND off the shape
+    // check; a blanket "k" coda allowance would wrongly relax this.
+    for w in ["đik", "đok", "đek"] {
+        assert!(!is_attested(w), "{w} should NOT be attested");
+        assert!(!is_shape_attested(w), "{w} should NOT be shape-attested either");
+    }
+}

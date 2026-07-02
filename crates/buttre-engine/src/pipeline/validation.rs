@@ -134,6 +134,25 @@ impl SyllableStructure {
     ///
     /// This makes invalid forms like `ưin`, `ưan`, `ơc`, `oem` correctly invalid
     /// while keeping `việt`, `tiếp`, `biếc`, `thường`, `quýnh`, `giếng` valid.
+    ///
+    /// ## Coda "k" (P6 — Đắk Lắk class place names)
+    ///
+    /// Coda `k` is legal ONLY for nuclei `u` and `ă` — derived from the 9
+    /// previously-unembeddable dict entries (`búk`, `úk`; `lăk`, `lắk`, `măk`,
+    /// `ăk`, `đăk`, `đắk`, `ắk` — see `data/attested-syllables.txt`'s header).
+    /// This is deliberately NOT a blanket "k" allowance for every nucleus:
+    /// `đik`/`đok` must stay invalid (no dict evidence for those shapes), so
+    /// each nucleus arm below either includes `"k"` or does not, per the data.
+    /// The structural coda TABLE (`VALID_CODAS`) accepts `k` unconditionally —
+    /// this per-nucleus combination check is the only gate that limits it, and
+    /// it is the reason attestation-lookup (`is_attested`/`decompose_ids`,
+    /// which do not consult this function) can still embed `búk`/`đắk` while
+    /// `could_be_vietnamese` (which DOES consult this function) keeps rejecting
+    /// unattested k-coda shapes. Known accepted trade-off (red-team M1): the
+    /// adjacent Telex `aw`→`ă` / tone-`r`→hook-on-`u` paths are deliberately
+    /// ungated (same as `how`→`hơ`), so English `hawk`/`gawk`/`murk` now also
+    /// pass this check (`hăk`/`găk`/`mủk`) — pinned as known behavior in
+    /// `buttre-core`'s golden corpus, not fixed here.
     fn is_valid_combination(&self) -> bool {
         let (n, c) = (self.nucleus.as_str(), self.coda.as_str());
 
@@ -153,13 +172,16 @@ impl SyllableStructure {
         // Layer 3: per-nucleus allowed coda set (Unikey VCPairList).
         match n {
             "a" => matches!(c, "c" | "ch" | "m" | "n" | "ng" | "nh" | "p" | "t"),
-            "ă" | "â" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            // "ă" alone (not "â") also takes "k" — see the coda-"k" doc above.
+            "ă" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t" | "k"),
+            "â" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
             "e" => matches!(c, "c" | "ch" | "m" | "n" | "ng" | "nh" | "p" | "t"),
             "ê" => matches!(c, "c" | "ch" | "m" | "n" | "nh" | "p" | "t"),
             "i" => matches!(c, "c" | "ch" | "m" | "n" | "nh" | "p" | "t"),
             "o" | "ô" | "oo" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
             "ơ" => matches!(c, "m" | "n" | "p" | "t"),
-            "u" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
+            // "u" also takes "k" — see the coda-"k" doc above.
+            "u" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t" | "k"),
             "ư" => matches!(c, "c" | "m" | "n" | "ng" | "t"),
             "y" => c == "t",
             "iê" => matches!(c, "c" | "m" | "n" | "ng" | "p" | "t"),
@@ -328,16 +350,23 @@ const VALID_CODAS_2CHAR: &[&str] = &[
     "ch", "ng", "nh",
 ];
 
-/// Valid 1-character codas
+/// Valid 1-character codas.
+///
+/// `k` (P6) has no independent Vietnamese phonemic value distinct from `c` —
+/// it exists in the table only to embed the Đắk Lắk place-name class
+/// (`búk`/`lăk`/`đắk`/…). Which NUCLEUS may combine with it is restricted in
+/// `is_valid_combination` (per-nucleus rows: `u`/`ă` only), so accepting `k`
+/// unconditionally HERE only affects `extract_coda`/attestation-lookup id
+/// decomposition, never the structural plausibility check.
 const VALID_CODAS_1CHAR: &[&str] = &[
-    "c", "m", "n", "p", "t",
+    "c", "m", "n", "p", "t", "k",
 ];
 
 /// All valid codas (including empty)
 const VALID_CODAS: &[&str] = &[
     "", // Empty coda (open syllable)
     // 1-char
-    "c", "m", "n", "p", "t",
+    "c", "m", "n", "p", "t", "k",
     // 2-char
     "ch", "ng", "nh",
 ];

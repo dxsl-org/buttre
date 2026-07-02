@@ -190,6 +190,13 @@ impl PipelineStage for GatekeeperStage {
         // 3. AND last character in syllable_buffer is a space/separator or buffer is empty
         // → This is likely part of a number (like "10", "2025"), not Vietnamese
         // → PassThrough to avoid transformation
+        // TECH-DEBT: hardcoded to the "vni" method name / numeric triggers.
+        // The descoped VIQR preset (phase-07, preserved as a design record in
+        // `.agents/`) would have needed this same numeric-context detection
+        // generalized to an arbitrary config-driven trigger-class check (any
+        // non-alphabetic transform trigger, not just VNI digits) — descoped
+        // along with VIQR itself. Generalize here if a future preset adds a
+        // non-alphabetic, non-digit trigger set that also needs this guard.
         if self.method_name == "vni" && input.is_numeric() {
             // Check if we're starting a number (after space or at start)
             if ctx.syllable_buffer.is_empty() || 

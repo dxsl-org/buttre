@@ -163,17 +163,30 @@ fn test_vni_nhat61_incremental_no_flicker() {
         "incremental nhat->6->1 must complete to 'nhất', got '{}'", executor.context().syllable_buffer);
 }
 
-// Test case we're skipping (as per user request)
-// This would require complex multi-step history tracking
+// Priority 5: Multi-step undo — LITERAL / undo-is-final semantics (P6)
+//
+// a6 → â
+// a61 → ấ
+// a611 → â1 (tone undo fires: trailing "11" is an even-parity tone-undo pair;
+//            transform-preserving — â survives, tone strips, literal "1" appended)
+// a6116 → â16 (undo-is-final: temp_english_mode is now latched by the a611
+//              step, so the trailing '6' is a LITERAL append at the executor
+//              level, not a redo of the â transform)
+//
+// This is the P6 parity-fold adjudication (plan.md Combined Contract, "(d) is
+// a LAST-EVENT parity fold sharing P6's rule"): red-team review confirmed
+// executor-level `a6116`→`ấ` (full redo) is only reachable through a FUTURE
+// evidence-based un-latch probe (P2, descoped from this phase) — the
+// literal-append path (`ComposeStage`/`GatekeeperStage`'s existing
+// `temp_english_mode` handling) never re-runs `compose()` once latched, so it
+// cannot re-derive the â+sắc redo on its own. User-confirmed adjudication:
+// literal wins (simpler, undo-is-final) — do NOT attempt to produce "ấ" here.
 
 #[test]
-#[ignore = "Skipped as per user request - too complex, low value"]
 fn test_multi_step_undo_a6116() {
     let result = process_sequence("a6116");
-    // Expected behavior (if implemented):
-    // a6 → â
-    // a61 → ấ
-    // a611 → â (undo tone)
-    // a6116 → ấ (redo transform with tone)
-    assert_eq!(result, "ấ", "Expected 'ấ' after multi-step undo, got '{}'", result);
+    assert_eq!(result, "â16",
+        "a6116: undo-is-final — a611 undoes the tone (-> â1, temp_english_mode \
+         latches), then the trailing '6' is a literal append (-> â16), not a redo. \
+         Got '{}'", result);
 }
