@@ -194,10 +194,18 @@ pub const SYLLABLES: &[&str] = &[
 /// revert). Corpus-verified via golden regen (phase-05):
 /// - `reset` → `rết` (centipede) — Telex only; VNI has no letter-doubling
 ///   transform, so VNI `reset` stays the literal English word.
+/// - `mama` → `mâm` (tray) — Telex only, same reason.
 ///
-/// No other new entry (`meme`, `photo`, `papa`, `salsa`, `radar`, `banana`,
-/// `canal`, `media`, `dad`, `dads`, `nasa`) collided with an attested
-/// syllable in either method — all compose to their literal ASCII form.
+/// This list is NOT exhaustive: any English word whose non-adjacent transform
+/// happens to yield a real Vietnamese syllable will collide (attestation knows
+/// only "real syllable?", not "English or Vietnamese?"). This is an accepted
+/// design trade-off (leniency over aggressive spell-check); the universal
+/// escape is the undo above, and frequency-based collision tiering was
+/// explicitly descoped. Entries here are the ones surfaced by this corpus.
+///
+/// The remaining new entries (`meme`, `photo`, `papa`, `salsa`, `radar`,
+/// `banana`, `canal`, `media`, `dad`, `dads`, `nasa`) compose to their literal
+/// ASCII form in both methods.
 pub const ENGLISH_WORDS: &[&str] = &[
     "file", "text", "next", "expect", "window", "water", "their", "weird",
     "fix", "email", "password", "data", "type", "user", "name", "first",
@@ -205,7 +213,7 @@ pub const ENGLISH_WORDS: &[&str] = &[
     "some", "what", "when", "where", "which", "would", "could", "should",
     "Claus", "hello", "world", "class", "style", "color", "width", "height",
     "meme", "photo", "papa", "salsa", "radar", "banana", "canal", "media",
-    "dad", "dads", "reset", "nasa",
+    "dad", "dads", "reset", "nasa", "mama",
 ];
 
 /// Telex sequences testing undo / double-key toggle behaviour.

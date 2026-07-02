@@ -12,10 +12,14 @@
 //! | Assemble | [`assemble`] | Place + apply tone mark onto nucleus |
 //! | Fallback | [`fallback`] | Undo / toggle / English-fallback from key counts |
 //!
-//! ## Phase scope
+//! ## Wiring
 //!
-//! This module is a **pure library** — it does NOT touch `PipelineExecutor`
-//! or any existing stage.  Wiring happens in Phase 4.
+//! [`compose`] is a **pure** function (no hidden state, no I/O), but it is the
+//! live production core: `pipeline::stages::compose_stage` calls it on every
+//! keystroke, replacing the former incremental transform/tone/permutation
+//! stages. Purity is what lets the recompute-from-raw model work — each
+//! keystroke rebuilds the syllable from the raw buffer with no accumulated
+//! inter-stage state.
 
 mod segment;
 mod transform;
@@ -205,7 +209,11 @@ pub fn compose(raw: &[char], opts: &ComposeOpts) -> ComposeResult {
 /// gate or demote again". Since [`segment::segment`] with
 /// `allow_nonadjacent=false` extracts NO mark that would be flagged
 /// non-adjacent, the gate condition below (`applied.iter().any(non_adjacent)`)
-/// can never be true inside a `false` call — recursion is bounded at depth 1.
+/// can never be true inside a `false` call: the demote/gate re-entry is
+/// bounded at depth 1. (The one exception is [`try_elongation_fallback`],
+/// which re-enters on a STRICTLY SHORTER buffer — so it always terminates,
+/// but its depth is O(raw-len), not 1. This is only reachable from a
+/// top-level call and is bounded by the ≤16-char syllable cap.)
 fn compose_internal(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -> ComposeResult {
     if raw.is_empty() {
         return ComposeResult { text: String::new(), temp_english: false, applied_marks: Vec::new() };
@@ -303,6 +311,27 @@ fn compose_internal(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool) -
 /// AFTER the digit mark (`nhat61`), so the exact tone is not yet known when
 /// the gate must decide. Mixed marks (any non-alphabetic trigger present)
 /// use the relaxed check, per the phase spec.
+///
+/// ## Intrinsic trade-off (delayed-mark Telex live feedback)
+///
+/// The exact-tone requirement for alphabetic triggers means a Telex
+/// delayed/non-adjacent mark whose toneless form is unattested does NOT show
+/// its diacritic until the tone key is typed: `viete` composes to literal
+/// `viete` at that frame (bare `viêt` is not a word), then `+j` recomputes to
+/// `việt`. The FINAL output is always correct; only the intermediate frame of
+/// the less-common delayed-mark style defers feedback. This cannot be
+/// "fixed" by relaxing Telex to shape-attestation — `viete→viêt` and
+/// `data→dât` are the identical non-adjacent operation, and `dât`'s shape is
+/// attested (via `dật`/`dất`), so shape-relaxing Telex would reopen the very
+/// `data→dât` bug this gate exists to close. VNI escapes the trade-off only
+/// because its digit trigger cannot occur inside an English word.
+///
+/// ## Assumption
+///
+/// Relies on each method being single-trigger-kind (Telex: all alphabetic;
+/// VNI: all digit). A hypothetical custom config mixing both would relax a
+/// co-occurring alphabetic mark to the shape check. No shipped preset does
+/// this.
 fn passes_attestation_gate(text: &str, applied: &[AppliedMark]) -> bool {
     let mut flagged = applied.iter().filter(|m| m.non_adjacent).peekable();
     if flagged.peek().is_none() {
