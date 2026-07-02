@@ -74,6 +74,19 @@ raw buffer — không có state tích lũy giữa các giai đoạn bên trong l
 
 ---
 
+## Nguyên Tắc Bất Biến: Event-Sourcing
+
+Raw keystroke buffer là **event log bất biến**; chữ hiển thị chỉ là một **projection
+thuần túy** `compose(raw)`. TUYỆT ĐỐI không thêm quyết định "một chiều": không cờ/latch
+nào sau khi đặt lại ngăn việc tái tính từ raw, không tích lũy state giữa các giai đoạn.
+Mọi policy phải được **tái đánh giá từ raw đầy đủ mỗi phím** — fold phụ thuộc thứ tự trên
+log thì được (không bắt buộc stateless; bắt buộc *derivable từ raw*). Thêm field bền vững
+vào `TypingContext` là cờ đỏ khi review. Chi tiết + lý do lịch sử: xem AGENTS.md mục
+"Event-sourcing purity". `temp_english_mode` là latch di sản cuối cùng, đang được chuyển
+sang tái-suy-diễn theo bằng chứng.
+
+---
+
 ## Điều Khiển Luồng
 
 Mỗi giai đoạn trả về `StageResult`:
