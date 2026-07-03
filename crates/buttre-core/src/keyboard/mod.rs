@@ -38,6 +38,6 @@ mod vni_debug_test;
 
 // Re-export public types
 pub use config::{Config, Metadata, Rules};
-pub use keyboard::Keyboard;
+pub use keyboard::{Keyboard, BackspaceMode, ToggleSignal};
 pub use builder::KeyboardBuilder;
 

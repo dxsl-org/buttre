@@ -1,4 +1,4 @@
-use buttre_core::keyboard::{Keyboard, Config, KeyboardBuilder};
+use buttre_core::keyboard::{BackspaceMode, Config, Keyboard, KeyboardBuilder};
 use buttre_engine::pipeline::presets::vni_config;
 
 #[test]
@@ -281,4 +281,186 @@ fn boundary_repair_noop_after_p2_unlatch_single_word() {
     // Still mid-word: "vietj" alone has not unlatched yet.
     type_str(&mut kb, "e ");
     assert_eq!(kb.buffer(), "việt ", "P2 un-latch result must survive the boundary-repair probe untouched");
+}
+
+// ── Phase 4: bidirectional word toggle + raw-space backspace ────────────────
+// Test Scenario Matrix from phase-04-user-controls.md.
+
+#[test]
+fn toggle_last_word_is_bidirectional_and_repeatable() {
+    // critical row: type `reset` (shows `rết`) → hotkey → `reset`;
+    // hotkey again → `rết`.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "reset");
+    assert_eq!(kb.buffer(), "rết", "reset composes to the attested collision rết");
+
+    let action = kb.toggle_last_word().expect("toggle must act on the open trailing word");
+    assert!(matches!(action, buttre_core::Action::Replace { .. }));
+    assert_eq!(kb.buffer(), "reset", "first toggle renders literal(raw), case-preserved");
+
+    let action = kb.toggle_last_word().expect("second toggle must still find the same word");
+    assert!(matches!(action, buttre_core::Action::Replace { .. }));
+    assert_eq!(kb.buffer(), "rết", "second toggle flips back to compose(raw) — bidirectional, not one-shot");
+
+    // A third toggle proves it's genuinely repeatable, not just a 2-state latch.
+    kb.toggle_last_word().expect("third toggle must still act");
+    assert_eq!(kb.buffer(), "reset");
+}
+
+#[test]
+fn toggle_closes_the_word_so_continued_typing_starts_a_new_one() {
+    // critical row: toggle → keep typing → literal projection persists for
+    // that word; a NEW word composes independently (word-freezing per the
+    // architecture — prevents the toggled-literal + tone-key junk cascade).
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "reset");
+    kb.toggle_last_word().expect("toggle must act");
+    assert_eq!(kb.buffer(), "reset");
+
+    // Continue typing WITHOUT a separator: "gaf" (Telex 'f' = huyền on 'a')
+    // composes to "gà" if — and only if — it's treated as an independent
+    // word rather than glued onto the toggled raw span.
+    type_str(&mut kb, "gaf");
+    assert_eq!(
+        kb.buffer(),
+        "resetgà",
+        "toggled word stays literal; new word composes on its own, even with no typed separator"
+    );
+}
+
+#[test]
+fn toggle_word_survives_scroll_out_into_committed_prefix() {
+    // critical row: toggle word 2, then the word scrolls out → committed as
+    // its toggled form; the map shifts (re-anchors) rather than losing state.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "xin reset");
+    assert_eq!(kb.buffer(), "xin rết", "pre-toggle: reset composes normally");
+
+    kb.toggle_last_word().expect("toggle acts on the open trailing word ('reset')");
+    assert_eq!(kb.buffer(), "xin reset", "toggled word renders as raw literal");
+
+    // Push enough further words that "xin" scrolls into the frozen prefix
+    // while "reset" (toggled) is still live in the window — index shift.
+    type_str(&mut kb, " kim nam");
+    assert!(kb.buffer().contains("reset"), "toggle must survive the first scroll, re-anchored not lost");
+    assert!(!kb.buffer().contains("rết"), "must not have silently reverted to compose after the shift");
+
+    // Push further still so "reset" itself scrolls into `committed`.
+    type_str(&mut kb, " lan van");
+    assert!(kb.buffer().contains("reset"), "toggled word must be committed in its toggled (literal) form");
+    assert!(!kb.buffer().contains("rết"), "scrolled-out toggled word must not silently revert to composed form");
+}
+
+#[test]
+fn toggle_last_word_noop_when_window_empty() {
+    // high row: hotkey with an empty window → no-op, no crash.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    assert!(kb.toggle_last_word().is_none());
+    assert_eq!(kb.buffer(), "");
+}
+
+#[test]
+fn toggle_last_word_noop_for_non_multiword_backend() {
+    // high row: hotkey on a TSF/composition-mode keyboard → no-op, no crash.
+    // Scope: Hook multiword backend only (TSF deferred, phase-04 note).
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("composition keyboard");
+    type_str(&mut kb, "reset");
+    assert!(kb.toggle_last_word().is_none());
+}
+
+#[test]
+fn raw_backspace_pops_last_keystroke_not_last_grapheme() {
+    // high row: raw-backspace on `việt` (raw `vietj`) → `viet` — a
+    // keystroke-wise inverse, independent of display-grapheme counting.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_backspace_mode(BackspaceMode::Raw);
+    type_str(&mut kb, "vietj");
+    kb.backspace().expect("raw backspace must not error");
+    assert_eq!(kb.buffer(), "viet", "raw mode pops the last KEYSTROKE ('j'), not a display grapheme");
+}
+
+#[test]
+fn grapheme_backspace_mode_is_default_and_byte_identical_to_pre_phase() {
+    // high row: grapheme mode (default) is byte-identical to pre-phase
+    // behavior — a fresh Keyboard always starts in Grapheme mode, and the
+    // existing `test_backspace_deletes_grapheme_keeps_tone` /
+    // `test_backspace_no_desync_then_fresh_word` regression tests exercise
+    // the unchanged code path. This test guards the DEFAULT explicitly.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "vieetj");
+    assert_eq!(kb.buffer(), "việt");
+    match kb.backspace().unwrap() {
+        buttre_core::Action::Replace { backspace_count, text } => {
+            assert_eq!(backspace_count, 1, "default mode deletes exactly one displayed grapheme");
+            assert_eq!(text, "");
+        }
+        other => panic!("expected Replace{{1,\"\"}}, got {other:?}"),
+    }
+    assert_eq!(kb.buffer(), "việ");
+}
+
+#[test]
+fn raw_backspace_precisely_prunes_only_the_popped_boundary() {
+    // Map invalidation, precise case (raw mode = pure tail truncation): a
+    // raw-mode backspace entirely inside word 2 must not disturb word 1's
+    // toggle, unlike grapheme mode's conservative whole-map clear below.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_backspace_mode(BackspaceMode::Raw);
+    type_str(&mut kb, "reset");
+    kb.toggle_last_word().expect("toggle must act");
+    assert_eq!(kb.buffer(), "reset");
+
+    type_str(&mut kb, " h");
+    assert_eq!(kb.buffer(), "reset h");
+    kb.backspace().expect("raw backspace must not error"); // pops 'h'
+    assert_eq!(kb.buffer(), "reset ", "word 1's toggle survives a raw-mode edit entirely inside word 2");
+}
+
+#[test]
+fn toggle_map_conservatively_cleared_by_any_backspace_even_in_a_different_word() {
+    // medium row: toggle + backspace over the word — parity map consistent
+    // with raw edits. Map invalidation intentionally errs conservative (see
+    // `Keyboard::backspace_multiword`): a grapheme-mode backspace ANYWHERE
+    // in the live window clears ALL toggle state, even for a word untouched
+    // by the edit, rather than risk a stale offset reattaching to the wrong
+    // word after an arbitrary raw rewrite. This is the documented trade-off,
+    // asserted explicitly so a future change to it is a deliberate decision.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "reset");
+    kb.toggle_last_word().expect("toggle must act"); // word 1 -> literal
+    assert_eq!(kb.buffer(), "reset");
+
+    type_str(&mut kb, " hai");
+    assert_eq!(kb.buffer(), "reset hai", "toggle survives pure-append typing of a new word");
+
+    kb.backspace().expect("backspace must not error"); // edits word 2 only ("hai" -> "ha")
+    assert_eq!(
+        kb.buffer(),
+        "rết ha",
+        "a backspace anywhere in the window conservatively clears ALL toggle state, \
+         so word 1 reverts to its natural composed form even though only word 2 changed"
+    );
+}
+
+#[test]
+fn toggle_emits_learning_signal_for_p5_collector() {
+    // medium row: toggle emits a learning event — collector receives
+    // (raw, direction). Phase 5 seam only; not consumed here.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "reset");
+
+    kb.toggle_last_word().expect("toggle must act");
+    let signals = kb.drain_toggle_signals();
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].raw_sequence, "reset");
+    assert!(signals[0].literal, "first toggle direction is literal");
+
+    // Draining must actually clear the queue (no duplicate delivery).
+    assert!(kb.drain_toggle_signals().is_empty());
+
+    kb.toggle_last_word().expect("second toggle must act");
+    let signals = kb.drain_toggle_signals();
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].raw_sequence, "reset");
+    assert!(!signals[0].literal, "second toggle flips back to compose");
 }

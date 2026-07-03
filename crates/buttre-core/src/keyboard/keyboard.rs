@@ -7,12 +7,59 @@
 use crate::Action;
 use buttre_engine::pipeline::{PipelineExecutor, PipelineConfig};
 use buttre_engine::types::Action as EngineAction;
+use std::collections::HashMap;
 
 /// How many words the editable rolling window keeps (current + N-1 previous).
 /// 3 = current word + 2 words back (matches "fix 1–2 previous words").
 const MAX_WINDOW_WORDS: usize = 3;
 /// Safety cap on the window's raw length (bounds recompute cost).
 const MAX_WINDOW_RAW: usize = 64;
+
+/// Backspace deletion granularity (event-sourcing-completion Phase 4).
+///
+/// `Grapheme` (default): delete the last DISPLAYED character — search for the
+/// raw-key subset that recomputes to that shorter display. Unchanged existing
+/// behavior (`backspace_multiword`/`backspace_legacy`).
+///
+/// `Raw`: delete the last RAW KEYSTROKE and recompute from what remains — the
+/// trivially-correct inverse operation in an event-sourced buffer (no search
+/// needed). Trade-off: can delete more or less than one visible grapheme
+/// (undoing a tone key removes only the accent, for example) — that's the
+/// whole point of the mode, for users who think in keystrokes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackspaceMode {
+    #[default]
+    Grapheme,
+    Raw,
+}
+
+impl BackspaceMode {
+    /// Parse from the persisted `Settings::backspace_mode` string. Unknown or
+    /// missing values fall back to `Grapheme` — a corrupt/foreign
+    /// settings.toml must never disable the safe default.
+    pub fn from_settings_str(s: &str) -> Self {
+        match s {
+            "raw" => Self::Raw,
+            _ => Self::Grapheme,
+        }
+    }
+}
+
+/// One toggle event's learning signal (event-sourcing-completion Phase 4,
+/// consumed by Phase 5): the raw keystrokes of the toggled word and which
+/// direction the user chose. A user toggling `rết` → `reset` is the
+/// strongest possible preference signal — Phase 5's collector drains these
+/// via `Keyboard::drain_toggle_signals`. NOT implemented here; this type only
+/// carries the signal so the seam exists without pulling learning logic into
+/// this phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToggleSignal {
+    /// The word's raw keystrokes, original case, as typed.
+    pub raw_sequence: String,
+    /// `true` if the user chose the literal(raw) projection, `false` for
+    /// compose(raw).
+    pub literal: bool,
+}
 
 /// Main keyboard struct
 pub struct Keyboard {
@@ -34,6 +81,33 @@ pub struct Keyboard {
     /// Frozen display prefix: words that scrolled out of the window.  Never
     /// recomputed; only a common-prefix anchor for the screen diff.
     committed: String,
+
+    /// Word-freezing toggle map (event-sourcing-completion Phase 4): raw
+    /// char-index (exclusive end offset, i.e. the key a word run ends at) →
+    /// `true` (render literal(raw), case-preserved) or `false` (render
+    /// compose(raw) with `closed=true` — the word is closed BY the toggle,
+    /// per P3's boundary-repair projection). A toggle also forces a word
+    /// boundary at that offset even without a real separator character, so
+    /// `word_runs`/`compose_window` split the run there — see their docs.
+    /// Absent entries render via the normal (untouched) open/closed logic.
+    ///
+    /// INVARIANT: every key must be a valid word-run end for the CURRENT
+    /// `raw` (see `word_runs`); any raw mutation that isn't a pure append
+    /// must clear or re-anchor entries so a stale offset never attaches to
+    /// the wrong word (see `backspace_multiword`, `backspace_multiword_raw`,
+    /// `scroll_out_overflow`, `reset`).
+    toggle_map: HashMap<usize, bool>,
+
+    /// Pending learning signals for Phase 5's collector (see `ToggleSignal`).
+    /// Only ever appended to by `toggle_last_word`; drained externally.
+    toggle_signals: Vec<ToggleSignal>,
+
+    /// Backspace deletion granularity (event-sourcing-completion Phase 4).
+    /// Set from `Settings::backspace_mode` by the platform layer via
+    /// `set_backspace_mode` — `Keyboard::new` always starts at the engine
+    /// default (`Grapheme`) because `PipelineConfig` has no app-settings
+    /// concept of its own.
+    backspace_mode: BackspaceMode,
 }
 
 impl Keyboard {
@@ -57,9 +131,28 @@ impl Keyboard {
             multiword,
             raw: Vec::new(),
             committed: String::new(),
+            toggle_map: HashMap::new(),
+            toggle_signals: Vec::new(),
+            backspace_mode: BackspaceMode::default(),
         })
     }
-    
+
+    /// Override the backspace deletion mode (event-sourcing-completion Phase
+    /// 4). `Keyboard::new` always starts at `BackspaceMode::Grapheme`; the
+    /// platform layer calls this after loading `Settings` (and again after
+    /// every method switch, since a new `Keyboard` instance restarts at the
+    /// default) — see `buttre-platform/src/main.rs`.
+    pub fn set_backspace_mode(&mut self, mode: BackspaceMode) {
+        self.backspace_mode = mode;
+    }
+
+    /// Drain pending toggle learning signals (event-sourcing-completion
+    /// Phase 5 seam — see `ToggleSignal`). Not implemented here; Phase 5's
+    /// collector will poll this after each hook cycle.
+    pub fn drain_toggle_signals(&mut self) -> Vec<ToggleSignal> {
+        std::mem::take(&mut self.toggle_signals)
+    }
+
     /// Process a keystroke
     /// 
     /// Returns a vector of actions to perform. Usually contains 1-2 actions:
@@ -176,7 +269,10 @@ impl Keyboard {
     /// and lets the host delete the separator / previous word.
     pub fn backspace(&mut self) -> anyhow::Result<Action> {
         if self.multiword {
-            return self.backspace_multiword();
+            return match self.backspace_mode {
+                BackspaceMode::Raw => self.backspace_multiword_raw(),
+                BackspaceMode::Grapheme => self.backspace_multiword(),
+            };
         }
         self.backspace_legacy()
     }
@@ -199,9 +295,51 @@ impl Keyboard {
         target_chars.pop();
         let target: String = target_chars.into_iter().collect();
 
+        // Map invalidation (event-sourcing-completion Phase 4, red-team
+        // M5/M3 CRITICAL): the search below (`find_window_backspace_raw`) can
+        // remove a raw key from the MIDDLE of the window, or truncate to an
+        // arbitrary prefix — either can renumber every offset after the edit,
+        // so a stale `toggle_map` entry could silently attach to the WRONG
+        // word once the array is renumbered. Clear before searching (so the
+        // search's own `compose_window` probes never contaminate on a stale
+        // boundary either). Conservative — this also drops toggle state for
+        // OTHER, untouched words still in the window — but always correct;
+        // the user just re-toggles. `backspace_multiword_raw` (below) is the
+        // precise-invalidation counterpart for the pure-truncation case.
+        self.toggle_map.clear();
+
         self.raw = self.find_window_backspace_raw(&raw, &target);
         let raw2 = self.raw.clone();
         let new_window = self.compose_window(&raw2);
+        let new = format!("{}{}", self.committed, new_window);
+        self.buffer = new.clone();
+
+        Ok(diff_to_action(&old, &new))
+    }
+
+    /// Raw-space backspace (event-sourcing-completion Phase 4,
+    /// `BackspaceMode::Raw`): pop the last RAW keystroke and recompute — the
+    /// trivially-correct inverse for an event-sourced buffer, no search
+    /// needed (unlike grapheme mode). May delete more or less than one
+    /// visible grapheme (undoing a tone key removes only the accent, for
+    /// example); that trade-off is the mode's whole purpose.
+    fn backspace_multiword_raw(&mut self) -> anyhow::Result<Action> {
+        if self.raw.is_empty() {
+            self.reset();
+            return Ok(Action::DoNothing);
+        }
+        let old = self.buffer.clone();
+        self.raw.pop();
+
+        // Map invalidation, precise case: a pure tail truncation never
+        // renumbers surviving offsets (unlike grapheme mode's arbitrary
+        // rewrite above), so only entries pointing past the new (shorter)
+        // raw length are stale — drop exactly those, keep the rest.
+        let len = self.raw.len();
+        self.toggle_map.retain(|&end, _| end <= len);
+
+        let raw = self.raw.clone();
+        let new_window = self.compose_window(&raw);
         let new = format!("{}{}", self.committed, new_window);
         self.buffer = new.clone();
 
@@ -334,6 +472,10 @@ impl Keyboard {
         self.buffer.clear();
         self.raw.clear();
         self.committed.clear();
+        // Map invalidation (event-sourcing-completion Phase 4): a hard reset
+        // discards `raw` entirely, so every toggle offset is stale by
+        // definition.
+        self.toggle_map.clear();
     }
 
     /// Word-boundary final repair probe (event-sourcing-completion Phase 3):
@@ -402,7 +544,62 @@ impl Keyboard {
             let frozen = self.compose_window(&head);
             self.committed.push_str(&frozen);
             self.raw.drain(..i);
+
+            // Map re-anchor (event-sourcing-completion Phase 4, red-team
+            // M5/M3): entries fully inside the scrolled-out prefix (`end <=
+            // i`) are now permanently baked into `committed` above (rendered
+            // with the CURRENT map, before this drain) — drop them. Entries
+            // for the surviving window shift left by `i` so they keep
+            // pointing at the same word. Precise, not a wholesale clear:
+            // scrolling is routine (happens on nearly every keystroke once
+            // the window is full), so clearing here would make toggles
+            // evaporate on ordinary continued typing, not just on edits.
+            // NOTE: `filter` then `map` (not `filter_map(.., .then_some(...))`
+            // or `.then(...)`) — `end - i` must only ever be evaluated for
+            // entries that already passed the `end > i` guard, or it
+            // underflows for any entry with `end <= i`.
+            self.toggle_map = self
+                .toggle_map
+                .iter()
+                .filter(|&(&end, _)| end > i)
+                .map(|(&end, &literal)| (end - i, literal))
+                .collect();
         }
+    }
+
+    /// Word-run boundaries in `raw`: `(start, end)` for each maximal
+    /// alphanumeric span, split at natural separators AND at any forced
+    /// toggle boundary (event-sourcing-completion Phase 4 — a toggle closes
+    /// a word even without a typed separator, so later raw chars start a new
+    /// run instead of extending the toggled one). Pure query; separators
+    /// themselves are not returned, callers emit them verbatim.
+    fn word_runs(&self, raw: &[char]) -> Vec<(usize, usize)> {
+        let mut runs = Vec::new();
+        let mut i = 0;
+        while i < raw.len() {
+            if Self::is_window_separator(raw[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut end = start;
+            while end < raw.len() && !Self::is_window_separator(raw[end]) {
+                end += 1;
+            }
+            if let Some(&forced) = self.toggle_map.keys().filter(|&&b| b > start && b <= end).min() {
+                end = forced;
+            }
+            runs.push((start, end));
+            i = end;
+        }
+        runs
+    }
+
+    /// The `(start, end)` bounds of the last word run in `raw` (see
+    /// `word_runs`), or `None` if the window holds no word to act on (empty,
+    /// or trailing separators only).
+    fn last_word_run(&self, raw: &[char]) -> Option<(usize, usize)> {
+        self.word_runs(raw).last().copied()
     }
 
     /// Compose a window's raw keys: compose each alphanumeric word run via the
@@ -415,24 +612,72 @@ impl Keyboard {
     /// the per-keystroke live-typing projection. Re-opening a closed word
     /// (backspacing its separator away) is automatic and needs no special
     /// casing: the very next call here simply finds `closed = false` for it.
+    ///
+    /// A run whose end is in `toggle_map` (event-sourcing-completion Phase 4)
+    /// overrides this: `Some(true)` renders literal(raw) case-preserved (no
+    /// compose at all); `Some(false)` renders compose(raw) with `closed =
+    /// true` — the toggle itself closed the word, regardless of whether a
+    /// real separator ever follows.
     fn compose_window(&mut self, raw: &[char]) -> String {
+        let runs = self.word_runs(raw);
         let mut out = String::new();
-        let mut i = 0;
-        while i < raw.len() {
-            if Self::is_window_separator(raw[i]) {
-                out.push(raw[i]);
-                i += 1;
-            } else {
-                let start = i;
-                while i < raw.len() && !Self::is_window_separator(raw[i]) {
-                    i += 1;
-                }
-                let word: Vec<char> = raw[start..i].to_vec();
-                let closed = i < raw.len();
-                out.push_str(&self.compose_one_word(&word, closed));
-            }
+        let mut cursor = 0;
+        for (start, end) in runs {
+            // Separators (or nothing) between the previous run and this one.
+            out.push_str(&raw[cursor..start].iter().collect::<String>());
+            let word = &raw[start..end];
+            let rendered = match self.toggle_map.get(&end).copied() {
+                Some(true) => word.iter().collect::<String>(),
+                Some(false) => self.compose_one_word(word, true),
+                None => self.compose_one_word(word, end < raw.len()),
+            };
+            out.push_str(&rendered);
+            cursor = end;
         }
+        out.push_str(&raw[cursor..].iter().collect::<String>());
         out
+    }
+
+    /// Toggle the last (current) window word between `literal(raw)` and
+    /// `compose(raw)` (event-sourcing-completion Phase 4) — the raw-log
+    /// architecture's own bidirectional escape hatch, repeatable in either
+    /// direction (unlike Unikey's one-shot Ctrl+Shift+Esc, which destroys the
+    /// composed form and can't be pressed again to undo itself).
+    ///
+    /// Also FREEZES the word: from this point it is treated as closed
+    /// regardless of whether a real separator ever follows, so continued
+    /// typing starts a NEW word instead of extending the toggled one. This
+    /// prevents a tone/transform key typed right after the toggle from
+    /// silently mutating the frozen word (the junk-letter cascade) and from
+    /// mis-attributing a later learning signal to the wrong raw span.
+    ///
+    /// No-op (`None`) when: not in multiword mode (TSF/Nôm/native — scope
+    /// note, TSF deferred), or the window holds no word to toggle (empty, or
+    /// only trailing separators).
+    pub fn toggle_last_word(&mut self) -> Option<Action> {
+        if !self.multiword {
+            return None;
+        }
+        let raw = self.raw.clone();
+        let (start, end) = self.last_word_run(&raw)?;
+        if start >= end {
+            return None;
+        }
+
+        let old = self.buffer.clone();
+        // First toggle (no entry, or a prior `false`/compose entry) goes
+        // literal; toggling an existing literal entry flips it back.
+        let now_literal = !matches!(self.toggle_map.get(&end), Some(true));
+        self.toggle_map.insert(end, now_literal);
+
+        let raw_sequence: String = raw[start..end].iter().collect();
+        self.toggle_signals.push(ToggleSignal { raw_sequence, literal: now_literal });
+
+        let window = self.compose_window(&raw);
+        let new = format!("{}{}", self.committed, window);
+        self.buffer = new.clone();
+
+        Some(diff_to_action(&old, &new))
     }
 
     /// Compose a single separator-free word via the executor (recompute-from-raw).

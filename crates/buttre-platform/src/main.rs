@@ -16,13 +16,15 @@
 //! ## Backend calls buttre-keyboard DIRECTLY (NOT via buttre-core::Engine)
 
 use anyhow::Result;
-use buttre_core::state::Settings;
+use buttre_core::state::{Settings, StateObserver};
 use buttre_platform::shared::{KeyboardManager, MethodRegistry, pipe_server};
 use buttre_platform::shared::ui::{build_menu, create_tray_icon, show_help_dialog, MenuItems, helpers};
 use buttre_platform::shared::observers::{UIObserver, MainUICallback, UIEvent, KeyboardObserver};
 use log::{info, error, warn};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use buttre_core::AppState;
+use buttre_core::Keyboard;
+use buttre_core::keyboard::BackspaceMode;
 use buttre_core::hotkey::{ButtreHotkeyManager, HotkeyAction};
 use buttre_platform::{Backend, PlatformBackend, platform_name};
 use winit::{
@@ -30,6 +32,54 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
 };
 use std::sync::mpsc;
+
+/// Apply the backspace-deletion mode to whatever `Keyboard` is currently
+/// loaded (event-sourcing-completion Phase 4). A no-op in English mode
+/// (`keyboard` is `None`) — nothing to set it on.
+fn apply_backspace_mode(keyboard: &Arc<RwLock<Option<Keyboard>>>, mode: BackspaceMode) {
+    if let Ok(mut guard) = keyboard.write() {
+        if let Some(kb) = guard.as_mut() {
+            kb.set_backspace_mode(mode);
+        }
+    } else {
+        error!("apply_backspace_mode: keyboard lock poisoned, skipping");
+    }
+}
+
+/// Re-applies `backspace_mode` after every input-method switch.
+/// `KeyboardObserver` REPLACES the `Keyboard` instance behind the shared
+/// handle on method change (`Keyboard::new` always starts at the engine
+/// default, `BackspaceMode::Grapheme`), which would otherwise silently drop
+/// the user's persisted raw-backspace preference. Must be registered AFTER
+/// `KeyboardObserver` so the new instance already exists when this fires.
+struct BackspaceModeObserver {
+    keyboard: Arc<RwLock<Option<Keyboard>>>,
+    mode: BackspaceMode,
+}
+
+impl StateObserver for BackspaceModeObserver {
+    fn on_method_changed(&self, _method: &str, _enabled: bool) {
+        apply_backspace_mode(&self.keyboard, self.mode);
+    }
+
+    fn on_settings_changed(&self, _settings: &Settings) {}
+}
+
+/// Route the `ToggleLastWord` hotkey to the Hook backend's delivery path
+/// (event-sourcing-completion Phase 4). Hook multiword backend only — see
+/// `hook.rs` for the focus guard and chord-exemption CRITICALs this depends
+/// on. TSF is deferred (scope note, phase-04-user-controls.md): TSF's own
+/// `Keyboard` instances live inside `vietnamese_engine.rs` and never touch
+/// this `keyboard` handle, so its window is always empty here — this no-ops
+/// safely for that backend too, with no extra branching needed. Also a safe
+/// no-op on non-Windows platforms (not yet implemented there).
+#[cfg(platform_windows)]
+fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
+    buttre_platform::platforms::windows::hook::dispatch_toggle_last_word(keyboard);
+}
+
+#[cfg(not(platform_windows))]
+fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
 
 fn main() -> Result<()> {
     // Initialize tracing (handles both log crate and tracing crate)
@@ -125,8 +175,17 @@ fn main() -> Result<()> {
     if let Err(e) = keyboard_manager.set_method(&settings.input_method) {
         error!("Failed to set initial input method: {:?}", e);
     }
-    
+
     let keyboard = keyboard_manager.get_keyboard();
+
+    // Apply the persisted backspace-deletion mode (event-sourcing-completion
+    // Phase 4). `Keyboard::new` always starts at the engine default
+    // (`BackspaceMode::Grapheme`) — the platform layer is the only place
+    // that knows `Settings::backspace_mode`, so it must apply it explicitly,
+    // both now and after every future method switch (see
+    // `BackspaceModeObserver`, registered below).
+    let backspace_mode = BackspaceMode::from_settings_str(&settings.backspace_mode);
+    apply_backspace_mode(&keyboard, backspace_mode);
 
     // --- Platform Backend Setup ---
     let mut backend = Backend::new()?;
@@ -184,7 +243,15 @@ fn main() -> Result<()> {
         // Keyboard observer - updates keyboard when method changes
         let kb_manager = keyboard_manager;
         state.add_observer(Arc::new(KeyboardObserver::new(kb_manager)));
-        
+
+        // Backspace-mode observer (event-sourcing-completion Phase 4) - MUST
+        // be registered AFTER KeyboardObserver so the Keyboard instance it
+        // re-applies the mode to already reflects the new method.
+        state.add_observer(Arc::new(BackspaceModeObserver {
+            keyboard: keyboard.clone(),
+            mode: backspace_mode,
+        }));
+
         // Backend observer - updates Platform backend mode
         state.add_observer(backend.clone());
         
@@ -274,6 +341,10 @@ fn main() -> Result<()> {
                                     error!("Failed to set method: {:?}", e);
                                 }
                             }
+                        }
+                        HotkeyAction::ToggleLastWord => {
+                            info!("Hotkey: ToggleLastWord");
+                            dispatch_toggle_last_word(&keyboard);
                         }
                     }
                 }

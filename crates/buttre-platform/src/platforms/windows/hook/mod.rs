@@ -2,7 +2,7 @@ mod hook;
 mod profiling;
 mod queue;
 
-pub use hook::{install_hook, run_message_loop, uninstall_hook};
+pub use hook::{install_hook, run_message_loop, uninstall_hook, dispatch_toggle_last_word};
 pub use profiling::{HOOK_PROFILER, ProfileStats};
 pub use queue::{QueueProcessor, KeyEvent};
 pub use crate::platforms::windows::common::{send_backspaces, send_string, send_unicode_char};

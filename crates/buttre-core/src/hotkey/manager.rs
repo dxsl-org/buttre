@@ -22,6 +22,14 @@ pub enum HotkeyAction {
     Nom,  // Unified Nôm method
     /// Switch to custom method (index)
     Custom(usize),
+    /// Toggle the last (current) multi-word window word between
+    /// `literal(raw)` and `compose(raw)` (event-sourcing-completion Phase
+    /// 4). Hook multiword backend only — see `buttre_platform`'s
+    /// `platforms::windows::hook::dispatch_toggle_last_word`, which no-ops
+    /// safely for TSF/empty-window. Chord (Ctrl+Shift+Z) is exempted from
+    /// `hook.rs`'s modifier-reset (`is_toggle_chord_exempt`) — keep both in
+    /// sync if this chord ever changes.
+    ToggleLastWord,
 }
 
 /// Manages global hotkeys for buttre
@@ -60,14 +68,42 @@ impl ButtreHotkeyManager {
         
         for (mods, code, action) in hotkey_configs {
             let hotkey = HotKey::new(Some(mods), code);
-            
+
             manager.register(hotkey)
                 .map_err(|e| HotkeyError::RegistrationFailed(format!("{:?}: {}", action, e)))?;
-            
+
             info!("Registered hotkey {:?} + {:?} -> {:?} (ID: {})", mods, code, action, hotkey.id());
             hotkeys.insert(hotkey.id(), action);
         }
-        
+
+        // ToggleLastWord (event-sourcing-completion Phase 4): registered
+        // LENIENTLY (warn + continue, not `?`) — unlike the core hotkeys
+        // above, Ctrl+Shift+Z is a common app-level "redo" accelerator
+        // elsewhere, so a registration collision is plausible. A collision
+        // here must not take down method-switching/EN-VI toggle. Default
+        // chord per the checkpointed decision (user-confirmed 2026-07-02);
+        // NOT Ctrl+Shift+Esc — that's owned by Windows Task Manager and
+        // cannot be registered at all (verified). Must stay in sync with the
+        // chord exemption in buttre-platform's `hook.rs`
+        // (`is_toggle_chord_exempt`).
+        let toggle_hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyZ);
+        match manager.register(toggle_hotkey) {
+            Ok(()) => {
+                info!(
+                    "Registered hotkey Ctrl+Shift+Z -> ToggleLastWord (ID: {})",
+                    toggle_hotkey.id()
+                );
+                hotkeys.insert(toggle_hotkey.id(), HotkeyAction::ToggleLastWord);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to register ToggleLastWord hotkey (Ctrl+Shift+Z): {} — \
+                     word-toggle feature disabled this session",
+                    e
+                );
+            }
+        }
+
         info!("Hotkey manager initialized with {} hotkeys", hotkeys.len());
         
         Ok(Self {
@@ -165,6 +201,43 @@ impl Drop for ButtreHotkeyManager {
             // Note: We can't easily unregister by ID, but GlobalHotKeyManager
             // will clean up on drop
             debug!("Cleaning up hotkey {:?} (ID: {})", action, id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── HotkeyAction::ToggleLastWord (event-sourcing-completion Phase 4) ────
+
+    #[test]
+    fn toggle_last_word_action_parses_and_compares() {
+        assert_eq!(HotkeyAction::ToggleLastWord, HotkeyAction::ToggleLastWord);
+        assert_ne!(HotkeyAction::ToggleLastWord, HotkeyAction::Toggle);
+        assert_ne!(HotkeyAction::ToggleLastWord, HotkeyAction::Custom(0));
+    }
+
+    #[test]
+    fn manager_creation_never_panics_on_toggle_registration() {
+        // CI/headless environments can fail ALL global hotkey registration
+        // (no desktop session) — `ButtreHotkeyManager::new()` itself may
+        // legitimately return `Err` (see the pre-existing
+        // `hotkey_tests::test_create_manager` tolerance). This test only
+        // asserts the LENIENT registration path for ToggleLastWord never
+        // panics or aborts manager creation when the core hotkeys DO
+        // succeed — a Ctrl+Shift+Z collision must degrade gracefully, not
+        // take down method-switching.
+        if let Ok(mgr) = ButtreHotkeyManager::new() {
+            let registered = mgr
+                .hotkeys
+                .values()
+                .any(|a| matches!(a, HotkeyAction::ToggleLastWord));
+            // Either outcome is acceptable (registration can fail on a
+            // collision) — the point is we got here without a panic/abort.
+            eprintln!("ToggleLastWord hotkey registered: {registered}");
+        } else {
+            eprintln!("Note: hotkey manager creation failed (expected in CI/headless)");
         }
     }
 }

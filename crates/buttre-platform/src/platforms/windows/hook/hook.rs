@@ -73,15 +73,16 @@ use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, 
+    CallNextHookEx, GetForegroundWindow, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
     KBDLLHOOKSTRUCT, MSG,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, 
+    WH_KEYBOARD_LL, WH_MOUSE_LL,
     WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN,
 };
 
 use crate::platforms::windows::common::{
-    is_buffer_reset_key, is_special_key, send_backspaces, send_string, send_replacement,
+    is_buffer_reset_key, is_modifier_key, is_special_key, send_backspaces, send_string,
+    send_replacement,
     VK_BACK,
     show_candidates, hide_candidates,
 };
@@ -148,6 +149,131 @@ static PROCESSING: AtomicBool = AtomicBool::new(false);
 static LAST_KEY: AtomicU8 = AtomicU8::new(0);
 static LAST_KEY_TIME: AtomicU64 = AtomicU64::new(0);
 const FAST_TYPING_THRESHOLD_MS: u64 = 150; // ms between same keys to trigger escape
+
+// ============================================================================
+// TOGGLE-LAST-WORD FOCUS GUARD (event-sourcing-completion Phase 4, red-team
+// CRITICAL)
+// ============================================================================
+// `ToggleLastWord` is dispatched from the winit event loop (a DIFFERENT
+// thread/tick than this hook callback) after `global-hotkey` reports its
+// Pressed event. Between the user's last real keystroke and that dispatch,
+// focus can move (alt-tab, a toast notification stealing focus, a
+// programmatic `SetForegroundWindow` from another app). Without a guard, the
+// toggle's backspace+replace burst would land in whatever window happens to
+// have focus NOW — potentially deleting text in a completely unrelated app.
+//
+// `LAST_OUTPUT_HWND` records the foreground window at the moment this hook
+// last actually injected output; the dispatch compares against it before
+// sending anything. `0` is the safe "never recorded" sentinel — it can never
+// equal a real HWND, so the guard fails (no-op) until the first real output.
+//
+// CAVEAT: only the synchronous processing path below calls
+// `record_output_hwnd()`. The `async-queue` feature (off by default — see
+// buttre-platform/Cargo.toml) completes its `SendInput` calls on the
+// queue-processor thread (queue.rs, outside this phase's file ownership) and
+// never updates this — the guard then simply never matches, so the toggle
+// safely no-ops instead of misbehaving. Follow-up: wire this into queue.rs if
+// async-queue ever ships.
+static LAST_OUTPUT_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Record the current foreground window as the focus-guard's baseline. Call
+/// after every real output this hook injects via `SendInput`.
+#[cfg(windows)]
+fn record_output_hwnd() {
+    // SAFETY: GetForegroundWindow takes no arguments and cannot fail; it may
+    // return NULL (0) if no window currently has focus, which is stored as
+    // the same "never matches" sentinel used for the initial state.
+    let hwnd = unsafe { GetForegroundWindow() };
+    LAST_OUTPUT_HWND.store(hwnd as isize, Ordering::Release);
+}
+
+/// Pure comparison extracted from `dispatch_toggle_last_word` so it's
+/// unit-testable without a live HWND. `0` never matches (see the module docs
+/// above) — the safe default before the very first recorded output.
+fn focus_guard_ok(current_hwnd: isize, recorded_hwnd: isize) -> bool {
+    recorded_hwnd != 0 && current_hwnd == recorded_hwnd
+}
+
+/// True when `(mods, vk)` is part of the registered `ToggleLastWord` chord
+/// (Ctrl+Shift+Z — must match `buttre_core::hotkey::manager::
+/// ButtreHotkeyManager::new`'s registration) and must NOT trigger the
+/// modifier-reset in `keyboard_proc` (event-sourcing-completion Phase 4,
+/// red-team CRITICAL).
+///
+/// Without this exemption, every keydown in the chord — INCLUDING the bare
+/// Ctrl and Shift keydowns that precede 'Z' — resets the engine (see the
+/// modifier-reset block below), wiping the multiword window before
+/// `global-hotkey` ever delivers its (asynchronous, next-event-loop-tick)
+/// Pressed event. The toggle would be a guaranteed no-op without this.
+///
+/// Surgical on purpose: a bare modifier keydown alone can never complete a
+/// shortcut by itself (only a trailing key can), so exempting it doesn't
+/// change behavior for ANY other Ctrl/Alt/Win combination — including the
+/// other method-switch hotkeys, which still reset exactly as before on
+/// their own trailing key.
+fn is_toggle_chord_exempt(mods: ModifierState, vk: u16) -> bool {
+    // Keep in sync with `ButtreHotkeyManager::new`'s Ctrl+Shift+Z
+    // registration (`Code::KeyZ`).
+    const TOGGLE_CHORD_VK: u16 = 0x5A; // 'Z'
+
+    if is_modifier_key(vk) {
+        return true;
+    }
+    mods.ctrl && mods.shift && !mods.alt && !mods.win && vk == TOGGLE_CHORD_VK
+}
+
+/// Dispatch the `ToggleLastWord` hotkey (event-sourcing-completion Phase 4).
+/// Called from the platform-agnostic `main.rs` event loop when the global
+/// hotkey fires.
+///
+/// No-ops (sends nothing) when: focus has moved to a different foreground
+/// window since our last output (the CRITICAL focus guard above — sending
+/// here would corrupt an unrelated app), or `Keyboard::toggle_last_word`
+/// itself has nothing to toggle (empty window, or a non-multiword
+/// backend/method — this also covers the TSF backend, whose own `Keyboard`
+/// instances live in `vietnamese_engine.rs` and never touch the `keyboard`
+/// handle passed in here, so its window is always empty).
+#[cfg(windows)]
+pub fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
+    // SAFETY: GetForegroundWindow takes no arguments and cannot fail.
+    let current_hwnd = unsafe { GetForegroundWindow() } as isize;
+    let recorded_hwnd = LAST_OUTPUT_HWND.load(Ordering::Acquire);
+    if !focus_guard_ok(current_hwnd, recorded_hwnd) {
+        debug!(
+            "ToggleLastWord: focus changed since last output ({recorded_hwnd:#x} -> {current_hwnd:#x}), no-op"
+        );
+        return;
+    }
+
+    let action = {
+        let mut kb_opt = match keyboard.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        kb_opt.as_mut().and_then(Keyboard::toggle_last_word)
+    };
+
+    match action {
+        Some(Action::Replace { backspace_count, text }) => {
+            send_replacement(backspace_count, &text);
+            record_output_hwnd();
+        }
+        Some(Action::Commit(text)) => {
+            if !text.is_empty() {
+                send_string(&text);
+                record_output_hwnd();
+            }
+        }
+        // `toggle_last_word` only ever returns via `diff_to_action`, which
+        // yields `DoNothing`/`Commit`/`Replace` — the other `Action`
+        // variants can't occur here, but are handled inertly (not a panic)
+        // in case that invariant ever changes.
+        _ => {}
+    }
+}
+
+#[cfg(not(windows))]
+pub fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
 
 // [rest of struct ModifierState and get_modifier_state]
 
@@ -511,8 +637,24 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     // If modifiers are pressed, we must RESET the engine to prevent state pollution
     // e.g. Ctrl+Z (Undo), Ctrl+Backspace (Delete Word), Alt+Tab...
     // Allows shortcuts to pass through cleanly
+    //
+    // EXEMPTION (event-sourcing-completion Phase 4, red-team CRITICAL): the
+    // registered ToggleLastWord chord (Ctrl+Shift+Z) — and any bare modifier
+    // keydown that could still become part of it — must NOT reset here, or
+    // the multiword window is wiped before `global-hotkey` ever delivers the
+    // toggle's Pressed event, making the whole feature a guaranteed no-op.
+    // See `is_toggle_chord_exempt` for the full rationale; every OTHER
+    // Ctrl/Alt/Win combination (including the other method-switch hotkeys)
+    // still resets exactly as before.
     if mods.ctrl || mods.alt || mods.win {
-        reset_engine();
+        if !is_toggle_chord_exempt(mods, vk) {
+            reset_engine();
+        }
+        // Exempt or not, a modifier-held keystroke is a shortcut key, never
+        // Vietnamese text input — always pass through without falling into
+        // the character-processing steps below (step 7 onward would
+        // otherwise type the chord's own trailing key, e.g. 'z', into the
+        // composition).
         // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
         return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
     }
@@ -656,14 +798,17 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                         if backspace_count > 0 {
                             send_backspaces(backspace_count);
                         }
-                        
+
                         // NOTE: Removed thread::sleep() - NEVER sleep in hook callback!
                         // Sleep causes keystroke backlog and system freeze.
                         // SendInput batching should handle timing.
-                        
+
                         if !text.is_empty() {
                             send_string(&text);
                         }
+                        // Focus-guard baseline (event-sourcing-completion
+                        // Phase 4) — see `LAST_OUTPUT_HWND`'s module docs.
+                        record_output_hwnd();
                         return 1; // Block original Backspace
                     }
                 }
@@ -942,9 +1087,12 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             if backspace_count > 0 || !text.is_empty() {
                 // IMPORTANT: Always emit backspaces manually, NEVER let system handle!
                 // See comment in backspace handler (step 5) for detailed explanation.
-                
+
                 // Batch send backspaces and text
                 send_replacement(backspace_count, &text);
+                // Focus-guard baseline (event-sourcing-completion Phase 4)
+                // — see `LAST_OUTPUT_HWND`'s module docs.
+                record_output_hwnd();
                 true
             } else {
                 false
@@ -954,6 +1102,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             if !text.is_empty() {
                 info!("Commit: '{}'", text);
                 send_string(&text);
+                record_output_hwnd();
                 true
             } else {
                 false
@@ -1101,3 +1250,88 @@ fn check_fast_typing_escape(ch: char) -> bool {
     }
 }
 
+#[cfg(test)]
+mod toggle_last_word_tests {
+    //! event-sourcing-completion Phase 4: unit tests for the two hook-side
+    //! CRITICALs' pure logic. The live-HWND / real-hook-callback halves of
+    //! these (does `GetForegroundWindow` actually change on alt-tab, does
+    //! `global-hotkey` actually deliver the chord after this exemption) are
+    //! NOT unit-testable — see the P8 manual smoke checklist referenced in
+    //! the phase report.
+    use super::*;
+
+    fn mods(ctrl: bool, shift: bool, alt: bool, win: bool) -> ModifierState {
+        ModifierState { ctrl, shift, alt, win, caps: false }
+    }
+
+    // ── is_toggle_chord_exempt (chord-exemption CRITICAL) ───────────────────
+
+    #[test]
+    fn bare_ctrl_keydown_is_exempt() {
+        // vk == VK_CONTROL itself, mods.ctrl already true (its own keydown) —
+        // must be exempt regardless of chord, or every Ctrl-based shortcut's
+        // OWN modifier keydown would need special-casing individually.
+        assert!(is_toggle_chord_exempt(mods(true, false, false, false), 0x11));
+    }
+
+    #[test]
+    fn bare_shift_keydown_is_exempt() {
+        assert!(is_toggle_chord_exempt(mods(true, true, false, false), 0x10));
+    }
+
+    #[test]
+    fn toggle_chord_trailing_key_is_exempt() {
+        // Ctrl+Shift+Z, vk = 'Z' — the exact registered chord.
+        assert!(is_toggle_chord_exempt(mods(true, true, false, false), 0x5A));
+    }
+
+    #[test]
+    fn ctrl_shift_alt_z_is_not_exempt() {
+        // Alt also held: NOT the registered chord (Ctrl+Shift+Z exactly) —
+        // must still reset, matching pre-phase behavior for that shortcut.
+        assert!(!is_toggle_chord_exempt(mods(true, true, true, false), 0x5A));
+    }
+
+    #[test]
+    fn ctrl_z_alone_is_not_exempt() {
+        // Ctrl+Z (Undo) — a real, unrelated shortcut; must still reset.
+        assert!(!is_toggle_chord_exempt(mods(true, false, false, false), 0x5A));
+    }
+
+    #[test]
+    fn ctrl_shift_other_letter_is_not_exempt() {
+        // Ctrl+Shift+X — not the registered chord; other method-switch
+        // hotkeys must be unaffected by this exemption.
+        assert!(!is_toggle_chord_exempt(mods(true, true, false, false), 0x58));
+    }
+
+    // ── focus_guard_ok (focus-guard CRITICAL) ───────────────────────────────
+
+    #[test]
+    fn focus_guard_passes_when_hwnd_unchanged() {
+        assert!(focus_guard_ok(0x1234, 0x1234));
+    }
+
+    #[test]
+    fn focus_guard_fails_when_hwnd_changed() {
+        // The destructive scenario this guards against: alt-tab / toast /
+        // programmatic focus steal between the last output and the toggle.
+        assert!(!focus_guard_ok(0x5678, 0x1234));
+    }
+
+    #[test]
+    fn focus_guard_fails_before_any_output_recorded() {
+        // `0` is the initial sentinel (never a real HWND) — must never
+        // match, even if the current foreground HWND also happens to be 0
+        // (no window has focus).
+        assert!(!focus_guard_ok(0, 0));
+        assert!(!focus_guard_ok(0x1234, 0));
+    }
+
+    // ── HotkeyAction::ToggleLastWord dispatch no-ops (empty window / no
+    //    keyboard loaded) — covered at the Keyboard level in buttre-core's
+    //    keyboard_tests.rs (`toggle_last_word_noop_when_window_empty`,
+    //    `toggle_last_word_noop_for_non_multiword_backend`); exercising
+    //    `dispatch_toggle_last_word` itself here would require a live HWND
+    //    and a real hook installation, which is the P8 manual smoke item.
+}

@@ -26,6 +26,23 @@ pub struct Settings {
     
     /// Launch buttre on system startup
     pub startup: bool,
+
+    /// Backspace deletion granularity (event-sourcing-completion Phase 4):
+    /// `"grapheme"` (default) deletes the last DISPLAYED character —
+    /// unchanged pre-phase behavior. `"raw"` deletes the last RAW keystroke
+    /// and recomposes — the event-sourced engine's trivially-correct
+    /// inverse, at the cost of sometimes removing more or less than one
+    /// visible glyph. Parsed via `buttre_core::keyboard::BackspaceMode::
+    /// from_settings_str`, which falls back to `"grapheme"` for any unknown
+    /// value (never fails to load).
+    #[serde(default = "default_backspace_mode")]
+    pub backspace_mode: String,
+}
+
+/// `serde(default)` value for `Settings::backspace_mode` — also the fallback
+/// `Settings::default()` uses, so both paths agree on one literal.
+fn default_backspace_mode() -> String {
+    "grapheme".to_string()
 }
 
 impl Default for Settings {
@@ -35,6 +52,7 @@ impl Default for Settings {
             auto_correct: false,
             shorthand: false,
             startup: false,
+            backspace_mode: default_backspace_mode(),
         }
     }
 }
@@ -86,3 +104,37 @@ impl Settings {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_backspace_mode_is_grapheme() {
+        assert_eq!(Settings::default().backspace_mode, "grapheme");
+    }
+
+    #[test]
+    fn backspace_mode_defaults_when_absent_from_toml() {
+        // Old settings.toml files predate this field entirely — `load()`
+        // promises to never fail, and a missing field must fall back to
+        // "grapheme" (byte-identical pre-phase behavior), not an error.
+        let toml_str = r#"
+            input_method = "telex"
+            auto_correct = false
+            shorthand = false
+            startup = false
+        "#;
+        let settings: Settings =
+            toml::from_str(toml_str).expect("must deserialize without backspace_mode present");
+        assert_eq!(settings.backspace_mode, "grapheme");
+    }
+
+    #[test]
+    fn backspace_mode_round_trips_through_toml() {
+        let mut settings = Settings::default();
+        settings.backspace_mode = "raw".to_string();
+        let serialized = toml::to_string_pretty(&settings).expect("serialize");
+        let restored: Settings = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(restored.backspace_mode, "raw");
+    }
+}
