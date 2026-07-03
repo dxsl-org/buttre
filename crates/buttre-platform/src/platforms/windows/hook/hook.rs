@@ -250,6 +250,22 @@ pub fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        // TOCTOU narrowing (review follow-up): the first check above can go
+        // stale while `keyboard.write()` blocks on an in-flight `kb.process`.
+        // Re-check UNDER the lock, BEFORE `toggle_last_word` mutates any
+        // engine state — bailing here leaves keyboard and screen consistent,
+        // whereas a post-toggle bail would desync them. The residual race is
+        // now only the few µs between this check and `SendInput`, with no
+        // lock-wait inside it — the practical minimum without holding focus.
+        // SAFETY: GetForegroundWindow takes no arguments and cannot fail.
+        let hwnd_under_lock = unsafe { GetForegroundWindow() } as isize;
+        if !focus_guard_ok(hwnd_under_lock, recorded_hwnd) {
+            debug!(
+                "ToggleLastWord: focus changed while waiting for the keyboard lock \
+                 ({recorded_hwnd:#x} -> {hwnd_under_lock:#x}), no-op"
+            );
+            return;
+        }
         kb_opt.as_mut().and_then(Keyboard::toggle_last_word)
     };
 
@@ -1100,7 +1116,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         }
         Action::Commit(text) => {
             if !text.is_empty() {
-                info!("Commit: '{}'", text);
+                // Length only, never content: committed text is what the user
+                // typed (and, post-P5, can reflect learned preferences) — a
+                // privacy surface that must not reach INFO logs (review m1;
+                // matches learning.rs's never-log-store-contents contract).
+                debug!("Commit: {} char(s)", text.chars().count());
                 send_string(&text);
                 record_output_hwnd();
                 true

@@ -69,10 +69,18 @@ pub enum Validator {
 pub struct ComposeOpts {
     /// Raw key → result string (e.g. "aa" → "â").
     /// Keys are lowercase; lookup is done case-insensitively.
-    pub transform_rules: HashMap<String, String>,
+    ///
+    /// `Arc`-wrapped (like `tone_map`/`transform_trigger_chars`) so that
+    /// cloning a whole `ComposeOpts` is O(1) refcount bumps, not HashMap
+    /// deep-copies — `ComposeStage::process` clones the opts once per
+    /// keystroke to merge the live learning snapshot, and the multiword
+    /// window replays that per word (review follow-up: with large custom
+    /// rule tables the per-key deep-copy would erode the <1 ms headroom).
+    /// The tables are immutable after `from_config`, so sharing is safe.
+    pub transform_rules: Arc<HashMap<String, String>>,
 
     /// Tone key → `ToneMark` (e.g. 's' → Acute for Telex, '1' → Acute for VNI).
-    pub tone_map: HashMap<char, ToneMark>,
+    pub tone_map: Arc<HashMap<char, ToneMark>>,
 
     /// Old vs. New tone positioning style.
     pub tone_style: ToneStyle,
@@ -93,7 +101,7 @@ pub struct ComposeOpts {
     /// the "content chars" count, so `VIE65T` produces `VIỆT` (not `Việt`).
     /// Only non-alphabetic trigger chars are included; letter triggers (like Telex
     /// `w`, `a`) are omitted because they are content chars in their own right.
-    pub transform_trigger_chars: HashSet<char>,
+    pub transform_trigger_chars: Arc<HashSet<char>>,
 
     /// Gate INFERRED NON-ADJACENT transforms (see [`segment::TransformMark::non_adjacent`])
     /// on attestation of the composed syllable — fixes the `"data"` → `"dât"`
@@ -204,13 +212,13 @@ impl ComposeOpts {
             .collect();
 
         Self {
-            transform_rules: config.transform_rules.clone(),
-            tone_map: config.tone_map.clone(),
+            transform_rules: Arc::new(config.transform_rules.clone()),
+            tone_map: Arc::new(config.tone_map.clone()),
             tone_style: config.get_tone_style(),
             segment_mode,
             validator,
             tone_enabled: !config.tone_map.is_empty(),
-            transform_trigger_chars,
+            transform_trigger_chars: Arc::new(transform_trigger_chars),
             attest_non_adjacent,
             user_attested: None,
             raw_prefs: None,

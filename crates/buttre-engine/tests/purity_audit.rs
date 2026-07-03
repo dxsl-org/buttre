@@ -85,14 +85,31 @@ fn struct_body<'a>(src: &'a str, struct_name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// Count `pub <name>: bool,` field declarations in `body` — a precise
-/// end-anchored match (`: bool,`) so composite types like
-/// `HashMap<String, bool>` or `Option<bool>` never match.
+/// Count field declarations in `body` whose type is exactly `bool`.
+///
+/// Hardened per the adversarial review (the naive `starts_with("pub ") &&
+/// ends_with(": bool,")` form was evadable by a PRIVATE bool, a last field
+/// with no trailing comma, or `pub x: bool ,` spacing): this version skips
+/// comments/attributes, splits each remaining line at its FIRST `:` (the
+/// field separator — path colons like `std::collections::…` only ever
+/// appear in the TYPE half), strips a trailing comma, and requires the type
+/// to be exactly `bool` after trimming. Composite types
+/// (`HashMap<String, bool>`, `Option<bool>`) still never match, and
+/// visibility no longer matters — a private one-way bool can't slip past.
 fn count_bool_fields(body: &str) -> usize {
     body.lines()
         .filter(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with("pub ") && trimmed.ends_with(": bool,")
+            if trimmed.is_empty()
+                || trimmed.starts_with("//")
+                || trimmed.starts_with("#[")
+            {
+                return false;
+            }
+            let Some((_name, ty)) = trimmed.split_once(':') else {
+                return false;
+            };
+            ty.trim().trim_end_matches(',').trim() == "bool"
         })
         .count()
 }
@@ -128,10 +145,19 @@ pub struct Sample {
     pub flags: std::collections::HashMap<String, bool>,
     pub maybe: Option<bool>,
     pub flag_b: bool,
+    // the three evasion shapes the naive counter missed (review LOW):
+    hidden_private: bool,
+    pub weird_spacing: bool ,
+    pub no_trailing_comma: bool
 }
 ";
     let body = struct_body(synthetic, "Sample");
-    assert_eq!(count_bool_fields(body), 2, "must count exactly flag_a and flag_b, not the HashMap/Option<bool> composites");
+    assert_eq!(
+        count_bool_fields(body),
+        5,
+        "must count flag_a, flag_b, AND the three evasion shapes (private, \
+         `bool ,` spacing, no trailing comma) — never the HashMap/Option<bool> composites"
+    );
 }
 
 /// Guards against the count silently reading 0 because the struct marker or
