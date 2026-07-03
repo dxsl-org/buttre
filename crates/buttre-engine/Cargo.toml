@@ -26,6 +26,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+gonhanh-core = { path = "../../.reference/gonhanh/core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lib]
 name = "buttre_engine"
