@@ -160,28 +160,39 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                         &mut sel_len,
                     );
 
+                    // NOTE: every fallible COM call below is checked with
+                    // `.is_ok()`/`if let Ok` rather than `?` — `?` would
+                    // return from `DoEditSession` before the COM-reference
+                    // cleanup two lines down runs, leaking `sel_buf`'s
+                    // `ITfRange` on any failure (review MED).
                     let mut recovery_ok = false;
                     if sel_ok.is_ok() && sel_len > 0 {
                         if let Some(cur_range) = sel_buf[0].range.deref().as_ref() {
-                            let replace_range = cur_range.Clone()?;
-                            let mut moved = 0i32;
-                            // Extend backwards to cover the committed chars.
-                            let _ = replace_range.ShiftStart(
-                                ec,
-                                -(previous_length as i32),
-                                &mut moved,
-                                ptr::null(),
-                            );
-                            let pending = self.this.pending.borrow();
-                            if replace_range.SetText(ec, 0, &pending.text).is_ok() {
-                                replace_range.Collapse(ec, TF_ANCHOR_END)?;
-                                set_selection(&self.this.context, ec, replace_range, TF_AE_END)?;
-                                recovery_ok = true;
+                            if let Ok(replace_range) = cur_range.Clone() {
+                                let mut moved = 0i32;
+                                // Extend backwards to cover the committed chars.
+                                let _ = replace_range.ShiftStart(
+                                    ec,
+                                    -(previous_length as i32),
+                                    &mut moved,
+                                    ptr::null(),
+                                );
+                                let text_set = {
+                                    let pending = self.this.pending.borrow();
+                                    replace_range.SetText(ec, 0, &pending.text).is_ok()
+                                };
+                                if text_set
+                                    && replace_range.Collapse(ec, TF_ANCHOR_END).is_ok()
+                                    && set_selection(&self.this.context, ec, replace_range, TF_AE_END).is_ok()
+                                {
+                                    recovery_ok = true;
+                                }
                             }
                         }
                     }
 
-                    // Release the selection's COM reference.
+                    // Release the selection's COM reference — always reached,
+                    // since no `?` runs above.
                     let [TF_SELECTION { range, .. }] = sel_buf;
                     let _ = ManuallyDrop::into_inner(range);
 

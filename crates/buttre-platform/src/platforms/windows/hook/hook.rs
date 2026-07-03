@@ -1129,6 +1129,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             let is_natural_passthrough =
                 text.chars().count() == 1 && text.chars().next() == Some(ch);
             if is_natural_passthrough {
+                // The OS still delivers this keystroke to the current window
+                // (we return false, unblocked) — record it as real output so
+                // the ToggleLastWord focus-guard baseline doesn't go stale on
+                // an unbroken run of untransformed characters (review HIGH).
+                record_output_hwnd();
                 false // pass through — do not inject, do not block
             } else if !text.is_empty() {
                 // Length only, never content: committed text is what the user

@@ -6,8 +6,8 @@ use tracing::debug;
 
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VK_BACK, VK_LEFT, VK_LSHIFT,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_BACK, VK_LEFT, VK_LSHIFT, VK_SHIFT,
 };
 
 /// Extra info flag to identify our own injected keys
@@ -163,11 +163,21 @@ pub fn send_replacement(backspace_count: usize, text: &str) {
 /// Modifier note: transforms only ever fire on plain character keystrokes
 /// (Ctrl/Alt chords never reach the engine as text), so injecting an
 /// LSHIFT-down/LEFT/LSHIFT-up sandwich cannot compose with a held Ctrl/Alt
-/// into a word-selection chord. A physically held Shift is compatible — the
-/// selection semantics are the same, and the replacement text is injected
-/// via `KEYEVENTF_UNICODE`, which ignores shift state.
+/// into a word-selection chord. When Shift is ALREADY physically held (e.g.
+/// typing an all-caps word), the synthetic down/up is skipped — pressing it
+/// anyway would still select correctly, but the synthetic keyup would lift
+/// Shift out from under the user's still-held key, un-capitalizing whatever
+/// they type next until they release and re-press it (review MED).
 #[cfg(windows)]
 fn send_replacement_via_selection(backspace_count: usize, text: &str) {
+    debug_assert!(
+        backspace_count > 0,
+        "send_replacement_via_selection requires backspace_count > 0 — \
+         the caller in send_replacement already guards this, but with \
+         backspace_count == 0 this fires zero backspaces AND selects+\
+         overwrites a real character the caller never asked to delete"
+    );
+
     let key = |vk: u16, flags: u32| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -181,14 +191,24 @@ fn send_replacement_via_selection(backspace_count: usize, text: &str) {
         },
     };
 
+    // SAFETY: GetAsyncKeyState takes a plain VK code and cannot fail; the
+    // high bit of the result indicates the key is currently down.
+    let shift_already_held = unsafe { GetAsyncKeyState(VK_SHIFT as i32) } as u16 & 0x8000 != 0;
+
     let char_count = text.chars().count();
     let mut inputs = Vec::with_capacity(6 + backspace_count.saturating_sub(1) * 2 + char_count * 2);
 
-    // Shift+Left — KEYEVENTF_EXTENDEDKEY marks the real arrow key (not numpad-4).
-    inputs.push(key(VK_LSHIFT as u16, 0));
+    // Shift+Left — KEYEVENTF_EXTENDEDKEY marks the real arrow key (not
+    // numpad-4). Only synthesize the Shift chord ourselves when the user
+    // isn't already holding it physically.
+    if !shift_already_held {
+        inputs.push(key(VK_LSHIFT as u16, 0));
+    }
     inputs.push(key(VK_LEFT as u16, KEYEVENTF_EXTENDEDKEY));
     inputs.push(key(VK_LEFT as u16, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
-    inputs.push(key(VK_LSHIFT as u16, KEYEVENTF_KEYUP));
+    if !shift_already_held {
+        inputs.push(key(VK_LSHIFT as u16, KEYEVENTF_KEYUP));
+    }
 
     // OpenKey's counting rule: with exactly one char to delete AND text to
     // insert, send zero backspaces — the overwrite consumes the selection.
