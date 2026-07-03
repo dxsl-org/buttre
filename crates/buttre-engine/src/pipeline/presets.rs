@@ -63,7 +63,12 @@ pub fn telex_config() -> PipelineConfig {
     config.add_transform("oo", "ô");
     config.add_transform("ow", "ơ");
     config.add_transform("uw", "ư");
-    
+    // Onset-only w-shorthand ("lwu"→"lưu", "trwong"→"trương"): a 1-char rule
+    // makes 'w' fire as an inferred ư-insertion after a pure-consonant onset
+    // (see `compose::segment::onset_only_insertion_fires`). Word-initial 'w'
+    // stays literal, and unattested results demote — English w-words are safe.
+    config.add_transform("w", "ư");
+
     // Uppercase variants
     config.add_transform("AA", "Â");
     config.add_transform("AW", "Ă");

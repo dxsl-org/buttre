@@ -15,9 +15,22 @@
 //! Every key is a base key; double-key digraphs are resolved via the transform
 //! table (e.g. "kk" → "ꩀ"). No mark extraction at all.
 
-use std::collections::HashMap;
 use crate::vowel::cluster::is_vowel;
 use super::ComposeOpts;
+
+/// Slot index for the per-call a/e/o/d counters (`double_candidates`,
+/// `vowel_in_base`) — fixed 4-char domain, so plain arrays beat per-call
+/// HashMap allocations on the keystroke hot path.
+#[inline]
+fn aeod_idx(c: char) -> Option<usize> {
+    match c {
+        'a' => Some(0),
+        'e' => Some(1),
+        'o' => Some(2),
+        'd' => Some(3),
+        _ => None,
+    }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -117,11 +130,10 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
     // COMPOSED syllable happens to be a real word. E.g. "aaa" must undo to
     // "aa" regardless of attestation; the count==2 rule is what tells segment
     // "this looks like one intentional mark", not "the result is attested".
-    let mut double_candidates: HashMap<char, usize> = HashMap::new();
+    let mut double_candidates = [0usize; 4];
     for &ch in raw {
-        let lc = ch.to_ascii_lowercase();
-        if matches!(lc, 'a' | 'e' | 'o' | 'd') {
-            *double_candidates.entry(lc).or_insert(0) += 1;
+        if let Some(idx) = aeod_idx(ch.to_ascii_lowercase()) {
+            double_candidates[idx] += 1;
         }
     }
 
@@ -146,7 +158,7 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
         })
     };
 
-    let mut vowel_in_base: HashMap<char, bool> = HashMap::new();
+    let mut vowel_in_base = [false; 4];
 
     for (i, &ch) in raw.iter().enumerate() {
         let lc = ch.to_ascii_lowercase();
@@ -215,12 +227,12 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
         // guards must keep running exactly as before — there is no attestation
         // table to catch a bad shape post-hoc.
         // count != 2 also disables non-adjacent (English word with repeats).
-        if matches!(lc, 'a' | 'e' | 'o') {
-            let count = double_candidates.get(&lc).copied().unwrap_or(0);
+        if let Some(idx) = aeod_idx(lc).filter(|_| lc != 'd') {
+            let count = double_candidates[idx];
             let legacy_shape_guards_pass = opts.attest_non_adjacent
                 || (count_vowel_groups(&base) <= 1 && coda_after_last_vowel_is_valid(&base, lc));
             if count == 2
-                && *vowel_in_base.get(&lc).unwrap_or(&false)
+                && vowel_in_base[idx]
                 && legacy_shape_guards_pass
             {
                 let base_len = base.chars().count();
@@ -249,8 +261,8 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
         // This whole đ branch is NOT subject to the conditional-keep bypass
         // used above for the vowel branch.
         if lc == 'd'
-            && double_candidates.get(&'d').copied().unwrap_or(0) == 2
-            && *vowel_in_base.get(&'d').unwrap_or(&false)
+            && double_candidates[3] == 2
+            && vowel_in_base[3]
             && (!tones.is_empty() || base_ends_with_coda(&base)
                 // Fast-typing: onset 'd' followed by a vowel (open syllable) before
                 // the doubling key — "dodong"→"đông", "dodongf"→"đồng".
@@ -297,12 +309,25 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
         // 'ư' at word start is reached via "uw".  Non-alphabetic standalone keys
         // (VNI digits 6–9) keep their unconditional behaviour.
 
-        if is_standalone_transform && standalone_modifier_has_vowel(ch, &base, opts) {
+        let fires_via_preceding_vowel =
+            is_standalone_transform && standalone_modifier_has_vowel(ch, &base, opts);
+        let fires_via_onset_insertion = is_standalone_transform
+            && !fires_via_preceding_vowel
+            && onset_only_insertion_fires(ch, &base, opts);
+        if fires_via_preceding_vowel || fires_via_onset_insertion {
             // Record base length at time of this mark so transform can pick the right vowel.
             let base_len = base.chars().count();
             let non_adjacent = mark_non_adjacent(raw, i, lc, base_len, opts);
             if allow_nonadjacent || !non_adjacent {
                 transforms.push(TransformMark { key: ch, base_len_at_typing: base_len, raw_pos: i, non_adjacent });
+                // The onset insertion's expansion ("w"→"ư") IS the syllable's
+                // nucleus: later tone keys must see a vowel ("twf"→"từ",
+                // "swj"→"sự") even though no raw vowel char exists in the
+                // buffer. Only set when the mark actually fired — the demote
+                // pass keeps 'w' literal and tone keys literal with it.
+                if fires_via_onset_insertion {
+                    has_seen_vowel = true;
+                }
             } else {
                 // Demote pass: suppressed non-adjacent standalone mark (VNI
                 // digit or Telex 'w') stays literal in the base.
@@ -315,16 +340,16 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
             if !has_seen_vowel {
                 // No vowel yet — this tone key has no nucleus to act on; treat as literal.
                 base.push(ch);
-                if matches!(lc, 'a' | 'e' | 'o' | 'd') {
-                    vowel_in_base.insert(lc, true);
+                if let Some(idx) = aeod_idx(lc) {
+                    vowel_in_base[idx] = true;
                 }
             } else {
                 tones.push(ch);
             }
         } else {
             base.push(ch);
-            if matches!(lc, 'a' | 'e' | 'o' | 'd') {
-                vowel_in_base.insert(lc, true);
+            if let Some(idx) = aeod_idx(lc) {
+                vowel_in_base[idx] = true;
             }
         }
     }
@@ -405,7 +430,7 @@ fn is_adjacent_trigger(raw: &[char], i: usize, trigger_lc: char, opts: &ComposeO
         return false;
     };
     let prev_lc = prev.to_ascii_lowercase();
-    opts.transform_rules.contains_key(&format!("{prev_lc}{trigger_lc}"))
+    opts.pair_rules.contains_key(&(prev_lc, trigger_lc))
 }
 
 /// Returns `true` when `base` already contains an earlier occurrence of `vowel`
@@ -467,10 +492,32 @@ fn standalone_modifier_has_vowel(ch: char, base: &str, opts: &ComposeOpts) -> bo
         return true;
     }
     let key = ch.to_ascii_lowercase();
-    base.chars().any(|c| {
-        opts.transform_rules
-            .contains_key(&format!("{}{}", c.to_ascii_lowercase(), key))
-    })
+    base.chars()
+        .any(|c| opts.pair_rules.contains_key(&(c.to_ascii_lowercase(), key)))
+}
+
+/// Onset-only standalone-modifier shorthand (UniKey-habit compatibility:
+/// "nhw" → "như", "lwu" → "lưu", "trwong" → "trương", "chwowng" → "chương"):
+/// an alphabetic modifier with a 1-char rule ("w" → "ư") fires as an
+/// inferred INSERTION mark when the base so far is a non-empty,
+/// pure-consonant onset.
+///
+/// Safety net, in order:
+/// - Word-initial stays literal (`base` must be non-empty), so English
+///   w-words ("won", "with", "will", "want") keep typing naturally.
+/// - The mark is inherently non-adjacent (a pure-consonant base means no
+///   preceding char forms a 2-char rule with the trigger), so the attestation
+///   gate in `compose::mod` demotes any composition that is not a real word:
+///   "swim" → "sưim" (unattested) → literal "swim".
+/// - Gated on `attest_non_adjacent` because that demote net is exactly what
+///   makes the inference safe — validators without an attested-syllable
+///   table (Hmong/Custom/None) never take this branch.
+fn onset_only_insertion_fires(ch: char, base: &str, opts: &ComposeOpts) -> bool {
+    opts.attest_non_adjacent
+        && ch.is_alphabetic()
+        && opts.single_rules.contains_key(&ch.to_ascii_lowercase())
+        && !base.is_empty()
+        && !base.chars().any(|c| is_vowel(c.to_ascii_lowercase()))
 }
 
 /// True when `base` ends with a consonant that follows a vowel — i.e. the
@@ -527,32 +574,10 @@ fn count_vowel_groups(s: &str) -> usize {
 /// VNI digits (6/7/8/9) are also standalone transform keys because they are
 /// not Vietnamese letters.
 fn is_standalone_transform_key(ch: char, opts: &ComposeOpts) -> bool {
-    let lc = ch.to_ascii_lowercase();
-
-    // Tone keys are not transform keys.
-    if opts.tone_map.contains_key(&lc) {
-        return false;
-    }
-
-    // ASCII letters that are vowels are never standalone transform keys —
-    // they reach transform role only via the double-detection path above.
-    if is_vowel(lc) {
-        return false;
-    }
-
-    // 'd' is a consonant/vowel in Vietnamese — not standalone.
-    if lc == 'd' {
-        return false;
-    }
-
-    // Check both:
-    // a) 2-char rules where this char is the second (modifier) char.
-    // b) 1-char rules where this char is the sole key (e.g. "w"→"ư").
-    opts.transform_rules.keys().any(|k| {
-        let kl: String = k.to_lowercase();
-        (kl.len() == 2 && kl.ends_with(lc))
-            || (kl.len() == 1 && kl.chars().next() == Some(lc))
-    })
+    // Precomputed in `ComposeOpts::from_config`: modifier chars of 2-char /
+    // 1-char rules, minus tone keys, vowels, and 'd' (perf: this used to
+    // rescan and re-lowercase every rule key on every keystroke).
+    opts.standalone_keys.contains(&ch.to_ascii_lowercase())
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────

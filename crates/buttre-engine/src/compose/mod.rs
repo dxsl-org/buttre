@@ -131,6 +131,28 @@ pub struct ComposeOpts {
     /// pipeline side-effect).
     pub user_attested: Option<Arc<HashSet<u32>>>,
 
+    /// Hot-path lookup tables derived once from `transform_rules` in
+    /// `from_config` (perf: `segment`/`transform` used to rebuild `format!`
+    /// keys and rescan `transform_rules.keys()` on every keystroke):
+    ///
+    /// `(prev, trigger)` for every ALL-LOWERCASE 2-char rule key → first char
+    /// of the replacement (e.g. `('a','w')` → `'ă'`). Matches the exact
+    /// semantics of the old `transform_rules.get(&format!("{lc}{lc}"))`
+    /// lookups, which could only ever hit all-lowercase keys.
+    pub pair_rules: Arc<HashMap<(char, char), char>>,
+
+    /// ALL-LOWERCASE 1-char rule key → full replacement string
+    /// (e.g. `'w'` → `"ư"` in the Telex preset). Same lowercase-key-only
+    /// contract as `pair_rules`.
+    pub single_rules: Arc<HashMap<char, String>>,
+
+    /// Keys that act as standalone transform modifiers (Telex `w`, VNI
+    /// digits): second char of a 2-char rule or sole char of a 1-char rule
+    /// (any case, lowercased), minus tone keys, vowels, and `'d'`.
+    /// Precomputed form of the old per-keystroke `is_standalone_transform_key`
+    /// scan over every rule key.
+    pub standalone_keys: Arc<HashSet<char>>,
+
     /// Raw-sequence preference memory (event-sourcing-completion Phase 5):
     /// exact raw sequence (lowercase, already scoped to THIS method by the
     /// caller — see `LearningStore::prefs_snapshot_for_method`) → the
@@ -211,6 +233,40 @@ impl ComposeOpts {
             .filter(|c| !c.is_alphabetic())
             .collect();
 
+        // Hot-path tables (see the field docs). `pair_rules`/`single_rules`
+        // index ONLY all-lowercase rule keys — the runtime lookups they
+        // replace always queried lowercased keys, so uppercase preset
+        // variants ("AA"→"Â") were unreachable through them by construction.
+        let mut pair_rules: HashMap<(char, char), char> = HashMap::new();
+        let mut single_rules: HashMap<char, String> = HashMap::new();
+        let mut standalone_keys: HashSet<char> = HashSet::new();
+        for (k, v) in &config.transform_rules {
+            let kl: Vec<char> = k.to_lowercase().chars().collect();
+            let is_lowercase_key = !k.chars().any(char::is_uppercase);
+            let modifier = match kl.as_slice() {
+                [a, b] => {
+                    if is_lowercase_key {
+                        if let Some(first) = v.chars().next() {
+                            pair_rules.insert((*a, *b), first);
+                        }
+                    }
+                    Some(*b)
+                }
+                [a] => {
+                    if is_lowercase_key {
+                        single_rules.insert(*a, v.clone());
+                    }
+                    Some(*a)
+                }
+                _ => None,
+            };
+            if let Some(c) = modifier {
+                if !config.tone_map.contains_key(&c) && !crate::vowel::cluster::is_vowel(c) && c != 'd' {
+                    standalone_keys.insert(c);
+                }
+            }
+        }
+
         Self {
             transform_rules: Arc::new(config.transform_rules.clone()),
             tone_map: Arc::new(config.tone_map.clone()),
@@ -219,6 +275,9 @@ impl ComposeOpts {
             validator,
             tone_enabled: !config.tone_map.is_empty(),
             transform_trigger_chars: Arc::new(transform_trigger_chars),
+            pair_rules: Arc::new(pair_rules),
+            single_rules: Arc::new(single_rules),
+            standalone_keys: Arc::new(standalone_keys),
             attest_non_adjacent,
             user_attested: None,
             raw_prefs: None,

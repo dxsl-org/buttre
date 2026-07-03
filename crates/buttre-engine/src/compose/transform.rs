@@ -118,9 +118,15 @@ fn apply_one_transform(
     //    2-char rule with the mark (e.g. a future config where "iw"→"ị").
     if search_end == 0 && !chars.is_empty() {
         // Sub-case 1: 1-char rule for the mark key itself (standalone prefix).
-        let single_key = mark_lc.to_string();
-        if let Some(result_str) = opts.transform_rules.get(&single_key) {
-            let prefix: String = result_str.chars().collect();
+        // NOTE: no shipped preset registers a 1-char rule (leading bare 'w'
+        // stays literal so English w-words type naturally); reachable only by
+        // a custom config whose 1-char-rule key passes segment.
+        if let Some(first) = opts
+            .single_rules
+            .get(&mark_lc)
+            .and_then(|repl| repl.chars().next())
+        {
+            let prefix = preserve_case(mark, first);
             let rest: String = chars.into_iter().collect();
             return Some(format!("{prefix}{rest}"));
         }
@@ -129,12 +135,9 @@ fn apply_one_transform(
         for i in 0..chars.len() {
             let ch    = chars[i];
             let ch_lc = normalize_vowel(ch);
-            let lookup_key = format!("{ch_lc}{mark_lc}");
-            if let Some(result_str) = opts.transform_rules.get(&lookup_key) {
-                if let Some(new_char) = result_str.chars().next() {
-                    chars[i] = preserve_case(ch, new_char);
-                    return Some(chars.into_iter().collect());
-                }
+            if let Some(&new_char) = opts.pair_rules.get(&(ch_lc, mark_lc)) {
+                chars[i] = preserve_case(ch, new_char);
+                return Some(chars.into_iter().collect());
             }
         }
         return None;
@@ -152,20 +155,67 @@ fn apply_one_transform(
         let ch    = chars[i];
         let ch_lc = normalize_vowel(ch); // base vowel (strips tone diacritics)
 
-        let lookup_key = format!("{ch_lc}{mark_lc}");
-
-        if let Some(result_str) = opts.transform_rules.get(&lookup_key) {
-            if let Some(new_char) = result_str.chars().next() {
-                let mut candidate = chars.clone();
-                candidate[i] = preserve_case(ch, new_char);
-                let candidate_str: String = candidate.into_iter().collect();
-                if is_valid_syllable(&candidate_str) {
-                    return Some(candidate_str);
-                }
-                if first_candidate.is_none() {
-                    first_candidate = Some(candidate_str);
-                }
+        if let Some(&new_char) = opts.pair_rules.get(&(ch_lc, mark_lc)) {
+            let mut candidate = chars.clone();
+            candidate[i] = preserve_case(ch, new_char);
+            let candidate_str: String = candidate.into_iter().collect();
+            if is_valid_syllable(&candidate_str) {
+                return Some(candidate_str);
             }
+            if first_candidate.is_none() {
+                first_candidate = Some(candidate_str);
+            }
+        }
+
+        // Idempotent repeat: the target vowel ALREADY carries this mark's
+        // diacritic — an earlier mark's insertion+compound may have horned it
+        // first ("chwowng": by the time the second 'w' applies, its target is
+        // already 'ơ'/'ư'). Treat the mark as applied with no text change,
+        // instead of falling through to a literal trailing 'w'.
+        //
+        // Scoped to marks that ALSO have a 1-char rule (the insertion
+        // shorthand family, i.e. Telex 'w') — a repeated plain mark key with
+        // no insertion behavior must stay a literal append, or it would eat
+        // the post-undo literal in VNI "a6116" (undo latches, trailing '6'
+        // appends as "â16" — see vni_edge_cases::test_multi_step_undo_a6116).
+        if opts.single_rules.contains_key(&mark_lc)
+            && opts
+                .pair_rules
+                .iter()
+                .any(|(&(_, m), &out)| m == mark_lc && out == ch_lc)
+        {
+            return Some(result.to_string());
+        }
+    }
+
+    // ── Onset-only insertion (see `segment::onset_only_insertion_fires`) ──────
+    // No vowel in the search range matched a 2-char rule, but the mark has a
+    // standalone 1-char expansion ("w"→"ư"): insert it at the position the
+    // mark was typed — "lwu" → base "lu", 'w' at base_len 1 → "lưu".
+    // Only reachable for a pure-consonant prefix: every other path into this
+    // function has a matching vowel in range or no 1-char rule for the mark.
+    if first_candidate.is_none() {
+        if let Some(first) = opts
+            .single_rules
+            .get(&mark_lc)
+            .and_then(|repl| repl.chars().next())
+        {
+            let pos = search_end.min(chars.len());
+            let ins = preserve_case(mark, first);
+            chars.insert(pos, ins);
+            // Orthography: inserted ư directly before a PLAIN 'o' with a coda
+            // after it forms the "ươ" compound — mirrors the uo+w rule above
+            // ("trwong" → "trưong" would otherwise stay an invalid nucleus).
+            // Deliberately NOT mirroring the uo+w no-coda "→ uơ" arm: a
+            // coda-less "ưo" ("trwo" mid-word frame) is an invalid nucleus
+            // that demotes to literal cleanly, and recovers on the next key.
+            if matches!(ins, 'ư' | 'Ư')
+                && pos + 2 < chars.len()
+                && matches!(chars[pos + 1], 'o' | 'O')
+            {
+                chars[pos + 1] = preserve_case(chars[pos + 1], 'ơ');
+            }
+            return Some(chars.into_iter().collect());
         }
     }
 
@@ -185,8 +235,7 @@ fn is_valid_syllable(s: &str) -> bool {
 /// True when the mark key is the compound-trigger in the transform table.
 fn is_compound_trigger(mark: char, opts: &ComposeOpts) -> bool {
     let ml = mark.to_ascii_lowercase();
-    opts.transform_rules.contains_key(&format!("o{ml}"))
-        && opts.transform_rules.contains_key(&format!("u{ml}"))
+    opts.pair_rules.contains_key(&('o', ml)) && opts.pair_rules.contains_key(&('u', ml))
 }
 
 /// Find the char index of "uo" in a lowercase string.
