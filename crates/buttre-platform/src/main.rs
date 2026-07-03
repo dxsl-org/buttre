@@ -16,6 +16,7 @@
 //! ## Backend calls buttre-keyboard DIRECTLY (NOT via buttre-core::Engine)
 
 use anyhow::Result;
+use buttre_core::state::learning::{LearningFile, LearningStore};
 use buttre_core::state::{Settings, StateObserver};
 use buttre_platform::shared::{KeyboardManager, MethodRegistry, pipe_server};
 use buttre_platform::shared::ui::{build_menu, create_tray_icon, show_help_dialog, MenuItems, helpers};
@@ -80,6 +81,22 @@ fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
 
 #[cfg(not(platform_windows))]
 fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
+
+/// Debounce successive personal-learning save requests down to the LATEST
+/// snapshot only (event-sourcing-completion Phase 5, red-team C3): a
+/// snapshot is the full current store state, not a delta, so replaying every
+/// intermediate one queued since the last poll is wasted disk I/O — keeping
+/// only the last item is a lossless debounce. Non-blocking: returns `None`
+/// immediately once the channel is empty. A disconnected sender (every
+/// `Keyboard` dropped, e.g. mid-shutdown) is treated the same as "nothing
+/// new" — never an error worth logging on this poll path.
+fn drain_latest_learning_save(rx: &mpsc::Receiver<LearningFile>) -> Option<LearningFile> {
+    let mut latest = None;
+    while let Ok(file) = rx.try_recv() {
+        latest = Some(file);
+    }
+    latest
+}
 
 fn main() -> Result<()> {
     // Initialize tracing (handles both log crate and tracing crate)
@@ -170,7 +187,25 @@ fn main() -> Result<()> {
 
     // --- buttre Keyboard Setup ---
     let keyboard_manager = KeyboardManager::new()?;
-    
+
+    // Personal learning (event-sourcing-completion Phase 5): load-or-default
+    // store + off-thread save channel, gated ENTIRELY on
+    // `Settings::learning_enabled` — when `false`, `learning_save_rx` stays
+    // `None` and the event loop below never touches `learning.toml` at all
+    // (byte-identical to pre-Phase-5 behavior). Wired BEFORE `set_method`
+    // below so the FIRST keyboard instance already has it — see
+    // `Keyboard::set_learning`'s doc on why the initial hand-off matters
+    // (a freshly loaded store should apply from the very first keystroke,
+    // not just the first word boundary).
+    let learning_save_rx = if settings.learning_enabled {
+        let store = Arc::new(Mutex::new(LearningStore::load()));
+        let (tx, rx) = mpsc::channel::<LearningFile>();
+        keyboard_manager.set_learning(store, tx);
+        Some(rx)
+    } else {
+        None
+    };
+
     // Apply initial settings to keyboard
     if let Err(e) = keyboard_manager.set_method(&settings.input_method) {
         error!("Failed to set initial input method: {:?}", e);
@@ -311,6 +346,19 @@ fn main() -> Result<()> {
                     }
                 }
 
+                // Personal-learning off-thread save (event-sourcing-
+                // completion Phase 5, red-team C3): the ONLY place
+                // `LearningStore::write_atomic` is ever called — never from
+                // the hook callback or under the KEYBOARD lock. `None` when
+                // `Settings::learning_enabled` was `false` at startup.
+                if let Some(rx) = &learning_save_rx {
+                    if let Some(file) = drain_latest_learning_save(rx) {
+                        if let Err(e) = LearningStore::write_atomic(&file) {
+                            error!("Failed to save learning.toml: {:?}", e);
+                        }
+                    }
+                }
+
                 if let Some(action) = hotkey_manager.check_hotkey() {
                     match action {
                         HotkeyAction::Toggle => {
@@ -387,4 +435,50 @@ fn main() -> Result<()> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_file(marker: u32) -> LearningFile {
+        let mut file = LearningFile::default();
+        file.user_attested.insert(format!("marker{marker}"), 1);
+        file
+    }
+
+    #[test]
+    fn drain_latest_learning_save_returns_none_when_empty() {
+        let (_tx, rx) = mpsc::channel::<LearningFile>();
+        assert!(drain_latest_learning_save(&rx).is_none());
+    }
+
+    #[test]
+    fn drain_latest_learning_save_debounces_to_the_last_queued_snapshot() {
+        // Red-team C3: a burst of saves queued between two polls (e.g. rapid
+        // word commits) must collapse to a single disk write of the LATEST
+        // state — replaying every intermediate snapshot would be wasted I/O
+        // for no additional correctness (each snapshot is the full state,
+        // not a delta).
+        let (tx, rx) = mpsc::channel::<LearningFile>();
+        tx.send(sample_file(1)).unwrap();
+        tx.send(sample_file(2)).unwrap();
+        tx.send(sample_file(3)).unwrap();
+
+        let latest = drain_latest_learning_save(&rx).expect("must return the latest queued snapshot");
+        assert!(latest.user_attested.contains_key("marker3"));
+        assert!(!latest.user_attested.contains_key("marker1"), "intermediate snapshots must not linger");
+
+        // The channel must be fully drained — a second poll finds nothing.
+        assert!(drain_latest_learning_save(&rx).is_none());
+    }
+
+    #[test]
+    fn drain_latest_learning_save_ignores_a_disconnected_sender() {
+        let (tx, rx) = mpsc::channel::<LearningFile>();
+        tx.send(sample_file(1)).unwrap();
+        drop(tx);
+        assert!(drain_latest_learning_save(&rx).is_some(), "a queued item must still be returned even after the sender disconnects");
+        assert!(drain_latest_learning_save(&rx).is_none(), "a disconnected, empty channel must be treated as \"nothing new\", not an error");
+    }
 }

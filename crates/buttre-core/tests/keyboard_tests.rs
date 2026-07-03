@@ -1,5 +1,9 @@
 use buttre_core::keyboard::{BackspaceMode, Config, Keyboard, KeyboardBuilder};
+use buttre_core::state::learning::{LearningFile, LearningStore};
+use buttre_engine::compose::Pref;
 use buttre_engine::pipeline::presets::vni_config;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn test_keyboard_creation() {
@@ -463,4 +467,225 @@ fn toggle_emits_learning_signal_for_p5_collector() {
     assert_eq!(signals.len(), 1);
     assert_eq!(signals[0].raw_sequence, "reset");
     assert!(!signals[0].literal, "second toggle flips back to compose");
+}
+
+// ── Phase 5: personal learning — overlay + preference memory ────────────────
+// Test Scenario Matrix from phase-05-learning-stores.md. All tests wire a
+// fresh in-memory `LearningStore` directly via `Keyboard::set_learning` — no
+// real file I/O (no test ever touches the real data dir / `learning.toml`),
+// and a discarded `mpsc::Receiver` is a legitimate no-op consumer of the
+// save channel (see `collect_and_refresh_learning`'s doc: a full/disconnected
+// receiver is never treated as an error).
+
+/// A fresh in-memory store + a channel whose receiver is intentionally
+/// dropped/ignored — every test here asserts on the STORE directly, never on
+/// what would have been written to disk.
+fn fresh_learning() -> (Arc<Mutex<LearningStore>>, mpsc::Sender<LearningFile>) {
+    let store = Arc::new(Mutex::new(LearningStore::default()));
+    let (tx, _rx) = mpsc::channel();
+    (store, tx)
+}
+
+#[test]
+fn learning_disabled_by_default_no_collection_behavior_unchanged() {
+    // `Keyboard::new` never wires a learning store unless `set_learning` is
+    // called (mirrors the platform layer gating this on
+    // `Settings::learning_enabled`) — behavior must be BYTE-IDENTICAL to
+    // pre-Phase-5: the flagship non-adjacent gate/demote case ("data") must
+    // still demote every time, even after repeats that WOULD have promoted
+    // the overlay had a store been wired (see
+    // `automatic_demote_records_nothing_even_after_many_repeats` below for
+    // the same fixture WITH a store wired, proving the difference is the
+    // wiring, not the fixture).
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "daat b c daat d e daat f g h");
+    type_str(&mut kb, " data");
+    assert!(
+        kb.buffer().ends_with("data"),
+        "without a wired learning store, the non-adjacent case still demotes to literal: {}",
+        kb.buffer()
+    );
+}
+
+#[test]
+fn direct_typed_unattested_syllable_promotes_overlay_after_three_commits() {
+    // critical row: type an unattested-but-structurally-valid syllable
+    // DIRECTLY (adjacent marks only) 3 distinct times, each across a real
+    // word boundary → the overlay promotes it → a LATER non-adjacent
+    // (delayed) typing of the exact same syllable now composes instead of
+    // demoting to literal.
+    //
+    // "daat" (d-a-a-t, ADJACENT doubling) composes to "dât" exactly like the
+    // engine's own `high_adjacent_typing_unchanged` fixture family
+    // ("vieet"->"viêt"). "dât" is a confirmed decomposable-but-UNATTESTED
+    // shape (`buttre-engine/tests/attested_lookup_tests.rs`), and "data"
+    // (d-a-t-a, NON-adjacent) is the flagship gate/demote case that collapses
+    // to literal "data" for the exact same reason
+    // (`compose::tests::critical_data_stays_literal`) — a perfectly matched
+    // pair for this scenario.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx);
+
+    // Filler single-char words force each "daat" occurrence through a real
+    // word-boundary commit via the window's 4th-word overflow (see
+    // `Keyboard::scroll_out_overflow`) — 3 occurrences, 3 commits.
+    type_str(&mut kb, "daat b c daat d e daat f g h");
+    assert!(
+        store.lock().unwrap().overlay_snapshot().len() == 1,
+        "3 direct-typed commits of the same unattested syllable must promote exactly one overlay entry"
+    );
+
+    // Continuing to type the NON-adjacent "data" form in the SAME session
+    // now composes — the live executor's compose stage was refreshed at
+    // every commit boundary (Combined Contract: repair → collect → refresh).
+    type_str(&mut kb, " data");
+    assert!(
+        kb.buffer().ends_with("dât"),
+        "overlay-promoted syllable must now survive the non-adjacent gate: {}",
+        kb.buffer()
+    );
+}
+
+#[test]
+fn automatic_demote_records_nothing_even_after_many_repeats() {
+    // critical row (anti-feedback rule (i)): an AUTOMATIC demote — the gate
+    // stripping an inferred non-adjacent mark — is never a deliberate act,
+    // however many times it repeats. `ComposeResult::demoted` is exactly
+    // what distinguishes this from the direct-typed case above (both leave
+    // `applied_marks` empty at the point the collector inspects them).
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx);
+
+    type_str(&mut kb, &"data ".repeat(100));
+
+    assert!(
+        store.lock().unwrap().overlay_snapshot().is_empty(),
+        "an automatic demote must never feed the overlay, however many times it repeats"
+    );
+}
+
+#[test]
+fn undo_shaped_commit_records_literal_pref_recalled_by_new_keyboard_sharing_the_store() {
+    // critical row: a double-tap undo/toggle SHAPE, sitting at the exact
+    // raw the word is committed with, records a literal preference for that
+    // raw sequence. "ress" (r-e-s-s) is the same trailing-double-tone-key
+    // undo shape as the engine's own `check_tone_toggle` fixtures
+    // ("ass"->"as", "seess"->"sês") — `is_last_event_undo(['r','e','s','s'])`
+    // is true for the word's raw exactly as committed.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx.clone());
+
+    type_str(&mut kb, "ress b c d"); // forces "ress" through a real commit
+    assert_eq!(
+        store.lock().unwrap().prefs_snapshot_for_method("telex").get("ress"),
+        Some(&Pref::Literal),
+        "an undo-shaped word-commit must record a literal preference for its exact raw"
+    );
+
+    // A brand-new Keyboard sharing the SAME store recalls it immediately —
+    // no re-learning needed, and the recall is LITERAL (all 4 raw chars
+    // verbatim), not the 3-char undo-collapsed form ("res") normal typing
+    // would otherwise produce (honest wording, red-team F12).
+    let mut kb2 = KeyboardBuilder::telex().expect("telex keyboard");
+    kb2.set_learning(store, tx);
+    type_str(&mut kb2, "ress");
+    assert_eq!(kb2.buffer(), "ress", "pref recall renders the literal raw verbatim from the very first matching keystroke sequence");
+}
+
+#[test]
+fn toggle_commit_records_pref_recalled_by_new_keyboard_sharing_the_store() {
+    // critical row: a P4 word toggle (the strongest deliberate signal) on a
+    // word records a preference once that word is committed — recalled the
+    // same way as the undo-shaped case above.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx.clone());
+
+    type_str(&mut kb, "reset");
+    kb.toggle_last_word().expect("toggle must act on the open trailing word");
+    assert_eq!(kb.buffer(), "reset", "toggle renders literal(raw), case-preserved, and freezes the word");
+
+    type_str(&mut kb, " b c d"); // forces the toggled, frozen word through a real commit
+    assert_eq!(
+        store.lock().unwrap().prefs_snapshot_for_method("telex").get("reset"),
+        Some(&Pref::Literal),
+        "a toggle-to-literal must record a literal preference once the word commits"
+    );
+
+    let mut kb2 = KeyboardBuilder::telex().expect("telex keyboard");
+    kb2.set_learning(store, tx);
+    type_str(&mut kb2, "reset");
+    assert_eq!(kb2.buffer(), "reset", "toggled preference recalled by a fresh Keyboard sharing the store");
+}
+
+#[test]
+fn toggle_against_a_stored_pref_overwrites_it_self_correction() {
+    // high row: the user later toggles AGAINST a stored preference — the
+    // pref is overwritten (anti-feedback rule (iii)), not left stale.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx.clone());
+
+    type_str(&mut kb, "reset");
+    kb.toggle_last_word().expect("first toggle: literal"); // reset
+    kb.toggle_last_word().expect("second toggle: back to composed"); // rết
+    assert_eq!(kb.buffer(), "rết");
+
+    type_str(&mut kb, " b c d"); // commit the word in its FINAL (composed) toggle state
+    assert_eq!(
+        store.lock().unwrap().prefs_snapshot_for_method("telex").get("reset"),
+        Some(&Pref::Composed),
+        "acting against the (never yet persisted) literal direction must record the LATEST choice"
+    );
+
+    let mut kb2 = KeyboardBuilder::telex().expect("telex keyboard");
+    kb2.set_learning(store, tx);
+    type_str(&mut kb2, "reset");
+    assert_eq!(kb2.buffer(), "rết", "composed preference recalled: same collision the syllable naturally produces, now via the pref path");
+}
+
+#[test]
+fn collection_fires_once_at_commit_not_per_keystroke() {
+    // medium row (red-team M7): the collector must never fire mid-word —
+    // multiword recomputes the whole window every keystroke, so collecting
+    // anywhere but the boundary would record the same event repeatedly.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx);
+
+    // Mid-word: composing the undo shape "ress" as the OPEN trailing word —
+    // not yet committed, so the store must stay untouched.
+    type_str(&mut kb, "res");
+    assert!(store.lock().unwrap().prefs_snapshot_for_method("telex").is_empty());
+    kb.process('s').expect("process must not error"); // completes "ress", still open
+    assert!(
+        store.lock().unwrap().prefs_snapshot_for_method("telex").is_empty(),
+        "still the open trailing word — no commit yet, no collection"
+    );
+
+    type_str(&mut kb, " b c d"); // force the word boundary
+    assert!(
+        store.lock().unwrap().prefs_snapshot_for_method("telex").contains_key("ress"),
+        "collection fires exactly once the word crosses the boundary"
+    );
+}
+
+#[test]
+fn short_undo_below_min_specificity_floor_records_nothing() {
+    // high row (anti-feedback rule (ii), red-team M4): a raw shorter than
+    // the min-specificity floor must never become a permanent literal
+    // preference, however it was produced — "ass" (3 chars) is the engine's
+    // own canonical tone-undo fixture, one character short of the floor.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx);
+
+    type_str(&mut kb, "ass b c d");
+    assert!(
+        store.lock().unwrap().prefs_snapshot_for_method("telex").is_empty(),
+        "a raw shorter than the min-specificity floor must never be recorded, even from a genuine undo shape"
+    );
 }

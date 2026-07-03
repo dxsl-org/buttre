@@ -4,10 +4,15 @@
 //!
 //! Uses buttre-engine pipeline for processing
 
+use crate::state::learning::{LearningFile, LearningStore, PreferKind};
 use crate::Action;
+use buttre_engine::compose::{compose_closed, is_last_event_undo, ComposeOpts, Validator};
+use buttre_engine::pipeline::validation::{is_attested_overlay, SyllableStructure};
 use buttre_engine::pipeline::{PipelineExecutor, PipelineConfig};
 use buttre_engine::types::Action as EngineAction;
 use std::collections::HashMap;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// How many words the editable rolling window keeps (current + N-1 previous).
 /// 3 = current word + 2 words back (matches "fix 1–2 previous words").
@@ -108,6 +113,49 @@ pub struct Keyboard {
     /// default (`Grapheme`) because `PipelineConfig` has no app-settings
     /// concept of its own.
     backspace_mode: BackspaceMode,
+
+    /// Input method identifier (e.g. `"telex"`, `"vni"`) — captured at
+    /// construction time since `config` is moved into the executor.
+    /// Event-sourcing-completion Phase 5: scopes personal-learning
+    /// records/snapshots per method (`LearningStore::record_pref`/
+    /// `snapshot_for_method` are both method-keyed, so Telex/VNI never share
+    /// a preference for the same raw sequence).
+    method: String,
+
+    /// A `Keyboard`-owned copy of the compose options the LIVE executor's
+    /// compose stage derives from the same `PipelineConfig` (event-sourcing-
+    /// completion Phase 5). `None` for non-Vietnamese-validator configs
+    /// (native scripts, Hmong/Custom) — there is no attested-syllable table
+    /// to learn against, mirroring `PipelineExecutor::boundary_repair_opts`'s
+    /// own gate.
+    ///
+    /// Exists so the word-commit collector below can call
+    /// `buttre_engine::compose::{compose_closed, is_last_event_undo}`
+    /// directly, through the engine's PUBLIC API, without a new accessor
+    /// into `PipelineExecutor`'s private state. Kept in sync with the live
+    /// executor's own learning snapshot by `apply_learning_snapshot` — both
+    /// must see the SAME `user_attested`/`raw_prefs` data, or the collector's
+    /// notion of "already attested" could silently diverge from what the
+    /// pipeline actually renders.
+    compose_opts: Option<ComposeOpts>,
+
+    /// Personal-learning store handle (event-sourcing-completion Phase 5).
+    /// `None` (the `Keyboard::new` default) until `set_learning` is called —
+    /// every collection/refresh path below is then a no-op, byte-identical
+    /// to pre-Phase-5 behavior. The platform layer gates calling
+    /// `set_learning` at all on `Settings::learning_enabled`.
+    learning: Option<LearningHandle>,
+}
+
+/// Bundles the shared personal-learning store with its off-thread save
+/// channel (event-sourcing-completion Phase 5) — see `Keyboard::
+/// set_learning`. Both halves are cheap to clone (`Arc`/`mpsc::Sender`), so
+/// the collector can release its borrow of `self.learning` before taking
+/// `&mut self` again for the snapshot refresh.
+#[derive(Clone)]
+struct LearningHandle {
+    store: Arc<Mutex<LearningStore>>,
+    save_tx: Sender<LearningFile>,
 }
 
 impl Keyboard {
@@ -122,6 +170,14 @@ impl Keyboard {
             && config.name != "nom"
             && !config.pipeline.use_composition;
 
+        // Captured BEFORE `config` moves into the executor below (event-
+        // sourcing-completion Phase 5) — see `method`/`compose_opts`'s docs.
+        let method = config.name.clone();
+        let compose_opts = {
+            let opts = ComposeOpts::from_config(&config);
+            (opts.validator == Validator::Vietnamese).then_some(opts)
+        };
+
         // Create executor directly from config
         let executor = PipelineExecutor::new(config);
 
@@ -134,7 +190,148 @@ impl Keyboard {
             toggle_map: HashMap::new(),
             toggle_signals: Vec::new(),
             backspace_mode: BackspaceMode::default(),
+            method,
+            compose_opts,
+            learning: None,
         })
+    }
+
+    /// Inject the personal-learning store + off-thread save channel
+    /// (event-sourcing-completion Phase 5). Callers gate calling this AT ALL
+    /// on `Settings::learning_enabled` — never calling it (the
+    /// `Keyboard::new` default) is what makes learning byte-identical to no
+    /// store: `self.learning` stays `None` and every collection/refresh path
+    /// below no-ops. See `buttre-platform/src/shared/input/keyboard_manager.rs`,
+    /// the only caller, which re-injects on every method switch (a fresh
+    /// `Keyboard` instance starts with no handle, same as `backspace_mode`).
+    ///
+    /// Immediately refreshes the compose snapshot from `store`'s CURRENT
+    /// state (`LearningStore::snapshot_for_method`) so a freshly loaded
+    /// store applies from the very next keystroke — the Combined Contract's
+    /// "boundary only" rule governs when NEW signals are COLLECTED, not this
+    /// one-time hand-off at construction/method-switch time.
+    pub fn set_learning(&mut self, store: Arc<Mutex<LearningStore>>, save_tx: Sender<LearningFile>) {
+        let snapshot = {
+            let guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.snapshot_for_method(&self.method)
+        };
+        self.apply_learning_snapshot(snapshot);
+        self.learning = Some(LearningHandle { store, save_tx });
+    }
+
+    /// Push a fresh learning snapshot to both the live executor's compose
+    /// stage AND this `Keyboard`'s own `compose_opts` copy (event-sourcing-
+    /// completion Phase 5) — mirrors `PipelineExecutor::
+    /// set_learning_snapshot`'s own "single consult point" requirement: the
+    /// collector below calls `compose_closed`/`is_last_event_undo` directly
+    /// against `compose_opts`, so it must see the SAME data the live
+    /// pipeline does, or the two could silently diverge on what counts as
+    /// attested/preferred.
+    fn apply_learning_snapshot(&mut self, snapshot: buttre_engine::compose::LearningSnapshot) {
+        if let Some(opts) = self.compose_opts.as_mut() {
+            opts.user_attested = snapshot.user_attested.clone();
+            opts.raw_prefs = snapshot.raw_prefs.clone();
+        }
+        self.executor.set_learning_snapshot(snapshot);
+    }
+
+    /// Remove and return every pending toggle signal (event-sourcing-
+    /// completion Phase 4 seam, `ToggleSignal`) whose raw sequence exactly
+    /// matches `word_raw` — the just-committed word's raw keys, same case.
+    /// Toggling FREEZES a word (`toggle_last_word`'s doc: continued typing
+    /// starts a NEW word), so its raw can never be mutated again before it
+    /// scrolls out — an exact string match is therefore unambiguous.
+    /// Non-matching signals (belonging to a DIFFERENT, still-in-window word)
+    /// are left in place for a later commit.
+    ///
+    /// Called unconditionally at every word commit (event-sourcing-
+    /// completion Phase 5), even when no learning store is wired — otherwise
+    /// `toggle_signals` would grow unboundedly for a session that toggles
+    /// words but never consumes the signal any other way.
+    fn drain_matching_toggle_signals(&mut self, word_raw: &str) -> Vec<ToggleSignal> {
+        let mut matched = Vec::new();
+        self.toggle_signals.retain(|sig| {
+            if sig.raw_sequence == word_raw {
+                matched.push(sig.clone());
+                false
+            } else {
+                true
+            }
+        });
+        matched
+    }
+
+    /// Word-commit personal-learning collection (event-sourcing-completion
+    /// Phase 5, Requirements (a)/(b)) — called ONCE per committed word from
+    /// `scroll_out_overflow`, NEVER per keystroke (red-team M7: multiword
+    /// replays the same window every keystroke, so collecting anywhere else
+    /// would record the same event dozens of times).
+    ///
+    /// Ordering (Combined Contract: repair → collect → refresh): P3's
+    /// word-boundary repair already ran inside `compose_window`'s call to
+    /// `compose_one_word`, before the caller (`scroll_out_overflow`) reaches
+    /// this — this function only collects signals and (last) refreshes the
+    /// snapshot.
+    ///
+    /// Precedence: a P4 word toggle is the strongest, most deliberate signal
+    /// for `word_raw` — when one (or more, if re-toggled before scrolling
+    /// out) exists, it is recorded and nothing else is; recording an
+    /// unrelated undo-shape/direct-typed guess for the SAME raw afterward
+    /// could silently overwrite the user's explicit choice. Otherwise: a
+    /// double-tap undo/toggle shape (`is_last_event_undo`) records a literal
+    /// preference; failing that, a clean direct-typed (no inferred marks,
+    /// not gate-demoted, structurally valid, currently unattested) syllable
+    /// feeds the overlay promotion counter (anti-feedback rule (i): an
+    /// automatic demote is checked via `ComposeResult::demoted` and records
+    /// NOTHING).
+    fn collect_and_refresh_learning(&mut self, word_raw: &[char]) {
+        if word_raw.is_empty() {
+            return;
+        }
+        let word_str: String = word_raw.iter().collect();
+        let toggles = self.drain_matching_toggle_signals(&word_str);
+
+        let Some(handle) = self.learning.as_ref() else { return };
+        let Some(opts) = self.compose_opts.as_ref() else { return };
+
+        let has_trigger = opts.has_trigger_key(word_raw);
+        let mut store = handle.store.lock().unwrap_or_else(PoisonError::into_inner);
+
+        if !toggles.is_empty() {
+            for sig in &toggles {
+                let prefer = if sig.literal { PreferKind::Literal } else { PreferKind::Composed };
+                store.record_pref(&self.method, &word_str, prefer, has_trigger);
+            }
+        } else if is_last_event_undo(word_raw, opts) {
+            store.record_pref(&self.method, &word_str, PreferKind::Literal, has_trigger);
+        } else {
+            let result = compose_closed(word_raw, opts);
+            let is_direct = !result.temp_english
+                && !result.demoted
+                && !result.applied_marks.iter().any(|m| m.non_adjacent)
+                && SyllableStructure::parse(&result.text).is_valid()
+                && !is_attested_overlay(&result.text, opts.user_attested.as_deref());
+            if is_direct {
+                store.record_direct_typed(&result.text);
+            }
+        }
+
+        let snapshot = store.snapshot_for_method(&self.method);
+        let save_file = store.is_dirty().then(|| store.snapshot_for_save());
+        let save_tx = handle.save_tx.clone();
+        drop(store);
+
+        if let Some(file) = save_file {
+            // Off-thread save (red-team C3): this only ENQUEUES the
+            // snapshot — the actual disk write happens in
+            // `buttre-platform/src/main.rs`'s event loop, never here (this
+            // runs on the hook-callback thread). A full/disconnected
+            // receiver is not an error worth surfacing on this hot path;
+            // the next dirty commit will retry.
+            let _ = save_tx.send(file);
+        }
+
+        self.apply_learning_snapshot(snapshot);
     }
 
     /// Override the backspace deletion mode (event-sourcing-completion Phase
@@ -531,9 +728,11 @@ impl Keyboard {
             while i < n && Self::is_window_separator(self.raw[i]) {
                 i += 1;
             }
+            let word_start = i;
             while i < n && !Self::is_window_separator(self.raw[i]) {
                 i += 1;
             }
+            let word_end = i;
             while i < n && Self::is_window_separator(self.raw[i]) {
                 i += 1;
             }
@@ -543,6 +742,22 @@ impl Keyboard {
             let head: Vec<char> = self.raw[..i].to_vec();
             let frozen = self.compose_window(&head);
             self.committed.push_str(&frozen);
+
+            // Personal-learning word-commit signal collection (event-
+            // sourcing-completion Phase 5) — ONLY for a word truly CLOSED by
+            // a real separator (`i > word_end`, i.e. at least one trailing
+            // separator char followed it within `head`), matching the exact
+            // closed/open distinction `compose_window` already used to
+            // render `frozen` above (see its doc): the pathological "no
+            // separator anywhere, forced out by the raw-length safety cap"
+            // case is left uncollected, same as it is left un-repaired.
+            // Must run BEFORE `self.raw.drain` below — `word_start`/
+            // `word_end` index into the CURRENT `self.raw`.
+            if i > word_end {
+                let word_raw: Vec<char> = self.raw[word_start..word_end].to_vec();
+                self.collect_and_refresh_learning(&word_raw);
+            }
+
             self.raw.drain(..i);
 
             // Map re-anchor (event-sourcing-completion Phase 4, red-team

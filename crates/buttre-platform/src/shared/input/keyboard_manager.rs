@@ -6,13 +6,29 @@
 //! ```
 
 use anyhow::Result;
+use buttre_core::state::learning::{LearningFile, LearningStore};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use buttre_core::{Keyboard, KeyboardBuilder};
+
+/// Personal-learning wiring (event-sourcing-completion Phase 5): the shared
+/// store handle plus its off-thread save channel, bundled so
+/// `KeyboardManager` can re-inject both into every `Keyboard` it builds (a
+/// fresh instance starts with neither — see `Keyboard::set_learning`'s doc).
+#[derive(Clone)]
+struct LearningWiring {
+    store: Arc<Mutex<LearningStore>>,
+    save_tx: mpsc::Sender<LearningFile>,
+}
 
 /// Keyboard manager that wraps buttre-keyboard with Arc<Mutex<>>
 pub struct KeyboardManager {
     keyboard: Arc<RwLock<Option<Keyboard>>>,
     current_method: Arc<Mutex<String>>,
+    /// `None` until `set_learning` is called — mirrors `Settings::
+    /// learning_enabled` gating at the call site in `main.rs` (event-
+    /// sourcing-completion Phase 5).
+    learning: Mutex<Option<LearningWiring>>,
 }
 
 impl KeyboardManager {
@@ -21,12 +37,32 @@ impl KeyboardManager {
         Ok(Self {
             keyboard: Arc::new(RwLock::new(None)),
             current_method: Arc::new(Mutex::new("english".to_string())),
+            learning: Mutex::new(None),
         })
     }
 
     /// Get a clone of the keyboard Arc for sharing across threads
     pub fn get_keyboard(&self) -> Arc<RwLock<Option<Keyboard>>> {
         self.keyboard.clone()
+    }
+
+    /// Wire the personal-learning store + off-thread save channel
+    /// (event-sourcing-completion Phase 5). The CALLER (`main.rs`) gates
+    /// calling this at all on `Settings::learning_enabled` — never calling
+    /// it leaves every future `Keyboard` build byte-identical to pre-Phase-5
+    /// behavior. Applies immediately to whatever `Keyboard` is CURRENTLY
+    /// loaded (if any), and is remembered for every future `set_method`
+    /// call, since building a new `Keyboard` there always starts with no
+    /// handle (mirrors `BackspaceModeObserver`'s re-apply-on-switch pattern
+    /// in `main.rs`).
+    pub fn set_learning(&self, store: Arc<Mutex<LearningStore>>, save_tx: mpsc::Sender<LearningFile>) {
+        let wiring = LearningWiring { store, save_tx };
+        *self.learning.lock().unwrap() = Some(wiring.clone());
+        if let Ok(mut guard) = self.keyboard.write() {
+            if let Some(kb) = guard.as_mut() {
+                kb.set_learning(wiring.store, wiring.save_tx);
+            }
+        }
     }
 
     /// Set the input method
@@ -42,7 +78,7 @@ impl KeyboardManager {
         }
 
         // Load keyboard for this method
-        let keyboard = match method {
+        let mut keyboard = match method {
             "telex" => {
                 match KeyboardBuilder::telex() {
                     Ok(kb) => kb,
@@ -105,6 +141,19 @@ impl KeyboardManager {
                 }
             }
         };
+
+        // Re-inject personal-learning wiring (event-sourcing-completion
+        // Phase 5): every `Keyboard` above starts with none — a fresh
+        // instance's `learning` field always defaults to `None` — so
+        // whatever was handed to `set_learning` must be re-applied on every
+        // method switch, same as `BackspaceModeObserver` re-applies
+        // `backspace_mode` in `main.rs`. No-op when learning was never wired
+        // (`self.learning` stays `None`, matching `Settings::learning_enabled
+        // == false`).
+        let wiring = self.learning.lock().unwrap().clone();
+        if let Some(wiring) = wiring {
+            keyboard.set_learning(wiring.store, wiring.save_tx);
+        }
 
         *self.keyboard.write().unwrap() = Some(keyboard);
         tracing::info!("✓ Loaded keyboard for method '{}'", method);
