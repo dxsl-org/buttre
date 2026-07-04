@@ -3,6 +3,8 @@ name = "buttre-test"
 version = "0.7.6-beta"
 edition = "2021"
 description = "Unified testing and benchmarking tool for Buttre"
+# Internal workspace crate — never published to crates.io.
+publish = false
 
 [lints]
 workspace = true
