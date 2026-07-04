@@ -426,7 +426,10 @@ pub async fn run_engine() -> Result<()> {
 
     let engine = ButtreEngine::new_with_method(&method);
 
-    ConnectionBuilder::session()?
+    // The connection MUST be held for the lifetime of the service — dropping
+    // a `zbus::Connection` closes the underlying socket, which would take the
+    // engine off the bus the instant it was built.
+    let _connection = ConnectionBuilder::session()?
         .name("org.freedesktop.IBus.buttre")?
         .serve_at("/org/freedesktop/IBus/Engine/buttre", engine)?
         .build()
@@ -446,7 +449,8 @@ pub async fn run_engine_with_shutdown(shutdown: tokio::sync::oneshot::Receiver<(
 
     let engine = ButtreEngine::new_with_method(&method);
 
-    ConnectionBuilder::session()?
+    // Held for the lifetime of the service — see `run_engine`'s comment.
+    let _connection = ConnectionBuilder::session()?
         .name("org.freedesktop.IBus.buttre")?
         .serve_at("/org/freedesktop/IBus/Engine/buttre", engine)?
         .build()

@@ -1919,15 +1919,20 @@ fn perf_latched_typing_and_backspace_storm_bounded() {
 
     // Generous bound (plan.md: "<1 ms/keystroke at Keyboard level incl.
     // backspace storms"): 1000 full-word retypes and 20 full-window replays
-    // must both stay comfortably under 100ms on any dev machine, proving the
-    // probe never turns into the unbounded O(n^2)/O(n^3) blowup red-team
-    // M2 warned about.
+    // must stay bounded, proving the probe never turns into the unbounded
+    // O(n^2)/O(n^3) blowup red-team M2 warned about. 500ms (not 100ms):
+    // CI runs `cargo test` in DEBUG mode on slow shared runners, where the
+    // healthy path already measured ~111ms — a genuine complexity blowup
+    // measures in SECONDS on these buffer sizes, so the looser bound still
+    // catches the regression class this test exists for. Even at 500ms the
+    // per-keystroke cost (6000 keystrokes) is ~83µs, far inside the plan's
+    // 1ms/keystroke budget.
     assert!(
-        latched_typing_elapsed.as_millis() < 100,
+        latched_typing_elapsed.as_millis() < 500,
         "latched typing must stay fast: {latched_typing_elapsed:?}"
     );
     assert!(
-        storm_elapsed.as_millis() < 100,
+        storm_elapsed.as_millis() < 500,
         "backspace-storm-shaped replay must stay bounded: {storm_elapsed:?}"
     );
 }

@@ -22,6 +22,7 @@
 
 use anyhow::Result;
 use buttre_core::Keyboard;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -50,15 +51,19 @@ const PIPE_INSTANCE_CAP: u32 = 4;
 
 /// Cap on simultaneous client-handler threads. Limits the blast radius of a
 /// misbehaving client that opens many connections.
+#[cfg(windows)]
 const MAX_CONCURRENT_THREADS: usize = 4;
 
 /// Tracks live handler threads so spawning logic can refuse new connections
 /// when at capacity. Decremented by `ThreadCountGuard` on thread exit.
+#[cfg(windows)]
 static THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Drop guard that decrements `THREAD_COUNT` when a handler thread exits
 /// (including via panic unwind).
+#[cfg(windows)]
 struct ThreadCountGuard;
+#[cfg(windows)]
 impl Drop for ThreadCountGuard {
     fn drop(&mut self) {
         THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
