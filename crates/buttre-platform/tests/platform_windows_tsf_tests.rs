@@ -1,3 +1,7 @@
+//! Windows-only integration tests — the whole `platforms::windows` module
+//! tree does not exist on other targets.
+#![cfg(windows)]
+
 use buttre_core::Action;
 use buttre_platform::platforms::windows::tsf::text_service::candidate_ui::{
     CandidateItem, NomCandidateUI,

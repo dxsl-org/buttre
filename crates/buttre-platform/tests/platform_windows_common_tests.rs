@@ -1,3 +1,7 @@
+//! Windows-only integration tests — the whole `platforms::windows` module
+//! tree does not exist on other targets.
+#![cfg(windows)]
+
 use buttre_platform::platforms::windows::common::key_utils::*;
 use buttre_platform::platforms::windows::common::vk_codes::*;
 
