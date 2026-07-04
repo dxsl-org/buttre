@@ -4,6 +4,20 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.7.6-beta] — 2026-07-04
+
+- engine: hỗ trợ gõ w thay ư sau phụ âm đầu
+- engine: w đầu từ giữ literal cho từ tiếng Anh
+- engine: kết quả w không attested tự trả về literal
+- engine: sửa mất một chữ s cuối từ tiếng Anh
+- engine: sửa từ VNI có dấu bị trả raw khi commit
+- engine: thêm từ lóng thông dụng vào từ điển chứng thực
+- engine: compose nhanh gấp 5 lần nhờ bỏ allocation
+- engine: pipeline executor giảm còn 592 ns mỗi phím
+- engine: opt-level 3 riêng cho crate engine
+- bench: thêm benchmark so sánh với engine tham chiếu
+- bench: đo steady-state, sửa số liệu bị thổi phồng
+
 ## [0.7.5-beta] — 2026-07-03
 
 - hook: xử lý lỗi gõ trong Chrome bị lặp ký tự

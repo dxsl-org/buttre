@@ -1,6 +1,6 @@
 [package]
 name = "buttre-test"
-version = "0.7.5-beta"
+version = "0.7.6-beta"
 edition = "2021"
 description = "Unified testing and benchmarking tool for Buttre"
 
