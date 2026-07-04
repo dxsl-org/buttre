@@ -38,9 +38,10 @@ pub fn apply_transforms(base: &str, transforms: &[TransformMark], opts: &Compose
     let mut result = base.to_string();
     let mut applied = Vec::new();
     for (idx, tm) in transforms.iter().enumerate() {
-        // Build the remaining mark keys slice for compound-suppression check.
-        let remaining_keys: Vec<char> = transforms[idx + 1..].iter().map(|t| t.key).collect();
-        let new = apply_one_transform(&result, tm.key, tm.base_len_at_typing, &remaining_keys, opts);
+        // Remaining marks (for the compound-suppression check) are passed as
+        // a borrowed sub-slice — no per-mark Vec<char>.
+        let remaining = &transforms[idx + 1..];
+        let new = apply_one_transform(&result, tm.key, tm.base_len_at_typing, remaining, opts);
         if let Some(new_result) = new {
             result = new_result;
             applied.push(AppliedMark { key: tm.key, raw_pos: tm.raw_pos, non_adjacent: tm.non_adjacent });
@@ -58,12 +59,12 @@ pub fn apply_transforms(base: &str, transforms: &[TransformMark], opts: &Compose
 /// `base_len_at_typing`: char count of the base when the mark was typed.
 /// The mark targets the rightmost matching vowel in `result[..base_len_at_typing]`.
 ///
-/// `remaining_keys`: later marks (for compound-suppression decision).
+/// `remaining`: later marks (for compound-suppression decision).
 fn apply_one_transform(
     result: &str,
     mark: char,
     base_len_at_typing: usize,
-    remaining_keys: &[char],
+    remaining: &[TransformMark],
     opts: &ComposeOpts,
 ) -> Option<String> {
     let mark_lc = mark.to_ascii_lowercase();
@@ -77,8 +78,8 @@ fn apply_one_transform(
     // ── UO compound rule ──────────────────────────────────────────────────────
     // Only within the base slice that was present when this mark was typed.
     let triggers_compound = is_compound_trigger(mark, opts);
-    let has_later_compound = remaining_keys.iter()
-        .any(|&m| m.to_ascii_lowercase() == mark_lc && is_compound_trigger(m, opts));
+    let has_later_compound = remaining.iter()
+        .any(|t| t.key.to_ascii_lowercase() == mark_lc && is_compound_trigger(t.key, opts));
 
     if triggers_compound && !has_later_compound {
         let base_slice: String = chars[..search_end].iter().collect();
@@ -156,9 +157,11 @@ fn apply_one_transform(
         let ch_lc = normalize_vowel(ch); // base vowel (strips tone diacritics)
 
         if let Some(&new_char) = opts.pair_rules.get(&(ch_lc, mark_lc)) {
-            let mut candidate = chars.clone();
-            candidate[i] = preserve_case(ch, new_char);
-            let candidate_str: String = candidate.into_iter().collect();
+            // Try the replacement in place and revert before the next
+            // (leftward) probe — no per-candidate Vec<char> clone.
+            chars[i] = preserve_case(ch, new_char);
+            let candidate_str: String = chars.iter().collect();
+            chars[i] = ch;
             if is_valid_syllable(&candidate_str) {
                 return Some(candidate_str);
             }
@@ -228,8 +231,9 @@ fn apply_one_transform(
 /// phonological validation over one that produces an invalid nucleus cluster
 /// (e.g. "lưu" valid vs "luư" invalid for the "luu"+horn transform).
 fn is_valid_syllable(s: &str) -> bool {
-    use crate::pipeline::validation::SyllableStructure;
-    SyllableStructure::parse(s).is_valid()
+    // Zero-alloc probe (stack-buffer normalize + borrowed parts) — this runs
+    // once per candidate vowel per mark on the compose hot path.
+    crate::pipeline::validation::is_valid_syllable_fast(s)
 }
 
 /// True when the mark key is the compound-trigger in the transform table.

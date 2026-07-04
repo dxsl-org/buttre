@@ -397,37 +397,29 @@ fn check_transform_toggle(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: b
     // char of that rule is repeated once more (the undo key).
     // Example: "aaa" — rule "aa"→"â", third 'a' is undo.
     // Example: "aww" — rule "aw"→"ă", second 'w' is undo.
-
-    // Find any 2-char transform rule whose trigger chars appear consecutively
-    // in raw, followed by the same second char once more.
-    for rule_key in opts.transform_rules.keys() {
-        let rk: Vec<char> = rule_key.to_lowercase().chars().collect();
-        if rk.len() != 2 {
-            continue;
-        }
-        let (rc1, rc2) = (rk[0], rk[1]);
-
-        // Look for the pattern [..., rc1, rc2, rc2] anywhere in raw.
-        // After the triple, nothing else may appear (the triple is at the end).
-        let n = raw.len();
-        if n < 3 {
-            continue;
-        }
-        let tail = &raw[n - 3..];
-        let t = [
-            tail[0].to_ascii_lowercase(),
-            tail[1].to_ascii_lowercase(),
-            tail[2].to_ascii_lowercase(),
-        ];
-        if t[0] == rc1 && t[1] == rc2 && t[2] == rc2 {
-            // The last 3 chars match the undo pattern.
-            // Re-compose the prefix so earlier completed transforms (e.g. "dd"→"đ")
-            // are preserved.  Only the undone cluster reverts to literal rc1+rc2.
-            let prefix_raw = &raw[..n - 3];
-            let composed_prefix = apply_transforms_only(prefix_raw, opts, allow_nonadjacent);
-            let text = format!("{composed_prefix}{rc1}{rc2}");
-            return Some(FallbackResult::handled(text, true));
-        }
+    //
+    // The trailing triple [rc1, rc2, rc2] pins the ONLY rule key that could
+    // ever match — so this is one O(1) `pair_rules` lookup, not a scan. (The
+    // old loop iterated EVERY `transform_rules` key allocating a lowercase
+    // String + a Vec<char> per key — ~36 allocations on every ≥3-key
+    // keystroke, the single largest allocation source in `compose()`.
+    // `pair_rules` indexes exactly the all-lowercase 2-char keys the old
+    // lowercased comparison could match, so the match set is identical.)
+    let n = raw.len();
+    let t = [
+        raw[n - 3].to_ascii_lowercase(),
+        raw[n - 2].to_ascii_lowercase(),
+        raw[n - 1].to_ascii_lowercase(),
+    ];
+    if t[1] == t[2] && opts.pair_rules.contains_key(&(t[0], t[1])) {
+        // The last 3 chars match the undo pattern.
+        // Re-compose the prefix so earlier completed transforms (e.g. "dd"→"đ")
+        // are preserved.  Only the undone cluster reverts to literal rc1+rc2.
+        let (rc1, rc2) = (t[0], t[1]);
+        let prefix_raw = &raw[..n - 3];
+        let composed_prefix = apply_transforms_only(prefix_raw, opts, allow_nonadjacent);
+        let text = format!("{composed_prefix}{rc1}{rc2}");
+        return Some(FallbackResult::handled(text, true));
     }
 
     None
@@ -535,9 +527,12 @@ fn nonadjacent_undo_candidate(raw: &[char], opts: &ComposeOpts) -> Option<char> 
 /// Telex `'w'` (via `"aw"`/`"ow"`/`"uw"`/standalone `"w"`), and VNI digits (via
 /// `"a6"`/`"o7"`/…) uniformly, with no hardcoded key set.
 fn is_transform_trigger_char(key_lc: char, opts: &ComposeOpts) -> bool {
-    opts.transform_rules.keys().any(|rule| {
-        rule.chars().last().is_some_and(|c| c.to_ascii_lowercase() == key_lc)
-    })
+    // Precomputed hot-path tables (`ComposeOpts::from_config`) instead of
+    // rescanning every rule key: a trigger is the second char of a 2-char
+    // rule or the sole char of a 1-char rule — the same set the runtime
+    // transform lookups can actually act on.
+    opts.single_rules.contains_key(&key_lc)
+        || opts.pair_rules.keys().any(|&(_, b)| b == key_lc)
 }
 
 /// Recompute `raw` through segment + transform + tone + the attestation gate

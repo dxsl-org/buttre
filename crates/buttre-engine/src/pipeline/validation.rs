@@ -67,16 +67,10 @@ impl SyllableStructure {
     pub fn parse(syllable: &str) -> Self {
         // Algorithm Step 0: Normalize to lowercase and remove tones
         let syllable_normalized = normalize_vietnamese(syllable);
-        
-        // Algorithm Step 1: Extract onset (initial consonant cluster)
-        let onset = extract_onset(&syllable_normalized);
-        let after_onset = &syllable_normalized[onset.len()..];
-        
-        // Algorithm Step 2: Extract coda (final consonant)
-        let coda = extract_coda(after_onset);
-        let nucleus_end = after_onset.len() - coda.len();
-        let nucleus = &after_onset[..nucleus_end];
-        
+
+        // Algorithm Steps 1-2: split into (onset, nucleus, coda) slices
+        let (onset, nucleus, coda) = split_parts(&syllable_normalized);
+
         Self {
             onset: onset.to_string(),
             nucleus: nucleus.to_string(),
@@ -94,29 +88,7 @@ impl SyllableStructure {
     /// 3. Coda is in valid coda list
     /// 4. Onset-Nucleus-Coda combination is valid
     pub fn is_valid(&self) -> bool {
-        self.is_valid_onset() && 
-        self.is_valid_nucleus() && 
-        self.is_valid_coda() &&
-        self.is_valid_combination()
-    }
-    
-    /// Check if onset is valid
-    fn is_valid_onset(&self) -> bool {
-        VALID_ONSETS.contains(&self.onset.as_str())
-    }
-    
-    /// Check if nucleus is valid
-    fn is_valid_nucleus(&self) -> bool {
-        // Empty nucleus is invalid
-        if self.nucleus.is_empty() {
-            return false;
-        }
-        VALID_NUCLEI.contains(&self.nucleus.as_str())
-    }
-    
-    /// Check if coda is valid
-    fn is_valid_coda(&self) -> bool {
-        VALID_CODAS.contains(&self.coda.as_str())
+        parts_are_valid(&self.onset, &self.nucleus, &self.coda)
     }
     
     /// Check if the onset-nucleus-coda combination is valid Vietnamese.
@@ -156,18 +128,36 @@ impl SyllableStructure {
     /// pass this check (`hăk`/`găk`/`mủk`) — pinned as known behavior in
     /// `buttre-core`'s golden corpus, not fixed here.
     fn is_valid_combination(&self) -> bool {
-        let (n, c) = (self.nucleus.as_str(), self.coda.as_str());
+        combination_is_valid(&self.onset, &self.nucleus, &self.coda)
+    }
+}
 
+/// Free-function core of the validity check — operates on borrowed slices so
+/// the zero-alloc paths ([`is_valid_syllable_fast`], [`split_parts`] callers)
+/// never need to build a `SyllableStructure` with three owned Strings.
+pub(crate) fn parts_are_valid(onset: &str, nucleus: &str, coda: &str) -> bool {
+    VALID_ONSETS.contains(&onset)
+        && !nucleus.is_empty()
+        && VALID_NUCLEI.contains(&nucleus)
+        && VALID_CODAS.contains(&coda)
+        && combination_is_valid(onset, nucleus, coda)
+}
+
+/// Slice-based body of [`SyllableStructure::is_valid_combination`] — see that
+/// method's doc for the full Unikey `VCPairList` provenance and the coda-"k"
+/// rules.
+fn combination_is_valid(onset: &str, n: &str, c: &str) -> bool {
+    {
         // Layer 1: open syllable is always structurally valid.
         if c.is_empty() {
             return true;
         }
 
         // Layer 2: onset-rescued exceptions (Unikey isValidCVC).
-        if self.onset == "qu" && n == "y" && matches!(c, "n" | "nh") {
+        if onset == "qu" && n == "y" && matches!(c, "n" | "nh") {
             return true;
         }
-        if self.onset == "gi" && matches!(n, "e" | "ê") && matches!(c, "n" | "ng") {
+        if onset == "gi" && matches!(n, "e" | "ê") && matches!(c, "n" | "ng") {
             return true;
         }
 
@@ -214,9 +204,19 @@ impl SyllableStructure {
 ///
 /// This allows syllable structure parsing to work with toned text.
 pub fn normalize_vietnamese(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| match c {
+    // flat_map(char::to_lowercase) is exactly `text.to_lowercase()` streamed
+    // per char — one allocation for the result instead of two.
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(strip_tone_char)
+        .collect()
+}
+
+/// Per-char body of [`normalize_vietnamese`]: map an already-lowercased char
+/// to its tone-stripped base form (diacritic transforms ă/â/ê/ô/ơ/ư/đ are
+/// preserved — only the five tone marks are removed).
+fn strip_tone_char(c: char) -> char {
+    match c {
             // a variants
             'á' | 'à' | 'ả' | 'ã' | 'ạ' => 'a',
             'ắ' | 'ằ' | 'ẳ' | 'ẵ' | 'ặ' => 'ă',
@@ -243,11 +243,59 @@ pub fn normalize_vietnamese(text: &str) -> String {
             
             // đ
             'đ' => 'đ',
-            
+
             // Keep everything else
             other => other,
-        })
-        .collect()
+    }
+}
+
+/// Split an ALREADY-NORMALIZED syllable (lowercase, tone-stripped) into
+/// borrowed (onset, nucleus, coda) slices — the zero-alloc core that
+/// [`SyllableStructure::parse`] wraps with owned Strings for its public
+/// struct form.
+pub(crate) fn split_parts(normalized: &str) -> (&str, &str, &str) {
+    let onset = extract_onset(normalized);
+    let after_onset = &normalized[onset.len()..];
+    let coda = extract_coda(after_onset);
+    let nucleus = &after_onset[..after_onset.len() - coda.len()];
+    (onset, nucleus, coda)
+}
+
+/// [`normalize_vietnamese`] into a caller-provided stack buffer — zero heap
+/// allocation for every real syllable (≤16 chars, ≤4 UTF-8 bytes each fits
+/// 64 bytes comfortably). Returns `None` when the input does not fit; callers
+/// fall back to the heap path, so overflow is a slow-path, never an error.
+pub(crate) fn normalize_vietnamese_into<'a>(text: &str, buf: &'a mut [u8; 64]) -> Option<&'a str> {
+    let mut len = 0usize;
+    for c in text.chars().flat_map(char::to_lowercase) {
+        let mapped = strip_tone_char(c);
+        let mut tmp = [0u8; 4];
+        let encoded = mapped.encode_utf8(&mut tmp);
+        if len + encoded.len() > buf.len() {
+            return None;
+        }
+        buf[len..len + encoded.len()].copy_from_slice(encoded.as_bytes());
+        len += encoded.len();
+    }
+    // Concatenation of encode_utf8 outputs is valid UTF-8 by construction.
+    std::str::from_utf8(&buf[..len]).ok()
+}
+
+/// Zero-alloc equivalent of `SyllableStructure::parse(text).is_valid()` —
+/// the per-candidate validity probe on `compose()`'s hot path (the parse
+/// form costs 4 allocations per call; this one costs none for any real
+/// syllable).
+pub(crate) fn is_valid_syllable_fast(text: &str) -> bool {
+    let mut buf = [0u8; 64];
+    match normalize_vietnamese_into(text, &mut buf) {
+        Some(normalized) => {
+            let (onset, nucleus, coda) = split_parts(normalized);
+            parts_are_valid(onset, nucleus, coda)
+        }
+        // Longer than any real syllable: fall back to the heap path rather
+        // than guessing (parse handles arbitrary input).
+        None => SyllableStructure::parse(text).is_valid(),
+    }
 }
 
 /// Extract onset (initial consonant cluster) from syllable
@@ -502,13 +550,47 @@ fn extract_tone(syllable: &str) -> Option<ToneMark> {
 /// tone mark — both cases mean "not a decomposable Vietnamese syllable", not
 /// an error worth surfacing to the caller.
 pub fn decompose_ids(syllable: &str) -> Option<(usize, usize, usize, usize)> {
-    let normalized = crate::unicode::normalize_nfc(syllable).to_lowercase();
+    let normalized = nfc_lowercase(syllable);
     let tone = extract_tone(&normalized)?;
-    let structure = SyllableStructure::parse(&normalized);
-    let o = onset_id(&structure.onset)?;
-    let n = nucleus_id(&structure.nucleus)?;
-    let c = coda_id(&structure.coda)?;
+    let mut buf = [0u8; 64];
+    let (o, n, c) = match normalize_vietnamese_into(&normalized, &mut buf) {
+        Some(stripped) => {
+            let (onset, nucleus, coda) = split_parts(stripped);
+            (onset_id(onset)?, nucleus_id(nucleus)?, coda_id(coda)?)
+        }
+        None => {
+            let structure = SyllableStructure::parse(&normalized);
+            (
+                onset_id(&structure.onset)?,
+                nucleus_id(&structure.nucleus)?,
+                coda_id(&structure.coda)?,
+            )
+        }
+    };
     Some((o, n, c, tone_id(tone)))
+}
+
+/// NFC + lowercase with zero allocation on the hot path: `compose()`'s
+/// attestation-gate texts are always already NFC (built from precomposed
+/// table entries) and already lowercase (the case mask is applied AFTER the
+/// gate runs), so both conversions borrow in the overwhelmingly common case.
+fn nfc_lowercase(syllable: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    use unicode_normalization::{is_nfc_quick, IsNormalized};
+
+    let nfc: Cow<'_, str> = if matches!(is_nfc_quick(syllable.chars()), IsNormalized::Yes) {
+        Cow::Borrowed(syllable)
+    } else {
+        Cow::Owned(crate::unicode::normalize_nfc(syllable))
+    };
+    if nfc.chars().any(char::is_uppercase) {
+        match nfc {
+            Cow::Borrowed(s) => Cow::Owned(s.to_lowercase()),
+            Cow::Owned(s) => Cow::Owned(s.to_lowercase()),
+        }
+    } else {
+        nfc
+    }
 }
 
 /// Test whether `syllable` is an attested Vietnamese syllable, exact tone
@@ -548,13 +630,23 @@ pub fn is_attested(syllable: &str) -> bool {
 /// Fails open exactly like [`is_attested`]: an unparseable shape returns
 /// `false`, never panics.
 pub fn is_shape_attested(syllable: &str) -> bool {
-    let normalized = crate::unicode::normalize_nfc(syllable).to_lowercase();
-    let structure = SyllableStructure::parse(&normalized);
-    let (Some(o), Some(n), Some(c)) = (
-        onset_id(&structure.onset),
-        nucleus_id(&structure.nucleus),
-        coda_id(&structure.coda),
-    ) else {
+    let normalized = nfc_lowercase(syllable);
+    let mut buf = [0u8; 64];
+    let ids = match normalize_vietnamese_into(&normalized, &mut buf) {
+        Some(stripped) => {
+            let (onset, nucleus, coda) = split_parts(stripped);
+            (onset_id(onset), nucleus_id(nucleus), coda_id(coda))
+        }
+        None => {
+            let structure = SyllableStructure::parse(&normalized);
+            (
+                onset_id(&structure.onset),
+                nucleus_id(&structure.nucleus),
+                coda_id(&structure.coda),
+            )
+        }
+    };
+    let (Some(o), Some(n), Some(c)) = ids else {
         return false;
     };
     (0..NUM_TONES).any(|t| attested_data::is_set(o, n, c, t))

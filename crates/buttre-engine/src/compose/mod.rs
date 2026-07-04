@@ -771,14 +771,28 @@ fn try_elongation_fallback(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: 
 /// carries the distinction (`ô`, not `oo`; `â`, not `aa`).  The displayed text
 /// keeps the elongation; only the validity decision sees the collapsed form.
 fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
-    use crate::pipeline::validation::SyllableStructure;
+    use crate::pipeline::validation::{
+        normalize_vietnamese, normalize_vietnamese_into, parts_are_valid, split_parts,
+    };
     let collapsed = collapse_adjacent_repeats(text);
-    let s = SyllableStructure::parse(&collapsed);
-    if s.is_valid() {
+    // Zero-alloc path (perf: this runs on nearly every composed keystroke):
+    // normalize into a stack buffer and borrow the (onset, nucleus, coda)
+    // slices — the SyllableStructure form cost 4 heap allocations per call.
+    let mut buf = [0u8; 64];
+    let heap_norm; // slow-path storage, lives as long as `normalized`
+    let normalized: &str = match normalize_vietnamese_into(&collapsed, &mut buf) {
+        Some(n) => n,
+        None => {
+            heap_norm = normalize_vietnamese(&collapsed);
+            &heap_norm
+        }
+    };
+    let (onset, nucleus, coda) = split_parts(normalized);
+    if parts_are_valid(onset, nucleus, coda) {
         return true;
     }
     // Consonant-only prefix: onset present, nucleus/coda not yet typed.
-    if s.nucleus.is_empty() && s.coda.is_empty() && !s.onset.is_empty() {
+    if nucleus.is_empty() && coda.is_empty() && !onset.is_empty() {
         return true;
     }
     // KEEP (phase-03 adjudication table — REVISED from the original plan's
@@ -807,8 +821,8 @@ fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
     // theoretical one, since the golden corpus does not happen to exercise
     // this specific tone-before-transform keystroke ordering.
     if !opts.transform_trigger_chars.is_empty()
-        && s.nucleus == "ie"
-        && matches!(s.coda.as_str(), "c" | "m" | "n" | "ng" | "p" | "t")
+        && nucleus == "ie"
+        && matches!(coda, "c" | "m" | "n" | "ng" | "p" | "t")
     {
         return true;
     }
@@ -817,7 +831,21 @@ fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
 
 /// Collapse runs of consecutive identical characters down to one
 /// ("khôngggg" → "không", "trờiii" → "trời").
-fn collapse_adjacent_repeats(s: &str) -> String {
+///
+/// Borrows when there is nothing to collapse — the overwhelmingly common
+/// case on the per-keystroke hot path (a valid Vietnamese syllable never has
+/// two identical adjacent letters in its final form).
+fn collapse_adjacent_repeats(s: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let mut prev: Option<char> = None;
+    let has_repeat = s.chars().any(|c| {
+        let repeat = prev == Some(c);
+        prev = Some(c);
+        repeat
+    });
+    if !has_repeat {
+        return Cow::Borrowed(s);
+    }
     let mut out = String::with_capacity(s.len());
     let mut prev: Option<char> = None;
     for c in s.chars() {
@@ -826,5 +854,5 @@ fn collapse_adjacent_repeats(s: &str) -> String {
             prev = Some(c);
         }
     }
-    out
+    Cow::Owned(out)
 }

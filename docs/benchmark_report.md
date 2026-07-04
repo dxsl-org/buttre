@@ -36,9 +36,11 @@ Hai thay đổi làm số liệu buttre ở bảng trên hết hiệu lực:
 
 | Bộ Gõ | Latency TB (ns) | P95 (ns) | Thông lượng (M Key/s) | Tỷ lệ chính xác |
 | :--- | :---: | :---: | :---: | :---: |
-| **buttre::compose** | **454.42** | 625 | **2.20** | **99.96%** (2428/2429) |
-| **buttre::PipelineExecutor** | **1386.51** | 2700 | **0.72** | 99.92% (2427/2429) |
-| gonhanh::Engine (đo lại, steady-state) | 178.94 | 500 | 5.59 | 98.52% (2393/2429) |
+| **buttre::compose** | **176.22** | 233 | **5.67** | **99.96%** (2428/2429) |
+| **buttre::PipelineExecutor** | **591.51** | 1200 | **1.69** | 99.92% (2427/2429) |
+| gonhanh::Engine (đo lại, steady-state) | 180.06 | 500 | 5.55 | 98.52% (2393/2429) |
+
+`buttre::compose` giờ nhanh ngang gonhanh (176 vs 180 ns/key) với độ chính xác cao hơn 1.44 điểm phần trăm. Có được nhờ đợt tối ưu allocation bên trong `compose()` (đo bằng counting global allocator: **33.2 → 5.8 alloc/phím**): (1) `check_transform_toggle` từ quét toàn bộ bảng rule (String+Vec mỗi rule, ~36 alloc/phím) thành một lookup O(1) trên `pair_rules`; (2) đường validate/attestation zero-alloc — normalize vào stack buffer 64 byte + mượn slice (onset, nucleus, coda), thay cho `SyllableStructure::parse` 4-5 alloc/lần bị gọi 2-4 lần mỗi phím; (3) `decompose_ids`/`is_shape_attested` mượn Cow khi input đã NFC+lowercase; (4) transform bỏ Vec tạm mỗi mark + thử-và-hoàn-tác in-place thay vì clone mỗi candidate; (5) `collapse_adjacent_repeats` chỉ alloc khi thật sự có ký tự lặp.
 
 Từ telex duy nhất còn fail ở `compose` là `wowts` (w **đầu từ** = ư) — bỏ qua có chủ đích để các từ tiếng Anh bắt đầu bằng w (`won`, `with`, `will`…) gõ tự nhiên. `PipelineExecutor` hiển thị thêm `chwowng` ở dạng literal giữa từ (tương tác latch English có sẵn), nhưng `boundary_repair` sửa thành `chương` tại thời điểm commit từ.
 
