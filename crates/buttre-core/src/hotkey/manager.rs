@@ -43,6 +43,20 @@ impl ButtreHotkeyManager {
     pub fn new() -> Result<Self> {
         info!("Creating hotkey manager");
 
+        // Headless guard: on X11/Wayland-less environments (CI runners,
+        // servers, containers) `GlobalHotKeyManager::new()` does not fail
+        // gracefully — its X11 backend dereferences the null display and
+        // SIGSEGVs the whole process. Detect the absence of a display up
+        // front and return the same error every caller already tolerates.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return Err(HotkeyError::ManagerCreationFailed(
+                "no X11/Wayland display available (headless environment) — \
+                 global hotkeys are unavailable"
+                    .to_string(),
+            ));
+        }
+
         let manager = GlobalHotKeyManager::new()
             .map_err(|e| HotkeyError::ManagerCreationFailed(e.to_string()))?;
 
