@@ -4,12 +4,11 @@
 //!
 //! D-Bus service for Vietnamese input via IBus (zbus 3).
 
-use anyhow::Result;
 use buttre_core::Action;
 use buttre_core::{Keyboard, KeyboardBuilder};
 use std::sync::{Arc, Mutex};
 use zbus::zvariant;
-use zbus::{dbus_interface, ConnectionBuilder, SignalContext};
+use zbus::{dbus_interface, SignalContext};
 
 // ============================================================================
 // IBus modifier state bitmask (ibus.h)
@@ -399,7 +398,7 @@ impl ButtreEngine {
 ///
 /// Returns "vni" if the file contains "vni" (trimmed, case-insensitive),
 /// "telex" for any other content or on read failure.
-fn load_method_config() -> String {
+pub(super) fn load_method_config() -> String {
     let path = dirs::config_dir().map(|p| p.join("buttre/method"));
     if let Some(path) = path {
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -415,54 +414,7 @@ fn load_method_config() -> String {
     "telex".to_string()
 }
 
-// ============================================================================
-// Engine entry points
-// ============================================================================
-
-/// Run the IBus engine service (runs until process exits).
-pub async fn run_engine() -> Result<()> {
-    let method = load_method_config();
-    tracing::info!("Starting buttre IBus Engine (method={})", method);
-
-    let engine = ButtreEngine::new_with_method(&method);
-
-    // The connection MUST be held for the lifetime of the service — dropping
-    // a `zbus::Connection` closes the underlying socket, which would take the
-    // engine off the bus the instant it was built.
-    let _connection = ConnectionBuilder::session()?
-        .name("org.freedesktop.IBus.buttre")?
-        .serve_at("/org/freedesktop/IBus/Engine/buttre", engine)?
-        .build()
-        .await?;
-
-    tracing::info!("Engine running on D-Bus");
-    std::future::pending::<()>().await;
-    Ok(())
-}
-
-/// Run the IBus engine service with a graceful shutdown channel.
-///
-/// Used by `LinuxBackend::init` so the engine thread can be stopped cleanly.
-pub async fn run_engine_with_shutdown(shutdown: tokio::sync::oneshot::Receiver<()>) -> Result<()> {
-    let method = load_method_config();
-    tracing::info!("Starting buttre IBus Engine (method={}, managed)", method);
-
-    let engine = ButtreEngine::new_with_method(&method);
-
-    // Held for the lifetime of the service — see `run_engine`'s comment.
-    let _connection = ConnectionBuilder::session()?
-        .name("org.freedesktop.IBus.buttre")?
-        .serve_at("/org/freedesktop/IBus/Engine/buttre", engine)?
-        .build()
-        .await?;
-
-    tracing::info!("Engine running on D-Bus");
-
-    tokio::select! {
-        _ = std::future::pending::<()>() => {},
-        _ = shutdown => {
-            tracing::info!("Engine received shutdown signal");
-        }
-    }
-    Ok(())
-}
+// NOTE: The component entry point (private-bus connection, Factory, name
+// request) lives in `ibus_bus.rs` — this module owns only engine behavior.
+// The old session-bus `run_engine` variants that lived here could never be
+// reached by ibus-daemon (wrong bus, no Factory) and were removed.

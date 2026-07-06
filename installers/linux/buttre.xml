@@ -2,7 +2,7 @@
 <component>
     <name>org.freedesktop.IBus.buttre</name>
     <description>buttre Vietnamese IME</description>
-    <exec>/usr/bin/buttre</exec>
+    <exec>/usr/bin/buttre --ibus</exec>
     <version>0.6.3</version>
     <author>buttre project</author>
     <license>MPL-2.0</license>

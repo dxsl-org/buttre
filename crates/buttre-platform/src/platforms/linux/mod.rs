@@ -5,52 +5,36 @@
 #![cfg(target_os = "linux")]
 
 pub mod ibus;
+pub mod ibus_bus;
 
 use crate::PlatformBackend;
 use anyhow::Result;
 use buttre_core::state::{Settings, StateObserver};
 use buttre_core::{Action, Keyboard};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
-/// Linux backend — spawns the IBus engine in a background thread.
+/// Linux backend — tray-side only.
 ///
-/// Fields are wrapped in `Mutex` so the struct is `Sync`, satisfying the
-/// `StateObserver: Send + Sync` bound when registered as an observer.
+/// The IBus engine is NOT hosted here: ibus-daemon spawns `buttre --ibus`
+/// as its own process (see `ibus_bus::run_engine`) per the component XML
+/// and owns that process's lifecycle. Hosting the engine inside the tray
+/// app was part of the original "typing dead" bug — the daemon-spawned
+/// copy died on the single-instance lock while the tray copy sat invisible
+/// on the session bus.
 pub struct LinuxBackend {
     enabled: bool,
-    shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    engine_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl PlatformBackend for LinuxBackend {
     fn new() -> Result<Self> {
-        Ok(Self {
-            enabled: false,
-            shutdown_tx: Mutex::new(None),
-            engine_thread: Mutex::new(None),
-        })
+        Ok(Self { enabled: false })
     }
 
     fn init(&mut self, _keyboard: Arc<RwLock<Option<Keyboard>>>) -> Result<()> {
-        tracing::info!("Initializing Linux (IBus) backend");
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        *self.shutdown_tx.lock().unwrap() = Some(tx);
-
-        let handle = std::thread::Builder::new()
-            .name("buttre-ibus-engine".to_string())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to build tokio runtime for IBus engine");
-                if let Err(e) = rt.block_on(ibus::run_engine_with_shutdown(rx)) {
-                    tracing::error!("IBus engine exited with error: {}", e);
-                }
-            })?;
-
-        *self.engine_thread.lock().unwrap() = Some(handle);
-        self.enabled = true;
+        tracing::info!(
+            "Linux backend: tray mode only — the IBus engine runs as a \
+             separate ibus-daemon-spawned process (`buttre --ibus`)"
+        );
         Ok(())
     }
 
@@ -62,16 +46,7 @@ impl PlatformBackend for LinuxBackend {
         self.enabled = enabled;
     }
 
-    fn cleanup(&mut self) {
-        if let Some(tx) = self.shutdown_tx.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        if let Some(handle) = self.engine_thread.lock().unwrap().take() {
-            if let Err(e) = handle.join() {
-                tracing::warn!("IBus engine thread join error: {:?}", e);
-            }
-        }
-    }
+    fn cleanup(&mut self) {}
 }
 
 impl StateObserver for LinuxBackend {

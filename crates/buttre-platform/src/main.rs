@@ -106,6 +106,18 @@ fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // IBus engine mode (Linux): ibus-daemon spawns `buttre --ibus` per the
+    // component XML. Must branch BEFORE the single-instance lock — the engine
+    // process must coexist with the user's tray instance — and before any
+    // UI/winit setup (the engine is headless).
+    #[cfg(platform_linux)]
+    if std::env::args().any(|arg| arg == "--ibus") {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(buttre_platform::platforms::linux::ibus_bus::run_engine());
+    }
+
     // Single instance check
     let instance = single_instance::SingleInstance::new("buttre")
         .map_err(|e| anyhow::anyhow!("Failed to create single instance lock: {}", e))?;
