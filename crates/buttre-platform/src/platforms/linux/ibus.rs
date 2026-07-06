@@ -2,7 +2,28 @@
 //!
 //! **Tests**: Integration tests for this module are located in `crates/buttre-platform/tests/platform_linux_tests.rs`.
 //!
-//! D-Bus service for Vietnamese input via IBus (zbus 3).
+//! Engine behavior for Vietnamese input over IBus (zbus 3). The component
+//! lifecycle (private-bus connection, Factory, name request) lives in
+//! `ibus_bus.rs`.
+//!
+//! ## Composition model
+//!
+//! The `Keyboard` is built with `use_composition = true` — the same mode the
+//! Windows TSF text service uses. The engine pipeline then owns ALL word
+//! logic and emits:
+//!
+//! - `UpdateComposition { text, cursor }` — the full current word → mapped to
+//!   IBus preedit (`update_preedit_text`).
+//! - `ConfirmComposition(text)` — the boundary-repaired word at a separator →
+//!   mapped to `commit_text`.
+//! - `Commit(ch)` — the separator character itself → NOT committed by us; we
+//!   return `false` so the daemon forwards the original key to the app
+//!   (signals are queued before the method reply, so the committed word
+//!   always lands first).
+//!
+//! `delete_surrounding_text` is deliberately absent: in the preedit model the
+//! composition is not yet real text, so deleting committed text to its left
+//! would eat the user's earlier words (debug report B1).
 
 use buttre_core::Action;
 use buttre_core::{Keyboard, KeyboardBuilder};
@@ -14,11 +35,16 @@ use zbus::{dbus_interface, SignalContext};
 // IBus modifier state bitmask (ibus.h)
 // ============================================================================
 
-const IBUS_SHIFT_MASK: u32 = 0x01;
-const IBUS_LOCK_MASK: u32 = 0x02; // Caps Lock
 const IBUS_CONTROL_MASK: u32 = 0x04;
 const IBUS_MOD1_MASK: u32 = 0x08; // Alt
 const IBUS_SUPER_MASK: u32 = 0x40;
+/// Key-release events carry this bit; engines act on presses only —
+/// processing releases would double every keystroke.
+const IBUS_RELEASE_MASK: u32 = 1 << 30;
+
+/// IBusPreeditFocusMode::COMMIT — the client commits a visible preedit when
+/// focus changes, so a mouse click elsewhere never eats the current word.
+const PREEDIT_FOCUS_COMMIT: u32 = 1;
 
 // ============================================================================
 // IBus Engine
@@ -40,14 +66,46 @@ impl ButtreEngine {
     }
 
     pub fn new_with_method(method_name: &str) -> Self {
+        // Composition mode (like TSF): the pipeline emits
+        // UpdateComposition/ConfirmComposition instead of hook-style
+        // Commit/Replace screen diffs — see module docs.
         let keyboard = match method_name {
-            "vni" => KeyboardBuilder::vni().expect("Failed to create VNI keyboard"),
-            _ => KeyboardBuilder::telex().expect("Failed to create Telex keyboard"),
+            "vni" => {
+                KeyboardBuilder::vni_with_composition(true).expect("Failed to create VNI keyboard")
+            }
+            _ => KeyboardBuilder::telex_with_composition(true)
+                .expect("Failed to create Telex keyboard"),
         };
         Self {
             keyboard: Arc::new(Mutex::new(keyboard)),
             preedit: Arc::new(Mutex::new(String::new())),
         }
+    }
+
+    /// Take the pending word for an out-of-band commit (focus loss, control
+    /// combo, navigation key), applying the word-boundary final repair —
+    /// these commit points bypass the pipeline's own PassThrough repair.
+    /// Resets keyboard + preedit; returns `None` when nothing is composing.
+    fn take_pending_commit(&self) -> Option<String> {
+        let mut kb = self.keyboard.lock().unwrap();
+        let mut preedit = self.preedit.lock().unwrap();
+        if preedit.is_empty() {
+            return None;
+        }
+        let text = kb.boundary_repair().unwrap_or_else(|| preedit.clone());
+        kb.reset();
+        preedit.clear();
+        Some(text)
+    }
+
+    /// Discard the composition without committing (daemon Reset semantics).
+    fn discard_composition(&self) -> bool {
+        let mut kb = self.keyboard.lock().unwrap();
+        let mut preedit = self.preedit.lock().unwrap();
+        let had = !preedit.is_empty();
+        kb.reset();
+        preedit.clear();
+        had
     }
 }
 
@@ -72,7 +130,10 @@ fn is_modifier_keyval(keyval: u32) -> bool {
     matches!(keyval, 0xFFE1..=0xFFEE | 0xFE01..=0xFE0F)
 }
 
-/// True for non-character keys that should reset and pass through.
+/// True for non-printable keys that end the composition and pass through
+/// (navigation, Tab, Escape, Delete, …). Printable separators (space,
+/// punctuation) are NOT classified here — the engine pipeline itself decides
+/// those via PassThrough, keeping one source of truth for word boundaries.
 fn is_break_keyval(keyval: u32) -> bool {
     matches!(
         keyval,
@@ -89,65 +150,15 @@ fn is_break_keyval(keyval: u32) -> bool {
     )
 }
 
-/// True for punctuation / whitespace chars that break the composition.
-fn is_break_char(ch: char) -> bool {
-    matches!(
-        ch,
-        ' ' | '\n'
-            | '\t'
-            | '.'
-            | ','
-            | ';'
-            | ':'
-            | '!'
-            | '?'
-            | '\''
-            | '"'
-            | '('
-            | ')'
-            | '['
-            | ']'
-            | '{'
-            | '}'
-            | '/'
-            | '\\'
-            | '|'
-            | '`'
-            | '~'
-            | '@'
-            | '#'
-            | '$'
-            | '%'
-            | '^'
-            | '&'
-            | '*'
-            | '+'
-            | '='
-            | '-'
-            | '_'
-            | '<'
-            | '>'
-    )
-}
-
-/// Convert GDK keyval + state to a character, applying CapsLock XOR Shift for letters.
-pub fn keyval_to_char(keyval: u32, state: u32) -> Option<char> {
-    let shift = state & IBUS_SHIFT_MASK != 0;
-    let caps = state & IBUS_LOCK_MASK != 0;
-    let upper = shift ^ caps;
-
+/// Convert an IBus/X11 keyval to a character.
+///
+/// XKB resolves Shift/CapsLock BEFORE the keysym reaches us (`Shift+a`
+/// arrives as keyval `0x41` = 'A'), so printable ASCII maps by identity —
+/// re-applying modifier logic here would double-flip the case.
+pub fn keyval_to_char(keyval: u32) -> Option<char> {
     match keyval {
-        // a-z
-        0x0061..=0x007a => {
-            let ch = (keyval as u8) as char;
-            Some(if upper { ch.to_ascii_uppercase() } else { ch })
-        }
-        // A-Z (keyval already uppercase — respect it)
-        0x0041..=0x005A => Some((keyval as u8) as char),
-        // 0-9
-        0x0030..=0x0039 => Some((keyval as u8) as char),
-        // Space
-        0x0020 => Some(' '),
+        // Printable ASCII: letters, digits, space, punctuation.
+        0x0020..=0x007E => char::from_u32(keyval),
         // Return
         0xFF0D => Some('\n'),
         // Backspace
@@ -193,27 +204,26 @@ fn build_ibus_text(text: &str) -> zvariant::Value<'static> {
 #[dbus_interface(name = "org.freedesktop.IBus.Engine")]
 impl ButtreEngine {
     // --- Signal declarations (bodies generated by zbus macro) ---
+    //
+    // Signatures MUST match libibus's engine introspection XML exactly —
+    // the daemon subscribes by signature and silently drops mismatches
+    // (found the hard way: a 3-arg UpdatePreeditText never got relayed).
 
     #[dbus_interface(signal)]
     async fn commit_text(ctx: &SignalContext<'_>, text: zvariant::Value<'_>) -> zbus::Result<()>;
 
+    /// `mode` is IBusPreeditFocusMode: what the CLIENT does with a visible
+    /// preedit when focus changes. We always send 1 (COMMIT) so a mouse
+    /// click elsewhere commits the word instead of eating it — the client
+    /// handles focus-loss commits, the engine only resets (see `focus_out`).
     #[dbus_interface(signal)]
     async fn update_preedit_text(
         ctx: &SignalContext<'_>,
         text: zvariant::Value<'_>,
         cursor_pos: u32,
         visible: bool,
+        mode: u32,
     ) -> zbus::Result<()>;
-
-    #[dbus_interface(signal)]
-    async fn delete_surrounding_text(
-        ctx: &SignalContext<'_>,
-        offset: i32,
-        n_chars: u32,
-    ) -> zbus::Result<()>;
-
-    #[dbus_interface(signal)]
-    async fn hide_preedit_text(ctx: &SignalContext<'_>) -> zbus::Result<()>;
 
     // --- Method handlers ---
 
@@ -231,138 +241,121 @@ impl ButtreEngine {
             state
         );
 
-        // Pass through modifier combos (Ctrl+C, Alt+F4, etc.)
-        if is_control_combo(state) {
+        // Key releases would double every keystroke — presses only.
+        if state & IBUS_RELEASE_MASK != 0 {
             return false;
         }
 
-        // Pass through bare modifier keyvals
+        // Shortcuts (Ctrl+C, Alt+F4, …): commit the pending word so it isn't
+        // lost, then let the app receive the combo.
+        if is_control_combo(state) {
+            self.commit_pending(&ctx).await;
+            return false;
+        }
+
+        // Bare modifier presses don't touch the composition.
         if is_modifier_keyval(keyval) {
             return false;
         }
 
-        // Pass through non-character break keys (arrows, Tab, Escape, …)
+        // Navigation/editing keys end the word and pass through.
         if is_break_keyval(keyval) {
-            let preedit_text = {
-                let p = self.preedit.lock().unwrap();
-                if p.is_empty() {
-                    None
-                } else {
-                    Some(p.clone())
-                }
-            };
-            if let Some(text) = preedit_text {
-                self.reset();
-                Self::commit_text(&ctx, build_ibus_text(&text)).await.ok();
-            }
+            self.commit_pending(&ctx).await;
             return false;
         }
 
-        let ch = match keyval_to_char(keyval, state) {
-            Some(c) => c,
-            None => return false,
+        let Some(ch) = keyval_to_char(keyval) else {
+            return false;
         };
 
-        // Backspace
         if ch == '\x08' {
-            let action = {
-                let mut kb = self.keyboard.lock().unwrap();
-                match kb.backspace() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::warn!("Keyboard backspace error: {}", e);
-                        Action::DoNothing
-                    }
+            return self.handle_backspace(&ctx).await;
+        }
+
+        // Feed the engine. It classifies separators itself: a separator
+        // yields [ConfirmComposition(word), Commit(separator)] — handle the
+        // WHOLE action vector (taking only the first was debug-report B0).
+        let actions = {
+            let mut kb = self.keyboard.lock().unwrap();
+            match kb.process(ch) {
+                Ok(actions) => actions,
+                Err(e) => {
+                    tracing::warn!("Keyboard process error: {}", e);
+                    return false;
                 }
-            };
+            }
+        };
+
+        let mut emitted = false;
+        let mut pass_char = false;
+        for action in actions {
             match action {
-                Action::Replace { text, .. } => {
-                    let cursor = text.chars().count() as u32;
+                Action::UpdateComposition { text, .. } => {
                     {
                         let mut p = self.preedit.lock().unwrap();
                         *p = text.clone();
                     }
-                    let visible = !text.is_empty();
-                    if visible {
-                        Self::update_preedit_text(&ctx, build_ibus_text(&text), cursor, true)
-                            .await
-                            .ok();
-                    } else {
-                        Self::hide_preedit_text(&ctx).await.ok();
-                    }
-                    return true;
+                    self.emit_preedit(&ctx, &text).await;
+                    emitted = true;
                 }
-                _ => return false,
+                Action::ConfirmComposition(text) => {
+                    {
+                        let mut p = self.preedit.lock().unwrap();
+                        p.clear();
+                    }
+                    // Clear the preedit region BEFORE the commit so the word
+                    // isn't momentarily doubled in the client.
+                    self.emit_preedit(&ctx, "").await;
+                    Self::commit_text(&ctx, build_ibus_text(&text)).await.ok();
+                    emitted = true;
+                }
+                Action::Commit(text) => {
+                    // The engine echoing the input character back is a
+                    // pass-through: return false below and the daemon
+                    // forwards the ORIGINAL key event to the app (after our
+                    // queued commit signals).
+                    if text.chars().eq(std::iter::once(ch)) {
+                        pass_char = true;
+                    } else {
+                        Self::commit_text(&ctx, build_ibus_text(&text)).await.ok();
+                        emitted = true;
+                    }
+                }
+                Action::DoNothing => {}
+                Action::ShowCandidates { .. } | Action::HideCandidates => {
+                    // Nôm candidate UI over IBus: future phase (needs
+                    // update_lookup_table); harmless to ignore for Telex/VNI.
+                }
+                other => {
+                    tracing::warn!(
+                        "Unexpected hook-model action in composition mode: {:?}",
+                        other
+                    );
+                }
             }
         }
 
-        // Break chars (space, punctuation) — commit preedit and pass through
-        if is_break_char(ch) {
-            let preedit_text = {
-                let p = self.preedit.lock().unwrap();
-                if p.is_empty() {
-                    None
-                } else {
-                    Some(p.clone())
-                }
-            };
-            if let Some(text) = preedit_text {
-                self.reset();
-                Self::commit_text(&ctx, build_ibus_text(&text)).await.ok();
-            }
+        if pass_char {
             return false;
         }
-
-        // Normal character — process through engine
-        let action = {
-            let mut kb = self.keyboard.lock().unwrap();
-            match kb.process(ch) {
-                Ok(actions) => actions.into_iter().next().unwrap_or(Action::DoNothing),
-                Err(e) => {
-                    tracing::warn!("Keyboard process error: {}", e);
-                    Action::DoNothing
-                }
-            }
-        };
-
-        match action {
-            Action::Replace {
-                text,
-                backspace_count,
-                ..
-            } => {
-                let cursor = text.chars().count() as u32;
-                {
-                    let mut p = self.preedit.lock().unwrap();
-                    *p = text.clone();
-                }
-                if backspace_count > 0 {
-                    let n = backspace_count as u32;
-                    Self::delete_surrounding_text(&ctx, -(n as i32), n)
-                        .await
-                        .ok();
-                }
-                Self::update_preedit_text(&ctx, build_ibus_text(&text), cursor, true)
-                    .await
-                    .ok();
-                true
-            }
-            Action::Commit(text) => {
-                self.reset();
-                Self::commit_text(&ctx, build_ibus_text(&text)).await.ok();
-                true
-            }
-            _ => false,
+        if emitted {
+            return true;
         }
+        // Pure DoNothing: swallow keys the engine deliberately ignored
+        // mid-composition; pass through when nothing is composing.
+        !self.preedit.lock().unwrap().is_empty()
     }
 
     fn focus_in(&mut self) {
         tracing::info!("FocusIn");
     }
 
+    /// Focus loss: the CLIENT commits the visible preedit itself (we send
+    /// every preedit update with mode=COMMIT), so the engine only resets its
+    /// state — emitting our own commit here would double the word.
     fn focus_out(&mut self) {
         tracing::info!("FocusOut");
-        self.reset();
+        self.discard_composition();
     }
 
     fn enable(&mut self) {
@@ -371,14 +364,15 @@ impl ButtreEngine {
 
     fn disable(&mut self) {
         tracing::info!("Disable");
-        self.reset();
+        self.discard_composition();
     }
 
-    fn reset(&mut self) {
-        let mut kb = self.keyboard.lock().unwrap();
-        let mut preedit = self.preedit.lock().unwrap();
-        kb.reset();
-        preedit.clear();
+    /// Daemon-initiated reset: discard the composition WITHOUT committing.
+    async fn reset(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
+        tracing::debug!("Reset");
+        if self.discard_composition() {
+            self.emit_preedit(&ctx, "").await;
+        }
     }
 
     fn set_cursor_location(&mut self, x: i32, y: i32, w: i32, h: i32) {
@@ -387,6 +381,77 @@ impl ButtreEngine {
 
     fn set_capabilities(&mut self, caps: u32) {
         tracing::debug!("SetCapabilities: {}", caps);
+    }
+
+    /// `ContentType` is a write-only PROPERTY `(uu)` in the engine
+    /// interface (purpose, hints; purpose 8 = password). Reserved for
+    /// suppressing learning in sensitive fields; accepting the write also
+    /// keeps the daemon's property-set out of the error log.
+    #[dbus_interface(property)]
+    fn content_type(&self) -> (u32, u32) {
+        (0, 0)
+    }
+
+    #[dbus_interface(property)]
+    fn set_content_type(&mut self, content_type: (u32, u32)) {
+        tracing::debug!(
+            "ContentType: purpose={}, hints={}",
+            content_type.0,
+            content_type.1
+        );
+    }
+}
+
+// ============================================================================
+// Non-D-Bus helpers (need the same signal context as the interface methods)
+// ============================================================================
+
+impl ButtreEngine {
+    /// Emit a preedit update; empty text clears the region (there is no
+    /// separate engine-side hide signal — hide IS `visible=false`).
+    async fn emit_preedit(&self, ctx: &SignalContext<'_>, text: &str) {
+        let cursor = text.chars().count() as u32;
+        Self::update_preedit_text(
+            ctx,
+            build_ibus_text(text),
+            cursor,
+            !text.is_empty(),
+            PREEDIT_FOCUS_COMMIT,
+        )
+        .await
+        .ok();
+    }
+
+    /// Commit the pending word out-of-band (shortcuts, navigation keys —
+    /// cases with NO focus change, where the client's mode=COMMIT handling
+    /// doesn't apply). No-op when nothing is composing.
+    async fn commit_pending(&self, ctx: &SignalContext<'_>) {
+        if let Some(text) = self.take_pending_commit() {
+            self.emit_preedit(ctx, "").await;
+            Self::commit_text(ctx, build_ibus_text(&text)).await.ok();
+        }
+    }
+
+    /// Backspace shrinks the composition; the engine recomputes the word
+    /// from raw keys (`Keyboard::backspace`), and the new preedit is the
+    /// keyboard's canonical buffer. With no composition the app handles it.
+    async fn handle_backspace(&mut self, ctx: &SignalContext<'_>) -> bool {
+        if self.preedit.lock().unwrap().is_empty() {
+            return false;
+        }
+        let text = {
+            let mut kb = self.keyboard.lock().unwrap();
+            if let Err(e) = kb.backspace() {
+                tracing::warn!("Keyboard backspace error: {}", e);
+            }
+            kb.buffer().to_string()
+        };
+        {
+            let mut p = self.preedit.lock().unwrap();
+            *p = text.clone();
+        }
+        self.emit_preedit(ctx, &text).await;
+        true
     }
 }
 
