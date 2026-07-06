@@ -48,4 +48,4 @@ There is no end-user installer for macOS yet. A Swift IMK (Input Method Kit) she
 
 ## Source
 
-https://github.com/lungmat/buttre
+https://github.com/dxsl-org/buttre

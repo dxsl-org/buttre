@@ -1,19 +1,24 @@
+ > **⚠️ Linux: gõ CHƯA hoạt động.** Engine đăng ký với `ibus-daemon` sai cách nên `ProcessKeyEvent` không bao giờ được gọi. Đang được viết lại (Phase 1: sửa IBus registration; Phase 3: thêm Wayland-native `zwp_input_method_v2`). Kế hoạch: [.agents/260706-1343-cross-platform-input-integration](.agents/260706-1343-cross-platform-input-integration/plan.md). Hướng dẫn cài bên dưới build được nhưng **chưa gõ ra chữ** cho tới khi Phase 1 hoàn thành.
+
 # 🐧 buttre Linux — Bộ Gõ IBus
 
 **Phiên bản**: 0.7.0-beta
-**Framework**: IBus
-**Trạng thái**: ✅ Code Hoàn Chỉnh, Sẵn Sàng Build Trên Linux
+**Framework**: IBus (đang bổ sung Wayland-native `zwp_input_method_v2`)
+**Trạng thái**: 🚧 Engine sẵn sàng · lớp tích hợp IBus/Wayland **đang viết lại** · gõ chưa hoạt động
 
 ---
 
 ## 📦 Tính Năng
 
-- ✅ **Telex tiếng Việt** — Hỗ trợ đầy đủ
-- ✅ **Composition thời gian thực** — Preedit text
-- ✅ **Backspace thông minh** — Xóa sửa đổi cuối cùng
-- ✅ **Hỗ trợ Shift** — Chữ hoa/chữ thường
-- ✅ **Tự động hoàn thành** — Space/Enter xác nhận text
-- ⏳ **Chế độ VNI** — Đang lên kế hoạch
+Engine tiếng Việt (Telex/VNI/Nôm) đã hoàn chỉnh và test kỹ. Các tính năng dưới đây là **mục tiêu của lớp tích hợp đang phát triển** — chưa hoạt động end-to-end cho tới khi Phase 1 (IBus) và Phase 3 (Wayland) hoàn thành:
+
+- 🚧 **Telex tiếng Việt** — engine sẵn sàng; chờ registration
+- 🚧 **Composition thời gian thực** — preedit text (Phase 2)
+- 🚧 **Backspace thông minh** — xóa sửa đổi cuối cùng
+- 🚧 **Hỗ trợ Shift** — chữ hoa/chữ thường
+- 🚧 **Tự động hoàn thành** — Space/Enter xác nhận text (Phase 2)
+- ⏳ **Wayland-native** — `zwp_input_method_v2` cho sway/KDE/Hyprland (Phase 3)
+- ⏳ **Chế độ VNI** — engine có sẵn; chờ wiring
 - ⏳ **Hỗ trợ Nôm** — Đang lên kế hoạch (kèm cửa sổ candidate)
 
 ---
