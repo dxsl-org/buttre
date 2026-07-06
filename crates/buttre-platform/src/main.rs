@@ -106,16 +106,25 @@ fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // IBus engine mode (Linux): ibus-daemon spawns `buttre --ibus` per the
-    // component XML. Must branch BEFORE the single-instance lock — the engine
-    // process must coexist with the user's tray instance — and before any
-    // UI/winit setup (the engine is headless).
+    // Engine modes (Linux) — must branch BEFORE the single-instance lock
+    // (engine processes coexist with the user's tray instance) and before
+    // any UI/winit setup (engines are headless).
+    //
+    // `--ibus`: the IBus component, spawned by ibus-daemon per the XML.
+    // `--ime`:  auto-detect — Wayland-native zwp_input_method_v2 on
+    //           compositors that support it (sway/Hyprland/KDE, launched
+    //           from the compositor config), IBus fallback otherwise.
     #[cfg(platform_linux)]
-    if std::env::args().any(|arg| arg == "--ibus") {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        return rt.block_on(buttre_platform::platforms::linux::ibus_bus::run_engine());
+    {
+        if std::env::args().any(|arg| arg == "--ibus") {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            return rt.block_on(buttre_platform::platforms::linux::ibus_bus::run_engine());
+        }
+        if std::env::args().any(|arg| arg == "--ime") {
+            return buttre_platform::platforms::linux::run_engine_auto();
+        }
     }
 
     // Single instance check

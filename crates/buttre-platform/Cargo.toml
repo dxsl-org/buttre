@@ -95,6 +95,12 @@ objc = "0.2"
 zbus = "3.0"
 tokio = { version = "1.0", features = ["full"] }
 x11 = { version = "2.21", features = ["xlib", "xtest"] }
+# Wayland-native IME (zwp_input_method_v2) — versions pair with each other,
+# independent of winit's wayland-protocols 0.31 in the tree.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = "0.8"
 
 [build-dependencies]
 embed-resource = "2.4"

@@ -4,9 +4,33 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod engine_bridge;
 pub mod ibus;
 pub mod ibus_bus;
 pub mod method_sync;
+pub mod wayland;
+
+/// Engine-mode entry with backend auto-detection (`buttre --ime`):
+/// Wayland-native `zwp_input_method_v2` when the compositor supports it and
+/// no other IME owns the seat; otherwise IBus (GNOME/Mutter, X11). The
+/// `--ibus` flag still forces the IBus component — that is what ibus-daemon
+/// spawns per the component XML.
+pub fn run_engine_auto() -> anyhow::Result<()> {
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        match wayland::run_engine() {
+            Err(e) if e.downcast_ref::<wayland::Unavailable>().is_some() => {
+                tracing::info!("{e}; falling back to IBus");
+            }
+            other => return other,
+        }
+    } else {
+        tracing::info!("No WAYLAND_DISPLAY; using the IBus backend");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(ibus_bus::run_engine())
+}
 
 use crate::PlatformBackend;
 use anyhow::Result;
