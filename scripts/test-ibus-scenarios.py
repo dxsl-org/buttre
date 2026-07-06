@@ -111,6 +111,27 @@ h_enter = key(0xFF0D)
 ok = commits() == ["chào"] and h_enter is False
 results.append(("F Enter commits 'chào' + passes", ok, commits(), h_enter))
 
+# --- Scenario G (B5): tray-side method switch applies to the live engine ---
+import os, pathlib
+method_file = pathlib.Path(os.path.expanduser("~/.config/buttre/method"))
+method_file.parent.mkdir(parents=True, exist_ok=True)
+
+def set_method(name):
+    tmp = method_file.parent / ".method.tmp"
+    tmp.write_text(name)
+    tmp.rename(method_file)  # atomic, same as the tray writer
+    pump(1200)  # give the watcher time to fire
+
+original = method_file.read_text().strip() if method_file.exists() else "telex"
+set_method("vni")
+events.clear()
+type_str("viet65")
+key(0x20)
+vni_commits = commits()
+set_method(original if original in ("telex", "vni", "nom") else "telex")
+ok = vni_commits == ["việt"]
+results.append(("G live method switch telex->vni (viet65 -> việt)", ok, vni_commits))
+
 print("--- scenarios ---")
 fails = 0
 for r in results:

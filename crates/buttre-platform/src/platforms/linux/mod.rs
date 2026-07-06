@@ -6,6 +6,7 @@
 
 pub mod ibus;
 pub mod ibus_bus;
+pub mod method_sync;
 
 use crate::PlatformBackend;
 use anyhow::Result;
@@ -50,8 +51,15 @@ impl PlatformBackend for LinuxBackend {
 }
 
 impl StateObserver for LinuxBackend {
-    fn on_method_changed(&self, _method: &str, enabled: bool) {
-        tracing::info!("LinuxBackend: method changed, enabled={}", enabled);
+    /// Tray-side half of the method sync (B5): persist the chosen method so
+    /// the daemon-spawned engine's watcher picks it up. "english" and custom
+    /// TOML ids are skipped by `write_method` — IBus enable/disable is the
+    /// OS input-source switcher's job.
+    fn on_method_changed(&self, method: &str, enabled: bool) {
+        tracing::info!("LinuxBackend: method changed to {method} (enabled={enabled})");
+        if let Err(e) = method_sync::write_method(method) {
+            tracing::warn!("LinuxBackend: method sync write failed: {e}");
+        }
     }
 
     fn on_settings_changed(&self, _settings: &Settings) {}

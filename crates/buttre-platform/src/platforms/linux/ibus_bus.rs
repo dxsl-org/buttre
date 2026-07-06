@@ -17,9 +17,11 @@
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
+use std::sync::Arc;
 use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer};
 
-use super::ibus::{load_method_config, ButtreEngine};
+use super::ibus::ButtreEngine;
+use super::method_sync::{self, MethodState};
 
 // ============================================================================
 // Private-bus address discovery
@@ -122,6 +124,9 @@ fn strip_guid(addr: &str) -> String {
 /// factory the daemon has no way to reach the engine at all.
 struct ButtreFactory {
     engine_counter: u64,
+    /// Shared with the method-file watcher — new engines start on the
+    /// CURRENT method, live ones rebuild lazily per keystroke (B5).
+    method_state: Arc<MethodState>,
 }
 
 #[dbus_interface(name = "org.freedesktop.IBus.Factory")]
@@ -143,7 +148,7 @@ impl ButtreFactory {
         ))
         .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
-        let engine = ButtreEngine::new_with_method(&load_method_config());
+        let engine = ButtreEngine::new_with_state(self.method_state.clone());
         server
             .at(&path, engine)
             .await
@@ -189,12 +194,19 @@ pub async fn run_engine() -> Result<()> {
     let addr = resolve_ibus_address()?;
     tracing::info!("Connecting to IBus private bus");
 
+    // Tray↔engine method sync (B5): shared state + config-dir watcher.
+    let method_state = MethodState::load();
+    method_sync::spawn_watcher(method_state.clone());
+
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
     let _connection = ConnectionBuilder::address(addr.as_str())?
         .serve_at(
             "/org/freedesktop/IBus/Factory",
-            ButtreFactory { engine_counter: 0 },
+            ButtreFactory {
+                engine_counter: 0,
+                method_state,
+            },
         )?
         .name("org.freedesktop.IBus.buttre")?
         .build()

@@ -25,6 +25,7 @@
 //! composition is not yet real text, so deleting committed text to its left
 //! would eat the user's earlier words (debug report B1).
 
+use super::method_sync::MethodState;
 use buttre_core::Action;
 use buttre_core::{Keyboard, KeyboardBuilder};
 use std::sync::{Arc, Mutex};
@@ -58,6 +59,32 @@ const PREEDIT_FOCUS_COMMIT: u32 = 1;
 pub struct ButtreEngine {
     keyboard: Arc<Mutex<Keyboard>>,
     pub preedit: Arc<Mutex<String>>,
+    /// Shared with the method-file watcher (B5). `None` in standalone
+    /// construction (tests) — no live method switching there.
+    method_state: Option<Arc<MethodState>>,
+    /// Last [`MethodState::generation`] this engine applied; compared per
+    /// keystroke (one atomic load) for lazy keyboard rebuild on switch.
+    seen_generation: u64,
+}
+
+/// Build a keyboard in composition mode (like TSF): the pipeline emits
+/// UpdateComposition/ConfirmComposition instead of hook-style Commit/Replace
+/// screen diffs — see module docs.
+///
+/// Nôm runs WITHOUT its dictionary here: the IBus candidate UI
+/// (update_lookup_table) isn't wired yet, so lookups would produce actions
+/// we drop. Dictionary + candidates are a future phase.
+fn build_keyboard(method_name: &str) -> Keyboard {
+    match method_name {
+        "vni" => {
+            KeyboardBuilder::vni_with_composition(true).expect("Failed to create VNI keyboard")
+        }
+        "nom" => KeyboardBuilder::nom_with_composition(None, true)
+            .expect("Failed to create Nôm keyboard"),
+        _ => {
+            KeyboardBuilder::telex_with_composition(true).expect("Failed to create Telex keyboard")
+        }
+    }
 }
 
 impl ButtreEngine {
@@ -66,20 +93,48 @@ impl ButtreEngine {
     }
 
     pub fn new_with_method(method_name: &str) -> Self {
-        // Composition mode (like TSF): the pipeline emits
-        // UpdateComposition/ConfirmComposition instead of hook-style
-        // Commit/Replace screen diffs — see module docs.
-        let keyboard = match method_name {
-            "vni" => {
-                KeyboardBuilder::vni_with_composition(true).expect("Failed to create VNI keyboard")
-            }
-            _ => KeyboardBuilder::telex_with_composition(true)
-                .expect("Failed to create Telex keyboard"),
-        };
         Self {
-            keyboard: Arc::new(Mutex::new(keyboard)),
+            keyboard: Arc::new(Mutex::new(build_keyboard(method_name))),
             preedit: Arc::new(Mutex::new(String::new())),
+            method_state: None,
+            seen_generation: 0,
         }
+    }
+
+    /// Factory constructor: builds from the CURRENT shared method and keeps
+    /// the state handle for per-keystroke switch detection.
+    pub fn new_with_state(state: Arc<MethodState>) -> Self {
+        let mut engine = Self::new_with_method(&state.method());
+        engine.seen_generation = state.generation();
+        engine.method_state = Some(state);
+        engine
+    }
+
+    /// Apply a pending tray-side method switch (B5). Rebuild discards any
+    /// live composition — a mode switch is a reset by definition; the
+    /// cleared preedit is signalled so the client doesn't show a stale word.
+    async fn sync_method(&mut self, ctx: &SignalContext<'_>) {
+        let Some(state) = &self.method_state else {
+            return;
+        };
+        let generation = state.generation();
+        if generation == self.seen_generation {
+            return;
+        }
+        self.seen_generation = generation;
+        let method = state.method();
+        let had_preedit = {
+            let mut kb = self.keyboard.lock().unwrap();
+            let mut preedit = self.preedit.lock().unwrap();
+            *kb = build_keyboard(&method);
+            let had = !preedit.is_empty();
+            preedit.clear();
+            had
+        };
+        if had_preedit {
+            self.emit_preedit(ctx, "").await;
+        }
+        tracing::info!("Engine switched to method {method}");
     }
 
     /// Take the pending word for an out-of-band commit (focus loss, control
@@ -245,6 +300,9 @@ impl ButtreEngine {
         if state & IBUS_RELEASE_MASK != 0 {
             return false;
         }
+
+        // Apply a pending tray-side method switch before processing (B5).
+        self.sync_method(&ctx).await;
 
         // Shortcuts (Ctrl+C, Alt+F4, …): commit the pending word so it isn't
         // lost, then let the app receive the combo.
@@ -455,31 +513,8 @@ impl ButtreEngine {
     }
 }
 
-// ============================================================================
-// Method config loading
-// ============================================================================
-
-/// Load input method name from `~/.config/buttre/method`.
-///
-/// Returns "vni" if the file contains "vni" (trimmed, case-insensitive),
-/// "telex" for any other content or on read failure.
-pub(super) fn load_method_config() -> String {
-    let path = dirs::config_dir().map(|p| p.join("buttre/method"));
-    if let Some(path) = path {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let method = content.trim().to_lowercase();
-            if method == "vni" {
-                tracing::info!("Loaded method config: vni");
-                return "vni".to_string();
-            }
-        } else {
-            tracing::debug!("No method config at {:?}, defaulting to telex", path);
-        }
-    }
-    "telex".to_string()
-}
-
 // NOTE: The component entry point (private-bus connection, Factory, name
-// request) lives in `ibus_bus.rs` — this module owns only engine behavior.
-// The old session-bus `run_engine` variants that lived here could never be
-// reached by ibus-daemon (wrong bus, no Factory) and were removed.
+// request) lives in `ibus_bus.rs`; method-file reading/watching lives in
+// `method_sync.rs` — this module owns only engine behavior. The old
+// session-bus `run_engine` variants that lived here could never be reached
+// by ibus-daemon (wrong bus, no Factory) and were removed.
