@@ -279,7 +279,10 @@ pub(super) fn check_spent_tone_undo(
         let fb = check_fallback(&raw[..=i], opts, allow_nonadjacent);
         if fb.is_handled {
             let suffix: String = raw[i + 1..].iter().collect();
-            return Some(FallbackResult::handled(format!("{}{suffix}", fb.text), true));
+            return Some(FallbackResult::handled(
+                format!("{}{suffix}", fb.text),
+                true,
+            ));
         }
     }
     None
