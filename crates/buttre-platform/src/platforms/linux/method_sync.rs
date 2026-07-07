@@ -129,21 +129,20 @@ pub fn spawn_watcher(state: Arc<MethodState>) {
             use notify::{RecursiveMode, Watcher};
             let state_cb = state.clone();
             let file = path.clone();
-            let mut watcher = match notify::recommended_watcher(
-                move |res: notify::Result<notify::Event>| {
+            let mut watcher =
+                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                     // Any event in the dir is a cue to re-read; the atomic
                     // rename in write_method guarantees a consistent read.
                     if res.is_ok() {
                         state_cb.set(read_method_from(&file));
                     }
-                },
-            ) {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::warn!("method_sync: watcher init failed: {e}");
-                    return;
-                }
-            };
+                }) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!("method_sync: watcher init failed: {e}");
+                        return;
+                    }
+                };
             if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
                 tracing::warn!("method_sync: watch {dir:?} failed: {e}");
                 return;

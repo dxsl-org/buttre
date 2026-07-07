@@ -103,8 +103,7 @@ fn marshal(state: &mut EngineState, outcome: KeyOutcome) -> ButtreKeyResult {
         }
     }
     state.commit_c = commit_text.and_then(|t| CString::new(t).ok());
-    state.preedit_c =
-        CString::new(state.bridge.preedit()).unwrap_or_else(|_| CString::default());
+    state.preedit_c = CString::new(state.bridge.preedit()).unwrap_or_else(|_| CString::default());
     ButtreKeyResult {
         handled: outcome.handled,
         commit: state

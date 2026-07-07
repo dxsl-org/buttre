@@ -105,7 +105,7 @@ fn per_engine_string_storage_does_not_clobber() {
 fn set_method_switches_to_vni() {
     let id = buttre_engine_new();
     assert!(buttre_engine_set_method(id, 1)); // vni
-    // viet65: v(9) i(34) e(14) t(17) 6(22) 5(23)
+                                              // viet65: v(9) i(34) e(14) t(17) 6(22) 5(23)
     for keycode in [9u16, 34, 14, 17, 22, 23] {
         buttre_engine_process_key(id, keycode, false, false);
     }

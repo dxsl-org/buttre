@@ -242,7 +242,8 @@ pub fn is_break_keysym(keysym: u32) -> bool {
         0xFF09 // Tab
         | 0xFF1B // Escape
         | 0xFF50 // Home
-        | 0xFF51..=0xFF54 // Left/Up/Right/Down
+        | 0xFF51
+            ..=0xFF54 // Left/Up/Right/Down
         | 0xFF55 // Page_Up
         | 0xFF56 // Page_Down
         | 0xFF57 // End

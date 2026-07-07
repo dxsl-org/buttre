@@ -174,7 +174,10 @@ struct EngineService {
 impl EngineService {
     async fn destroy(&self, #[zbus(object_server)] server: &ObjectServer) {
         if let Err(e) = server.remove::<ButtreEngine, _>(&self.path).await {
-            tracing::warn!("Destroy: engine removal at {} failed: {e}", self.path.as_str());
+            tracing::warn!(
+                "Destroy: engine removal at {} failed: {e}",
+                self.path.as_str()
+            );
         }
         // Removing the interface currently handling this call is safe —
         // zbus completes the in-flight invocation before dropping it.

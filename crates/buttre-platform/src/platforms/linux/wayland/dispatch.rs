@@ -40,9 +40,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ImeState {
                         Some(registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(4), qh, ()));
                 }
                 "zwp_input_method_manager_v2" => {
-                    state.im_manager = Some(registry.bind::<
-                        zwp_input_method_manager_v2::ZwpInputMethodManagerV2, _, _,
-                    >(name, 1, qh, ()));
+                    state.im_manager = Some(
+                        registry
+                            .bind::<zwp_input_method_manager_v2::ZwpInputMethodManagerV2, _, _>(
+                                name,
+                                1,
+                                qh,
+                                (),
+                            ),
+                    );
                 }
                 "zwp_virtual_keyboard_manager_v1" => {
                     state.vk_manager = Some(registry.bind::<
@@ -157,7 +163,10 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 state.keymap_fd = Some((fd, size));
             }
             Event::Key {
-                time, key, state: key_state, ..
+                time,
+                key,
+                state: key_state,
+                ..
             } => {
                 let pressed = matches!(
                     key_state,
@@ -173,14 +182,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 ..
             } => {
                 if let Some(xkb_state) = &mut state.xkb_state {
-                    xkb_state.update_mask(
-                        mods_depressed,
-                        mods_latched,
-                        mods_locked,
-                        0,
-                        0,
-                        group,
-                    );
+                    xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                 }
                 // Mirror modifiers to the virtual keyboard so forwarded keys
                 // carry the right state (Ctrl+C must stay Ctrl+C).
