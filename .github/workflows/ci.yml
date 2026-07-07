@@ -250,3 +250,38 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --all-features
+
+  # Build the macOS IMKit host app (Buttre.app) — compile gate for the
+  # Objective-C host + its link against the universal engine dylib. Typing
+  # itself is verified by hand on a Mac (IMKit has no headless harness).
+  macos-imkit:
+    name: Build macOS IMKit host
+    runs-on: macos-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Buttre.app
+        run: bash hosts/macos/build_app.sh "${{ github.sha }}"
+
+      - name: Verify universal bundle
+        run: |
+          file target/macos-app/Buttre.app/Contents/MacOS/buttre
+          lipo -info target/macos-app/Buttre.app/Contents/MacOS/buttre | grep -q "arm64" \
+            && lipo -info target/macos-app/Buttre.app/Contents/MacOS/buttre | grep -q "x86_64" \
+            && echo "universal OK"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: buttre-macos-imkit
+          path: target/macos-app/buttre-*-macos.zip
+          retention-days: 14

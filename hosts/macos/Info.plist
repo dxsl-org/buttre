@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>buttre</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.dxsl.buttre.inputmethod</string>
+    <key>CFBundleName</key>
+    <string>buttre</string>
+    <key>CFBundleDisplayName</key>
+    <string>buttre Vietnamese</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.7.7</string>
+    <key>CFBundleVersion</key>
+    <string>0.7.7</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <!-- An input method is a background agent, not a normal windowed app. -->
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- IMKit wiring. InputMethodConnectionName MUST match the name passed to
+         IMKServer in main.m; InputMethodServerControllerClass names the
+         IMKInputController subclass IMKit instantiates per input session. -->
+    <key>InputMethodConnectionName</key>
+    <string>org.dxsl.buttre_Connection</string>
+    <key>InputMethodServerControllerClass</key>
+    <string>ButtreInputController</string>
+
+    <!-- Input mode(s). One Vietnamese mode; the engine's Telex/VNI/Nôm switch
+         is internal (tray/config), not separate TIS modes. -->
+    <key>ComponentInputModeDict</key>
+    <dict>
+        <key>tsInputModeListKey</key>
+        <dict>
+            <key>org.dxsl.buttre.inputmode.vietnamese</key>
+            <dict>
+                <key>TISIntendedLanguage</key>
+                <string>vi</string>
+                <key>tsInputModeAlternateMenuTitleStringsKey</key>
+                <string>buttre Vietnamese</string>
+                <key>tsInputModePrimaryInScriptKey</key>
+                <true/>
+                <key>tsInputModeIsVisibleKey</key>
+                <true/>
+                <key>tsInputModeKeyEquivalentModifiersKey</key>
+                <integer>0</integer>
+                <key>tsInputModeKeyEquivalentKey</key>
+                <string></string>
+            </dict>
+        </dict>
+        <key>tsVisibleInputModeOrderedArrayKey</key>
+        <array>
+            <string>org.dxsl.buttre.inputmode.vietnamese</string>
+        </array>
+    </dict>
+</dict>
+</plist>
