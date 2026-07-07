@@ -1,6 +1,6 @@
 [package]
 name = "buttre-engine"
-version = "0.7.6-beta"
+version = "0.7.7-beta"
 edition = "2021"
 description = "Universal Vietnamese input engine with 7-stage pipeline"
 license = "GPL-3.0-only"

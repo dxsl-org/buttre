@@ -23,7 +23,40 @@
 enum {
     kVKDelete = 51,   // Backspace
     kVKEscape = 53,
+    kVKTab = 48,
+    kVKPageUp = 116,
+    kVKForwardDelete = 117,
+    kVKHome = 115,
+    kVKPageDown = 121,
+    kVKEnd = 119,
+    kVKLeftArrow = 123,
+    kVKRightArrow = 124,
+    kVKDownArrow = 125,
+    kVKUpArrow = 126,
 };
+
+// True for any key that moves the caret or leaves the current field without
+// producing a character the engine composes — these must flush the pending
+// word first (like Escape) or the marked text is left stranded while the
+// caret moves out from under it.
+static BOOL is_flush_and_pass_key(unsigned short keycode) {
+    switch (keycode) {
+        case kVKEscape:
+        case kVKTab:
+        case kVKPageUp:
+        case kVKForwardDelete:
+        case kVKHome:
+        case kVKPageDown:
+        case kVKEnd:
+        case kVKLeftArrow:
+        case kVKRightArrow:
+        case kVKDownArrow:
+        case kVKUpArrow:
+            return YES;
+        default:
+            return NO;
+    }
+}
 
 @implementation ButtreInputController {
     uint64_t _engine;
@@ -83,9 +116,12 @@ enum {
 
     unsigned short keycode = event.keyCode;
 
-    // Escape / navigation etc.: flush and pass through (the engine ends the
-    // word; the app still receives the key).
-    if (keycode == kVKEscape) {
+    // Escape / navigation / Tab / forward-delete: flush and pass through
+    // (the engine ends the word; the app still receives the key). Without
+    // this, moving the caret mid-word would leave the marked preedit
+    // stranded, since the engine has no way to know the caret moved instead
+    // of another character being typed.
+    if (is_flush_and_pass_key(keycode)) {
         [self apply:buttre_engine_flush(_engine) toClient:sender];
         return NO;
     }

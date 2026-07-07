@@ -1,6 +1,6 @@
 [package]
 name = "buttre-platform"
-version = "0.7.6-beta"
+version = "0.7.7-beta"
 edition = "2021"
 description = "Buttre Platform (UI + Backends)"
 license = "GPL-3.0-only"
