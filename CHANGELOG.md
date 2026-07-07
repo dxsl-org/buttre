@@ -4,6 +4,15 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- linux: gõ tiếng Việt hoạt động thật — engine đăng ký đúng với ibus-daemon (private bus + Factory), trước đây không bao giờ nhận được phím
+- linux: sửa semantics preedit — composition dựng dần có gạch chân, commit đúng ở dấu cách/dấu câu
+- linux: thêm backend Wayland-native `zwp_input_method_v2` cho sway/Hyprland/KDE, tự fallback IBus cho GNOME/X11
+- linux: đổi kiểu gõ Telex/VNI/Nôm từ tray áp dụng ngay vào engine đang chạy, không cần restart
+- linux: ô mật khẩu bypass engine; không tap phím toàn cục ở cả hai backend
+- macos: FFI v2 (`ButtreKeyResult`) map thẳng vào IMKit; semantics composition dùng chung với Linux; kèm header C
+- ci: job integration Linux chạy ibus-daemon thật + headless sway để chống hồi quy (trước đây CI xanh không chứng minh gõ được)
+- docs: sửa các tuyên bố sai lệch về mức độ sẵn sàng của macOS/Linux; sửa URL repo cũ
+
 ## [0.7.6-beta] — 2026-07-04
 
 - engine: hỗ trợ gõ w thay ư sau phụ âm đầu

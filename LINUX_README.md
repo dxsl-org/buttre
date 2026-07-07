@@ -1,25 +1,23 @@
- > **⚠️ Linux: gõ CHƯA hoạt động.** Engine đăng ký với `ibus-daemon` sai cách nên `ProcessKeyEvent` không bao giờ được gọi. Đang được viết lại (Phase 1: sửa IBus registration; Phase 3: thêm Wayland-native `zwp_input_method_v2`). Kế hoạch: [.agents/260706-1343-cross-platform-input-integration](.agents/260706-1343-cross-platform-input-integration/plan.md). Hướng dẫn cài bên dưới build được nhưng **chưa gõ ra chữ** cho tới khi Phase 1 hoàn thành.
-
-# 🐧 buttre Linux — Bộ Gõ IBus
+# 🐧 buttre Linux — Bộ Gõ Tiếng Việt
 
 **Phiên bản**: 0.7.0-beta
-**Framework**: IBus (đang bổ sung Wayland-native `zwp_input_method_v2`)
-**Trạng thái**: 🚧 Engine sẵn sàng · lớp tích hợp IBus/Wayland **đang viết lại** · gõ chưa hoạt động
+**Framework**: IBus (GNOME/X11) + Wayland-native `zwp_input_method_v2` (sway/KDE/Hyprland)
+**Trạng thái**: ✅ Hoạt động — verify tự động trên CI (ibus-daemon thật + headless sway)
 
 ---
 
 ## 📦 Tính Năng
 
-Engine tiếng Việt (Telex/VNI/Nôm) đã hoàn chỉnh và test kỹ. Các tính năng dưới đây là **mục tiêu của lớp tích hợp đang phát triển** — chưa hoạt động end-to-end cho tới khi Phase 1 (IBus) và Phase 3 (Wayland) hoàn thành:
+- ✅ **Telex + VNI** — chuyển kiểu gõ từ tray áp dụng ngay vào engine đang chạy (không cần restart)
+- ✅ **Composition thời gian thực** — preedit có gạch chân, dựng dần theo từng phím
+- ✅ **Backspace thông minh** — thu gọn từ đang gõ theo raw key
+- ✅ **Hỗ trợ Shift/CapsLock** — chữ hoa/thường (XKB xử lý trước khi tới engine)
+- ✅ **Dấu câu/space** — commit từ rồi cho ký tự đi qua
+- ✅ **Wayland-native** — `zwp_input_method_v2` cho sway/Hyprland/KDE; tự fallback IBus cho GNOME/X11
+- ✅ **Ô mật khẩu** — bypass engine (không lọt vào composition/learning)
+- ⏳ **Chế độ Nôm** — chạy được nhưng chưa có cửa sổ candidate qua IBus (đang phát triển)
 
-- 🚧 **Telex tiếng Việt** — engine sẵn sàng; chờ registration
-- 🚧 **Composition thời gian thực** — preedit text (Phase 2)
-- 🚧 **Backspace thông minh** — xóa sửa đổi cuối cùng
-- 🚧 **Hỗ trợ Shift** — chữ hoa/chữ thường
-- 🚧 **Tự động hoàn thành** — Space/Enter xác nhận text (Phase 2)
-- ⏳ **Wayland-native** — `zwp_input_method_v2` cho sway/KDE/Hyprland (Phase 3)
-- ⏳ **Chế độ VNI** — engine có sẵn; chờ wiring
-- ⏳ **Hỗ trợ Nôm** — Đang lên kế hoạch (kèm cửa sổ candidate)
+> **Không tap phím toàn cục:** cả hai backend đều để OS/compositor định tuyến phím tới bộ gõ đang chọn — không theo dõi bàn phím toàn hệ thống, nên không bị nghi là keylogger.
 
 ---
 
@@ -104,24 +102,48 @@ ibus restart
 
 ## ⚙️ Cấu Hình
 
-### Thêm Input Method
+Chọn theo môi trường desktop của bạn.
 
-1. **Mở IBus Preferences**:
-   ```bash
-   ibus-setup
-   ```
+### GNOME (Ubuntu mặc định) — qua IBus
 
-2. **Thêm buttre**:
-   - Vào tab "Input Method"
-   - Nhấp nút "Add"
-   - Chọn "Vietnamese"
-   - Chọn "buttre Vietnamese (Telex)"
-   - Nhấp "Add"
+GNOME **không** dùng `ibus-setup` để thêm engine; nó quản input source qua Settings:
 
-3. **Đặt Phím Tắt** (tùy chọn):
-   - Vào tab "General"
-   - Cấu hình phím tắt "Next input method"
-   - Mặc định: `Super+Space`
+1. **Settings → Keyboard → Input Sources → (+)** → **Vietnamese** → **buttre Vietnamese**.
+   - Hoặc qua CLI: `gsettings get org.gnome.desktop.input-sources sources` rồi thêm `('ibus', 'buttre')`.
+2. Chuyển bộ gõ: **Super+Space** (mặc định của GNOME).
+
+`ibus-setup` chỉ dùng trên các desktop không-GNOME (XFCE, MATE…) hoặc khi chạy IBus độc lập.
+
+### sway / Hyprland / KDE — Wayland-native (không cần IBus)
+
+Trên các compositor hỗ trợ `zwp_input_method_v2`, chạy buttre trực tiếp làm input method — không cần ibus-daemon:
+
+```bash
+# Thêm vào config compositor để tự khởi động, ví dụ sway (~/.config/sway/config):
+exec /usr/bin/buttre --ime
+```
+
+`--ime` tự dò: dùng Wayland-native nếu compositor hỗ trợ, tự fallback sang IBus nếu không (hoặc nếu một IME khác đã giữ seat).
+
+### Các chế độ chạy (flags)
+
+| Lệnh | Vai trò |
+|------|---------|
+| `buttre` | App khay hệ thống (tray) — chọn Telex/VNI/Nôm |
+| `buttre --ibus` | Engine IBus, do `ibus-daemon` tự spawn theo component XML (không chạy tay) |
+| `buttre --ime` | Engine tự-dò backend (Wayland-native → IBus) cho sway/Hyprland/KDE |
+
+Đổi kiểu gõ trong app tray sẽ tự áp dụng vào engine đang chạy (qua `~/.config/buttre/method`) — không cần restart. Bật/tắt tiếng Việt dùng bộ chuyển input source của OS (Super+Space), không phải app tray.
+
+### Wayland cho app không-native
+
+App GTK/Qt chạy trên Wayland thường nhận IME tự động. App chạy qua XWayland hoặc không hỗ trợ text-input-v3 cần biến môi trường (đặt trong `~/.profile`):
+
+```bash
+export GTK_IM_MODULE=ibus
+export QT_IM_MODULE=ibus
+export XMODIFIERS=@im=ibus
+```
 
 ### Kiểm Thử
 
@@ -210,8 +232,9 @@ ibus-daemon -drx
 # Kiểm tra engine đang chạy
 ps aux | grep '[b]uttre'
 
-# Chạy engine thủ công để debug
-RUST_LOG=debug /usr/bin/buttre
+# Chạy engine thủ công để debug (đúng flag cho từng backend)
+RUST_LOG=debug /usr/bin/buttre --ibus   # IBus (GNOME/X11)
+RUST_LOG=debug /usr/bin/buttre --ime    # Wayland-native (sway/Hyprland/KDE)
 ```
 
 ---
@@ -235,14 +258,14 @@ ibus restart
 
 ## 📊 So Sánh: Windows vs macOS vs Linux
 
-| Khía Cạnh | Windows TSF | macOS IMKit | Linux IBus |
-|-----------|-------------|-------------|------------|
-| **Trạng thái** | ✅ Đang kiểm thử | ✅ Sẵn sàng | ✅ Sẵn sàng |
-| **Framework** | TSF | IMKit | IBus |
-| **Ngôn ngữ** | Rust | Obj-C + Rust | Rust |
-| **IPC** | COM | Mach | D-Bus |
-| **Cài đặt** | Registry | /Library | /usr/share |
-| **Composition** | ITfComposition | setMarkedText | UpdatePreeditText |
+| Khía Cạnh | Windows | macOS | Linux |
+|-----------|---------|-------|-------|
+| **Trạng thái** | ✅ Hoạt động (còn 1 lỗi separator, issue #4) | 🚧 Engine+FFI sẵn sàng; IMKit host đang phát triển | ✅ Hoạt động |
+| **Framework** | TSF | IMKit (dự kiến) | IBus + Wayland `zwp_input_method_v2` |
+| **Ngôn ngữ** | Rust | Rust + Swift/Obj-C | Rust |
+| **IPC** | COM | FFI | D-Bus / Wayland |
+| **Cài đặt** | Registry | ~/Library/Input Methods | /usr/share/ibus + compositor exec |
+| **Composition** | ITfComposition | setMarkedText | UpdatePreeditText / set_preedit_string |
 
 ---
 
@@ -252,15 +275,25 @@ ibus restart
 
 ```
 crates/buttre-platform/
+├── src/shared/
+│   └── engine_bridge.rs    # Semantics composition dùng chung mọi backend ⭐
 ├── src/platforms/linux/
-│   ├── mod.rs              # Điểm vào backend Linux
-│   └── ibus.rs             # IBus engine (D-Bus) ⭐
+│   ├── mod.rs              # run_engine_auto(): dò backend + fallback
+│   ├── ibus.rs             # Adapter D-Bus (IBus.Engine) mỏng qua bridge
+│   ├── ibus_bus.rs         # Kết nối private bus + Factory + lifecycle ⭐
+│   ├── method_sync.rs      # Sync kiểu gõ tray↔engine (file + watcher)
+│   └── wayland/            # Backend zwp_input_method_v2 (grab + xkb + virtual-kb) ⭐
 └── Cargo.toml              # Metadata đóng gói deb/rpm
 
 installers/linux/
-├── buttre.xml              # Mô tả IBus component ⭐
-├── build_packages.sh       # Builder .deb / .rpm ⭐
+├── buttre.xml              # Component XML: exec = /usr/bin/buttre --ibus ⭐
+├── build_packages.sh       # Builder .deb / .rpm
 └── debian/                 # Hook postinst
+
+scripts/
+├── test-ibus-scenarios.py  # 7 kịch bản gõ e2e qua InputContext thật
+├── ci-ibus-smoke.sh        # CI: ibus-daemon thật + typed scenarios
+└── ci-wayland-smoke.sh     # CI: headless sway binding + fallback
 ```
 
 ### Lệnh Build

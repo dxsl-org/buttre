@@ -171,9 +171,9 @@ for action in actions {
 **Vị trí**: `crates/buttre-platform/`
 
 **Trách nhiệm**:
-- Windows: Cài đặt TSF (Text Services Framework)
-- macOS: Tích hợp IMKit (đang lên kế hoạch)
-- Linux: Tích hợp IBus/Fcitx5 (đang lên kế hoạch)
+- Windows: TSF (Text Services Framework) — hoạt động
+- Linux: IBus (GNOME/X11) + Wayland-native `zwp_input_method_v2` (sway/Hyprland/KDE) — hoạt động; semantics composition dùng chung qua `shared/engine_bridge.rs`
+- macOS: FFI (`ButtreKeyResult`) sẵn sàng; IMKit host đang phát triển
 - UI system tray
 - Quản lý cài đặt
 
@@ -205,8 +205,8 @@ buttre-platform/
 
 **Tích Hợp Platform**:
 - **Windows**: Biên dịch thành DLL, đăng ký qua `regsvr32`
-- **macOS**: Bundle framework với Objective-C bridge (đang lên kế hoạch)
-- **Linux**: Shared object được IBus tải (đang lên kế hoạch)
+- **macOS**: dylib + FFI cho IMKit host (host đang phát triển)
+- **Linux**: binary chạy 2 chế độ — `--ibus` (ibus-daemon spawn) và `--ime` (Wayland-native tự dò, fallback IBus)
 
 ---
 
