@@ -4,6 +4,7 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- engine: sửa không gõ được "reset"/"resset" — phím sau cặp hủy dấu (ss) không còn hồi sinh dấu sắc thành "rết"; undo giữa từ giờ là chung cuộc đến hết từ (chuẩn Unikey)
 - linux: gõ tiếng Việt hoạt động thật — engine đăng ký đúng với ibus-daemon (private bus + Factory), trước đây không bao giờ nhận được phím
 - linux: sửa semantics preedit — composition dựng dần có gạch chân, commit đúng ở dấu cách/dấu câu
 - linux: thêm backend Wayland-native `zwp_input_method_v2` cho sway/Hyprland/KDE, tự fallback IBus cho GNOME/X11

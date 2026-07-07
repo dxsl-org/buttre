@@ -485,6 +485,31 @@ fn compose_internal(
         };
     }
 
+    // Step 1.5 — interior spent-tone-undo fold: a deliberate tone undo that
+    // fired EARLIER in raw (no longer at the tail) makes everything after it
+    // a literal append (Unikey multi-level toggle: undo is final for the
+    // rest of the word). Without this, segment would collect the spent tone
+    // pair into `tones` and step 4's last-tone-wins would resurrect the
+    // removed tone ("resse" → "rế" instead of "rese"). See
+    // `fallback::check_spent_tone_undo`.
+    //
+    // Gated on `allow_nonadjacent` like step 0: whether the word is in the
+    // post-undo literal zone is decided ONCE, at top level (with the
+    // more-permissive gate inside the prefix visibility check) — the
+    // attestation-gate demote recursion below must not re-litigate it with
+    // the stricter flag and diverge from that decision.
+    if allow_nonadjacent {
+        if let Some(fb) = fallback::check_spent_tone_undo(raw, opts, true) {
+            return ComposeResult {
+                text: fb.text,
+                temp_english: fb.temp_english,
+                applied_marks: Vec::new(),
+                consumed_tone: None,
+                demoted: false,
+            };
+        }
+    }
+
     // Step 2 — segment.
     let seg = segment::segment(raw, opts, allow_nonadjacent);
 

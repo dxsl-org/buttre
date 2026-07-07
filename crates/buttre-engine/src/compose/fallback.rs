@@ -127,6 +127,7 @@ use super::transform;
 use super::ComposeOpts;
 use crate::pipeline::config::ToneMark;
 use crate::tone;
+use crate::vowel::cluster::is_vowel;
 
 // Test-only instrumentation (red-team M4, perf): counts how many times
 // `recompute_prefix_marks` actually ran segment+transform on a prefix. Used
@@ -208,6 +209,80 @@ pub fn check_fallback(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
     }
 
     FallbackResult::not_handled()
+}
+
+// ── Interior spent-tone-undo fold (step 1.5 of `compose_internal`) ─────────────
+
+/// Detect a deliberate tone undo that fired EARLIER in `raw` — a contiguous
+/// same-tone-key pair no longer at the tail because more keys were typed
+/// after it ("resse", "tesst", "resset") — and fold everything after the
+/// undo event as a literal append.
+///
+/// ## Why this exists
+///
+/// [`check_fallback`] is tail-anchored: it classifies "ress" as an undo, but
+/// the moment the next key arrives ("resse") no detector matches, `segment`
+/// collects BOTH `s` keys into `tones`, and step 4's last-tone-wins
+/// resurrects the very tone the user deliberately removed — "resse"
+/// recomposed to attested "rế" (the non-adjacent `e..e` mark supplying the
+/// ê), which then passed every `should_unlatch` condition and overwrote the
+/// displayed "res". Unikey semantics say the undo is FINAL for the rest of
+/// the word (multi-level toggle, module doc): once the pair fires, later
+/// keys append literally until the word boundary.
+///
+/// This fold makes `compose()` itself see that history — the pure
+/// recompute now agrees with the executor's live latched-append display
+/// ("resset" → "reset"), so the un-latch probe, the word-boundary closed
+/// projection, and any fresh replay all derive the same text from raw. The
+/// `latch_from_undo` guard in `PipelineExecutor::boundary_repair` remains as
+/// a second line of defense, but the closed projection no longer contradicts
+/// the displayed text for this class in the first place.
+///
+/// ## Detection rule
+///
+/// The EARLIEST interior pair wins (a later "pair" is inside the literal
+/// zone of the first undo — "asssb" folds at "ass", appending "sb"). A pair
+/// qualifies only when:
+/// - both keys (lowercased) are the SAME tone key, and
+/// - at least one vowel precedes the pair (a tone key with no nucleus is a
+///   literal consonant in `segment`'s classification — English "ss"/"ff"
+///   onsets never qualify), and
+/// - [`check_fallback`] on the prefix ENDING at the pair actually fires —
+///   this reuses the full visibility gate, so English words whose tone never
+///   displayed ("glass": "glá" has an invalid onset) are untouched, while
+///   words whose tone WAS on screen ("res" → "ré") keep Unikey undo
+///   semantics.
+///
+/// Deliberately NOT part of [`check_fallback`]/[`is_last_event_undo`]: those
+/// answer "is the LAST event an undo" (P2's un-latch condition (d), P5's
+/// commit signal) — a word in the post-undo literal zone is not itself a
+/// just-fired undo event (`parity_fold_dessign_undo_fires_at_dess_not_full_word`
+/// pins that distinction).
+pub(super) fn check_spent_tone_undo(
+    raw: &[char],
+    opts: &ComposeOpts,
+    allow_nonadjacent: bool,
+) -> Option<FallbackResult> {
+    // `i` indexes the SECOND key of the pair; `i < len - 1` keeps the pair
+    // strictly interior — a trailing pair is step 1's (check_fallback's) job.
+    for i in 1..raw.len().saturating_sub(1) {
+        let k = raw[i].to_ascii_lowercase();
+        if raw[i - 1].to_ascii_lowercase() != k || !opts.tone_map.contains_key(&k) {
+            continue;
+        }
+        if !raw[..i - 1]
+            .iter()
+            .any(|&c| is_vowel(c.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        let fb = check_fallback(&raw[..=i], opts, allow_nonadjacent);
+        if fb.is_handled {
+            let suffix: String = raw[i + 1..].iter().collect();
+            return Some(FallbackResult::handled(format!("{}{suffix}", fb.text), true));
+        }
+    }
+    None
 }
 
 // ── Last-event parity fold (shared contract with P2) ───────────────────────────
