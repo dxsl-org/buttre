@@ -1,258 +1,260 @@
-//! buttre macOS - Zero-Unsafe FFI Bridge (Handle-Based)
+//! buttre macOS — C ABI for the IMKit host (FFI v2).
 //!
-//! **Tests**: Integration tests for this module are located in `crates/buttre-platform/tests/platform_macos_tests.rs`.
+//! **Tests**: `crates/buttre-platform/tests/platform_macos_tests.rs` (ABI
+//! surface) and `tests/shared_engine_bridge_tests.rs` (composition
+//! semantics — the same [`EngineBridge`] drives the Linux backends).
+//! **Header**: `include/buttre_platform.h` — hand-maintained, keep in sync.
 //!
-//! Uses integer handles instead of raw pointers to achieve ZERO unsafe
-//! for memory management operations.
+//! Handle-based (opaque `u64` ids) so memory management needs zero unsafe
+//! on the Rust side. The host maps [`ButtreKeyResult`] onto IMKit directly:
+//!
+//! - `commit` non-null → `insertText(commit)` (before updating the preedit)
+//! - `preedit`         → `setMarkedText(preedit)`; empty string → `unmarkText`
+//! - `handled == false`→ return `false` from `handle(event)` so the system
+//!   delivers the ORIGINAL key to the client (after the commit above —
+//!   that ordering is how separators work: word first, then the separator)
+//!
+//! v1 → v2 (breaking, no consumers existed — ARTIFACT_README confirmed):
+//! the old API returned a bare string for both "replace" and "commit"
+//! (indistinguishable) and dropped everything past the first engine action,
+//! which broke composition the same way it did on Linux (debug report B0).
+//! `backspace_count` is gone — IMKit replaces the whole marked range, so a
+//! delete count has no meaning in the preedit model.
+//!
+//! Panic policy: the release profile is `panic = "abort"` — a panic here
+//! kills the host app, and `catch_unwind` cannot help (nothing unwinds).
+//! Every reachable path is written panic-free instead: fallible
+//! construction returns handle `0`, lock poisoning is absorbed via
+//! `PoisonError::into_inner` (poisoning requires an unwind, which the
+//! release profile rules out anyway).
 
-use buttre_core::Action;
-use buttre_core::{Keyboard, KeyboardBuilder};
+use crate::shared::engine_bridge::{EngineBridge, ImeOp, KeyOutcome};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Mutex,
+    Mutex, PoisonError,
 };
 
 // ============================================================================
-// GLOBAL STATE (Thread-Safe)
+// Result type (mirror of include/buttre_platform.h)
 // ============================================================================
 
-static ENGINES: Mutex<Option<HashMap<u64, EngineState>>> = Mutex::new(None);
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Keeps the last returned CString alive across the FFI boundary.
-static LAST_RESULT: Mutex<Option<CString>> = Mutex::new(None);
-
-struct EngineState {
-    keyboard: Keyboard,
-    enabled: bool,
+/// Result of one key event. Pointers are UTF-8, owned by the engine, and
+/// valid until the NEXT call on the SAME engine (per-engine storage — two
+/// engines never clobber each other's strings).
+#[repr(C)]
+pub struct ButtreKeyResult {
+    /// `false` → the host must let the original key event through.
+    pub handled: bool,
+    /// Text to insert into the client, or null when nothing commits.
+    pub commit: *const c_char,
+    /// The full current composition (marked text). Empty string = clear
+    /// the marked range. Never null on a live engine.
+    pub preedit: *const c_char,
 }
 
-impl EngineState {
-    fn new() -> Self {
-        let keyboard = KeyboardBuilder::telex().expect("Failed to create Telex keyboard");
+impl ButtreKeyResult {
+    /// For dead/invalid handles: nothing happened, host handles the key.
+    const fn pass() -> Self {
         Self {
-            keyboard,
-            enabled: true,
+            handled: false,
+            commit: std::ptr::null(),
+            preedit: std::ptr::null(),
         }
     }
 }
 
-fn init_engines() {
-    let mut engines = ENGINES.lock().unwrap();
-    if engines.is_none() {
-        *engines = Some(HashMap::new());
+// ============================================================================
+// Global handle table
+// ============================================================================
+
+struct EngineState {
+    bridge: EngineBridge,
+    enabled: bool,
+    /// Backing storage for the pointers handed across the FFI — replaced
+    /// on every call, hence the "valid until next call" contract.
+    commit_c: Option<CString>,
+    preedit_c: CString,
+}
+
+static ENGINES: Mutex<Option<HashMap<u64, EngineState>>> = Mutex::new(None);
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn with_engine<R>(engine_id: u64, f: impl FnOnce(&mut EngineState) -> R) -> Option<R> {
+    if engine_id == 0 {
+        return None;
+    }
+    let mut engines = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
+    engines.as_mut()?.get_mut(&engine_id).map(f)
+}
+
+/// Marshal a bridge outcome into the engine's C storage.
+fn marshal(state: &mut EngineState, outcome: KeyOutcome) -> ButtreKeyResult {
+    let mut commit_text: Option<String> = None;
+    for op in outcome.ops {
+        if let ImeOp::Commit(text) = op {
+            // The bridge emits at most one commit per key; be safe anyway.
+            match &mut commit_text {
+                Some(existing) => existing.push_str(&text),
+                None => commit_text = Some(text),
+            }
+        }
+    }
+    state.commit_c = commit_text.and_then(|t| CString::new(t).ok());
+    state.preedit_c =
+        CString::new(state.bridge.preedit()).unwrap_or_else(|_| CString::default());
+    ButtreKeyResult {
+        handled: outcome.handled,
+        commit: state
+            .commit_c
+            .as_ref()
+            .map_or(std::ptr::null(), |c| c.as_ptr()),
+        preedit: state.preedit_c.as_ptr(),
     }
 }
 
 // ============================================================================
-// PUBLIC FFI FUNCTIONS
+// Public FFI surface
 // ============================================================================
 
-/// Create new engine instance.
-///
-/// Returns a non-zero handle, or 0 on failure.
+/// Create a new engine instance (telex). Returns a non-zero handle, or 0
+/// on failure.
 #[no_mangle]
 pub extern "C" fn buttre_engine_new() -> u64 {
-    init_engines();
+    let Some(bridge) = EngineBridge::try_new("telex") else {
+        return 0;
+    };
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    let mut engines = ENGINES.lock().unwrap();
-    if let Some(ref mut map) = *engines {
-        map.insert(id, EngineState::new());
-        return id;
-    }
-    0
+    let mut engines = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
+    engines.get_or_insert_with(HashMap::new).insert(
+        id,
+        EngineState {
+            bridge,
+            enabled: true,
+            commit_c: None,
+            preedit_c: CString::default(),
+        },
+    );
+    id
 }
 
-/// Free engine instance.
-///
-/// Passing 0 or an invalid ID is a safe no-op.
+/// Free an engine instance. Passing 0 or an unknown id is a safe no-op.
 #[no_mangle]
 pub extern "C" fn buttre_engine_free(engine_id: u64) {
     if engine_id == 0 {
         return;
     }
-    let mut engines = ENGINES.lock().unwrap();
-    if let Some(ref mut map) = *engines {
+    let mut engines = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(map) = engines.as_mut() {
         map.remove(&engine_id);
     }
 }
 
 /// Process a key press.
 ///
-/// # Parameters
-/// - `engine_id`: handle from `buttre_engine_new`
-/// - `keycode`: macOS virtual keycode
-/// - `shift`: Shift key held
-/// - `capslock`: Caps Lock active — uppercase = `capslock XOR shift`
+/// - `keycode`: macOS virtual keycode (US ANSI table below). Space and
+///   Return ARE mapped — the engine classifies separators itself and the
+///   result carries the committed word with `handled == false`, so the
+///   original key still reaches the client after the commit.
+/// - `shift` / `capslock`: letter case = `capslock XOR shift`.
 ///
-/// **ABI BREAK (since 0.6.3-alpha):** `capslock` is the new 4th parameter.
-/// Swift host call sites must be updated to pass the fourth argument.
-///
-/// Returns a pointer to a UTF-8 string (valid until next call), or null.
+/// Unmapped keycodes (arrows, Tab, Escape, …) return `handled == false`
+/// with no state change — call [`buttre_engine_flush`] first for keys that
+/// should end the composition.
 #[no_mangle]
 pub extern "C" fn buttre_engine_process_key(
     engine_id: u64,
     keycode: u16,
     shift: bool,
     capslock: bool,
-) -> *const c_char {
-    if engine_id == 0 {
-        return std::ptr::null();
-    }
-
-    let mut engines = ENGINES.lock().unwrap();
-    let engine = match engines.as_mut().and_then(|m| m.get_mut(&engine_id)) {
-        Some(e) => e,
-        None => return std::ptr::null(),
-    };
-
-    if !engine.enabled {
-        return std::ptr::null();
-    }
-
-    let ch = match keycode_to_char(keycode, shift, capslock) {
-        Some(c) => c,
-        None => return std::ptr::null(),
-    };
-
-    let action = match engine.keyboard.process(ch) {
-        Ok(actions) => actions.into_iter().next().unwrap_or(Action::DoNothing),
-        Err(e) => {
-            tracing::warn!("buttre_engine_process_key: keyboard error: {}", e);
-            return std::ptr::null();
+) -> ButtreKeyResult {
+    with_engine(engine_id, |state| {
+        if !state.enabled {
+            return ButtreKeyResult::pass();
         }
-    };
-
-    match action {
-        Action::Replace { text, .. } | Action::Commit(text) => store_and_return_cstring(text),
-        _ => std::ptr::null(),
-    }
+        let Some(ch) = keycode_to_char(keycode, shift, capslock) else {
+            return ButtreKeyResult::pass();
+        };
+        let outcome = state.bridge.process_char(ch);
+        marshal(state, outcome)
+    })
+    .unwrap_or(ButtreKeyResult::pass())
 }
 
-/// Process backspace.
-///
-/// Returns a pointer to a UTF-8 string (new preedit), or null.
+/// Process backspace. `handled == false` when nothing is composing (the
+/// host lets the key delete normally).
 #[no_mangle]
-pub extern "C" fn buttre_engine_process_backspace(engine_id: u64) -> *const c_char {
-    if engine_id == 0 {
-        return std::ptr::null();
-    }
-    let mut engines = ENGINES.lock().unwrap();
-    let engine = match engines.as_mut().and_then(|m| m.get_mut(&engine_id)) {
-        Some(e) => e,
-        None => return std::ptr::null(),
-    };
-    let action = match engine.keyboard.backspace() {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!("buttre_engine_process_backspace: keyboard error: {}", e);
-            return std::ptr::null();
+pub extern "C" fn buttre_engine_process_backspace(engine_id: u64) -> ButtreKeyResult {
+    with_engine(engine_id, |state| {
+        if !state.enabled {
+            return ButtreKeyResult::pass();
         }
-    };
-    match action {
-        Action::Replace { text, .. } if !text.is_empty() => store_and_return_cstring(text),
-        _ => std::ptr::null(),
-    }
+        let outcome = state.bridge.backspace();
+        marshal(state, outcome)
+    })
+    .unwrap_or(ButtreKeyResult::pass())
 }
 
-/// Reset engine state (clears the composition buffer).
+/// Commit the pending word out-of-band, with word-boundary repair — call on
+/// focus loss (`deactivateServer`), navigation keys, or shortcuts, then act
+/// on `commit`/`preedit` as usual. No-op result when nothing is composing.
+#[no_mangle]
+pub extern "C" fn buttre_engine_flush(engine_id: u64) -> ButtreKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.flush_pending();
+        marshal(state, outcome)
+    })
+    .unwrap_or(ButtreKeyResult::pass())
+}
+
+/// Discard the composition WITHOUT committing (Escape semantics).
 #[no_mangle]
 pub extern "C" fn buttre_engine_reset(engine_id: u64) {
-    if engine_id == 0 {
-        return;
-    }
-    let mut engines = ENGINES.lock().unwrap();
-    if let Some(engine) = engines.as_mut().and_then(|m| m.get_mut(&engine_id)) {
-        engine.keyboard.reset();
-    }
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.discard();
+        marshal(state, outcome);
+    });
 }
 
-/// Switch the input method.
-///
-/// - `method`: `0` = telex, `1` = vni, `2` = nom (no dictionary). Other values are rejected.
-///
-/// Returns `true` on success.
+/// Switch the input method: 0 = telex, 1 = vni, 2 = nom. Discards any live
+/// composition (a mode switch is a reset). Returns true on success.
 #[no_mangle]
 pub extern "C" fn buttre_engine_set_method(engine_id: u64, method: u8) -> bool {
-    if engine_id == 0 {
-        return false;
-    }
-    let mut engines = ENGINES.lock().unwrap();
-    let engine = match engines.as_mut().and_then(|m| m.get_mut(&engine_id)) {
-        Some(e) => e,
-        None => return false,
+    let name = match method {
+        0 => "telex",
+        1 => "vni",
+        2 => "nom",
+        _ => return false,
     };
-    let result = match method {
-        0 => KeyboardBuilder::telex(),
-        1 => KeyboardBuilder::vni(),
-        2 => KeyboardBuilder::nom(None),
-        _ => {
-            tracing::warn!("buttre_engine_set_method: unknown method {}", method);
-            return false;
-        }
-    };
-    match result {
-        Ok(kb) => {
-            engine.keyboard = kb;
-            tracing::debug!("Engine {} switched to method {}", engine_id, method);
-            true
-        }
-        Err(e) => {
-            tracing::warn!("buttre_engine_set_method: failed to build keyboard: {}", e);
-            false
-        }
-    }
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.rebuild(name);
+        marshal(state, outcome);
+        true
+    })
+    .unwrap_or(false)
 }
 
-/// Enable or disable an engine.
-///
-/// A disabled engine returns null for all `process_key` calls.
-/// Call `buttre_engine_free` to release memory — disabling alone does not free.
+/// Enable/disable. Disabling discards the composition — flush first if the
+/// pending word should be committed. Disabled engines pass everything.
 #[no_mangle]
 pub extern "C" fn buttre_engine_set_enabled(engine_id: u64, enabled: bool) {
-    if engine_id == 0 {
-        return;
-    }
-    let mut engines = ENGINES.lock().unwrap();
-    if let Some(engine) = engines.as_mut().and_then(|m| m.get_mut(&engine_id)) {
-        if engine.enabled && !enabled {
-            engine.keyboard.reset();
+    with_engine(engine_id, |state| {
+        if state.enabled && !enabled {
+            let outcome = state.bridge.discard();
+            marshal(state, outcome);
         }
-        engine.enabled = enabled;
-        tracing::debug!("Engine {} enabled={}", engine_id, enabled);
-    }
+        state.enabled = enabled;
+    });
 }
 
 // ============================================================================
-// INTERNAL HELPERS
+// macOS virtual keycode → char (US ANSI layout)
 // ============================================================================
 
-fn store_and_return_cstring(text: String) -> *const c_char {
-    match CString::new(text) {
-        Ok(cstring) => {
-            let ptr = cstring.as_ptr();
-            *LAST_RESULT.lock().unwrap() = Some(cstring);
-            ptr
-        }
-        Err(e) => {
-            eprintln!("[buttre FFI] ERROR: Invalid string: {}", e);
-            std::ptr::null()
-        }
-    }
-}
-
-/// Map macOS virtual keycode to character (US ANSI layout).
-///
-/// Letter case uses `capslock XOR shift` so CapsLock+Shift = lowercase,
-/// matching system behavior and the gonhanh Engine.cpp reference.
-///
-/// Tab (48), Return (36), Space (49), Escape (53) are intentionally omitted;
-/// break-key handling is the responsibility of the Swift host.
+/// Letter case uses `capslock XOR shift`, matching system behavior.
 fn keycode_to_char(keycode: u16, shift: bool, capslock: bool) -> Option<char> {
-    // Letter keycodes — apply CapsLock XOR Shift for case
     let letter = match keycode {
         0 => 'a',
         1 => 's',
@@ -280,6 +282,9 @@ fn keycode_to_char(keycode: u16, shift: bool, capslock: bool) -> Option<char> {
         40 => 'k',
         45 => 'n',
         46 => 'm',
+        // Separators the engine must see (it classifies them itself).
+        49 => return Some(' '),
+        36 => return Some('\n'),
         _ => return keycode_to_char_non_letter(keycode, shift),
     };
     let uppercase = capslock != shift;
@@ -347,7 +352,3 @@ fn keycode_to_char_non_letter(keycode: u16, shift: bool) -> Option<char> {
         }
     })
 }
-
-// ============================================================================
-// TESTS
-// ============================================================================

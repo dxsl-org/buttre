@@ -1,11 +1,12 @@
-//! Composition-semantics tests for the shared Linux EngineBridge.
+//! Composition-semantics tests for the shared EngineBridge (all platforms).
 //!
-//! Pure — a real `Keyboard` in composition mode, no D-Bus/Wayland. These
-//! mirror the end-to-end scenarios in `scripts/test-ibus-scenarios.py` so a
-//! semantics regression fails in `cargo test` before it ever reaches a bus.
-#![cfg(platform_linux)]
+//! Pure — a real `Keyboard` in composition mode, no D-Bus/Wayland/FFI.
+//! These mirror the end-to-end scenarios in `scripts/test-ibus-scenarios.py`
+//! so a semantics regression fails in `cargo test` on ANY OS before it ever
+//! reaches a bus. The same bridge drives the Linux backends and the macOS
+//! FFI, so this suite pins composition behavior for both.
 
-use buttre_platform::platforms::linux::engine_bridge::{EngineBridge, ImeOp};
+use buttre_platform::shared::engine_bridge::{EngineBridge, ImeOp};
 
 fn type_chars(bridge: &mut EngineBridge, s: &str) -> Vec<ImeOp> {
     let mut ops = Vec::new();

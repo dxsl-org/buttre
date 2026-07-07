@@ -37,6 +37,9 @@ lipo -info "$STAGING/libbuttre_platform.dylib"
 echo "==> Copying keyboards..."
 cp keyboards/*.toml "$STAGING/keyboards/"
 
+echo "==> Copying C header..."
+cp include/buttre_platform.h "$STAGING/"
+
 echo "==> Copying Nôm database (if available)..."
 for NOM_SRC in \
     "target/release/buttre_nom.db" \

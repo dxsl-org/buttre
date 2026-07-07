@@ -1,9 +1,11 @@
-//! Shared engine-action → IME-operation mapping for the Linux backends.
+//! Shared engine-action → IME-operation mapping (all preedit-model hosts).
 //!
-//! Both IBus (`ibus.rs`) and Wayland-native (`wayland/`) speak the same
-//! preedit model; this bridge is the single source of those semantics so the
-//! two backends cannot drift. It is pure — no D-Bus, no Wayland — which also
-//! makes the full composition behavior unit-testable without a bus.
+//! IBus (`linux/ibus.rs`), Wayland-native (`linux/wayland/`), and the macOS
+//! FFI (`macos/ffi.rs`, consumed by the IMKit host) all speak the same
+//! preedit model; this bridge is the single source of those semantics so
+//! backends cannot drift. It is pure — no D-Bus, no Wayland, no FFI — which
+//! also makes the full composition behavior unit-testable on any OS
+//! (`tests/shared_engine_bridge_tests.rs`).
 //!
 //! The `Keyboard` runs in composition mode (the TSF mode): the pipeline
 //! itself owns word logic, emitting `UpdateComposition` for the growing word
@@ -58,6 +60,26 @@ impl EngineBridge {
         Self {
             keyboard: build_keyboard(method),
             preedit: String::new(),
+        }
+    }
+
+    /// Non-panicking constructor for FFI callers — the release profile is
+    /// `panic = "abort"`, so a builder panic would kill the host app.
+    pub fn try_new(method: &str) -> Option<Self> {
+        let keyboard = match method {
+            "vni" => KeyboardBuilder::vni_with_composition(true),
+            "nom" => KeyboardBuilder::nom_with_composition(None, true),
+            _ => KeyboardBuilder::telex_with_composition(true),
+        };
+        match keyboard {
+            Ok(keyboard) => Some(Self {
+                keyboard,
+                preedit: String::new(),
+            }),
+            Err(e) => {
+                tracing::warn!("EngineBridge::try_new({method}): {e}");
+                None
+            }
         }
     }
 

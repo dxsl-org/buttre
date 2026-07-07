@@ -4,11 +4,13 @@
 
 #![cfg(target_os = "linux")]
 
-pub mod engine_bridge;
 pub mod ibus;
 pub mod ibus_bus;
 pub mod method_sync;
 pub mod wayland;
+
+/// Composition semantics shared with the macOS FFI — see `shared/engine_bridge.rs`.
+pub use crate::shared::engine_bridge;
 
 /// Engine-mode entry with backend auto-detection (`buttre --ime`):
 /// Wayland-native `zwp_input_method_v2` when the compositor supports it and

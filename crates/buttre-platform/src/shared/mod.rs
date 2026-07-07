@@ -4,6 +4,7 @@
 //! including UI components, keyboard management, and IPC.
 
 pub mod config_watcher;
+pub mod engine_bridge;
 pub mod input;
 pub mod observers;
 pub mod pipe_server;
