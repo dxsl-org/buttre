@@ -301,8 +301,18 @@ impl ButtreEngine {
         }
         self.seen_generation = generation;
         let method = state.method();
+        // rebuild returns owned Option — the lock guard is dropped at the
+        // end of this statement, so no lock is held across the await.
         let outcome = self.bridge.lock().unwrap().rebuild(&method);
-        self.emit_ops(ctx, outcome.ops).await;
-        tracing::info!("Engine switched to method {method}");
+        match outcome {
+            Some(outcome) => {
+                self.emit_ops(ctx, outcome.ops).await;
+                tracing::info!("Engine switched to method {method}");
+            }
+            // Build failed (already logged): keep the current keyboard
+            // rather than crash. seen_generation is advanced so we don't
+            // retry the same broken method every keystroke.
+            None => tracing::warn!("Method switch to {method} failed; keeping current"),
+        }
     }
 }

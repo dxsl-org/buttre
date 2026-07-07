@@ -118,7 +118,7 @@ fn discard_clears_without_committing() {
 fn rebuild_switches_method_and_clears_composition() {
     let mut bridge = EngineBridge::new("telex");
     type_chars(&mut bridge, "vie");
-    let rebuilt = bridge.rebuild("vni");
+    let rebuilt = bridge.rebuild("vni").expect("vni must build");
     assert_eq!(rebuilt.ops, vec![ImeOp::Preedit(String::new())]);
 
     let ops = type_chars(&mut bridge, "viet65");

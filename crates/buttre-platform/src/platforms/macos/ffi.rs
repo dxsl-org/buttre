@@ -227,10 +227,12 @@ pub extern "C" fn buttre_engine_set_method(engine_id: u64, method: u8) -> bool {
         2 => "nom",
         _ => return false,
     };
-    with_engine(engine_id, |state| {
-        let outcome = state.bridge.rebuild(name);
-        marshal(state, outcome);
-        true
+    with_engine(engine_id, |state| match state.bridge.rebuild(name) {
+        Some(outcome) => {
+            marshal(state, outcome);
+            true
+        }
+        None => false, // builder failed — keyboard unchanged, report failure
     })
     .unwrap_or(false)
 }

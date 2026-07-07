@@ -33,21 +33,22 @@ pub struct KeyOutcome {
     pub handled: bool,
 }
 
-/// Build a keyboard in composition mode.
+/// Build a keyboard in composition mode. Returns `None` on builder failure
+/// (logged) — NEVER panics: the release profile is `panic = "abort"`, so a
+/// panic here would kill the host process outright. Callers decide whether
+/// to keep the current keyboard, fall back, or report failure.
 ///
 /// Nôm runs WITHOUT its dictionary here: the candidate UI isn't wired on
 /// either Linux backend yet, so lookups would produce actions we drop.
-fn build_keyboard(method: &str) -> Keyboard {
-    match method {
-        "vni" => {
-            KeyboardBuilder::vni_with_composition(true).expect("Failed to create VNI keyboard")
-        }
-        "nom" => KeyboardBuilder::nom_with_composition(None, true)
-            .expect("Failed to create Nôm keyboard"),
-        _ => {
-            KeyboardBuilder::telex_with_composition(true).expect("Failed to create Telex keyboard")
-        }
-    }
+fn build_keyboard(method: &str) -> Option<Keyboard> {
+    let result = match method {
+        "vni" => KeyboardBuilder::vni_with_composition(true),
+        "nom" => KeyboardBuilder::nom_with_composition(None, true),
+        _ => KeyboardBuilder::telex_with_composition(true),
+    };
+    result
+        .map_err(|e| tracing::warn!("build_keyboard({method}): {e}"))
+        .ok()
 }
 
 pub struct EngineBridge {
@@ -56,41 +57,40 @@ pub struct EngineBridge {
 }
 
 impl EngineBridge {
+    /// Infallible constructor for the Linux engine processes (tests too).
+    /// A failed non-telex method degrades to telex rather than crashing the
+    /// engine process; only a telex-build failure — the hardcoded default,
+    /// meaning the whole app is unusable — is treated as unrecoverable.
     pub fn new(method: &str) -> Self {
+        let keyboard = build_keyboard(method)
+            .or_else(|| build_keyboard("telex"))
+            .expect("the built-in telex keyboard must always build");
         Self {
-            keyboard: build_keyboard(method),
+            keyboard,
             preedit: String::new(),
         }
     }
 
-    /// Non-panicking constructor for FFI callers — the release profile is
-    /// `panic = "abort"`, so a builder panic would kill the host app.
+    /// Constructor for FFI callers that reports failure instead of degrading
+    /// — the macOS host decides what to do when `buttre_engine_new` fails.
     pub fn try_new(method: &str) -> Option<Self> {
-        let keyboard = match method {
-            "vni" => KeyboardBuilder::vni_with_composition(true),
-            "nom" => KeyboardBuilder::nom_with_composition(None, true),
-            _ => KeyboardBuilder::telex_with_composition(true),
-        };
-        match keyboard {
-            Ok(keyboard) => Some(Self {
-                keyboard,
-                preedit: String::new(),
-            }),
-            Err(e) => {
-                tracing::warn!("EngineBridge::try_new({method}): {e}");
-                None
-            }
-        }
+        Some(Self {
+            keyboard: build_keyboard(method)?,
+            preedit: String::new(),
+        })
     }
 
     pub fn preedit(&self) -> &str {
         &self.preedit
     }
 
-    /// Switch input method: rebuild the keyboard, discarding any live
-    /// composition (a mode switch is a reset by definition).
-    pub fn rebuild(&mut self, method: &str) -> KeyOutcome {
-        self.keyboard = build_keyboard(method);
+    /// Switch input method, discarding any live composition (a mode switch
+    /// is a reset by definition). Returns `None` — keyboard unchanged — when
+    /// the requested method fails to build, so `set_method` can report the
+    /// failure rather than silently switching to something else or crashing.
+    pub fn rebuild(&mut self, method: &str) -> Option<KeyOutcome> {
+        let keyboard = build_keyboard(method)?;
+        self.keyboard = keyboard;
         let mut outcome = KeyOutcome {
             ops: Vec::new(),
             handled: true,
@@ -99,7 +99,7 @@ impl EngineBridge {
             self.preedit.clear();
             outcome.ops.push(ImeOp::Preedit(String::new()));
         }
-        outcome
+        Some(outcome)
     }
 
     /// Feed one character. The engine classifies separators itself.

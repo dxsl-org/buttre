@@ -153,10 +153,12 @@ impl ButtreFactory {
             .at(&path, engine)
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-        server
-            .at(&path, EngineService { path: path.clone() })
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        if let Err(e) = server.at(&path, EngineService { path: path.clone() }).await {
+            // Don't leak the Engine interface if the Service fails to bind:
+            // it has no Destroy handler of its own to reap it.
+            let _ = server.remove::<ButtreEngine, _>(&path).await;
+            return Err(zbus::fdo::Error::Failed(e.to_string()));
+        }
 
         tracing::info!("CreateEngine: serving engine at {}", path.as_str());
         Ok(path)

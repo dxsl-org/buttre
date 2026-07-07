@@ -165,9 +165,13 @@ impl ImeState {
         }
         self.seen_generation = generation;
         let method = self.method_state.method();
-        let outcome = self.bridge.rebuild(&method);
-        self.commit_ops(outcome.ops);
-        tracing::info!("Wayland engine switched to method {method}");
+        match self.bridge.rebuild(&method) {
+            Some(outcome) => {
+                self.commit_ops(outcome.ops);
+                tracing::info!("Wayland engine switched to method {method}");
+            }
+            None => tracing::warn!("Method switch to {method} failed; keeping current"),
+        }
     }
 }
 
@@ -179,10 +183,15 @@ pub fn run_engine() -> Result<()> {
         .map_err(|e| anyhow!(Unavailable(format!("no wayland display: {e}"))))?;
     let display = conn.display();
 
+    // NB: do NOT spawn the method watcher yet — this function may still
+    // return Unavailable (compositor lacks the protocol / seat already
+    // owned), and the caller then falls back to IBus which spawns its own
+    // watcher. Spawning here first would leak an orphaned watcher thread +
+    // inotify watch for the process lifetime. Defer until availability is
+    // confirmed, just before the dispatch loop.
     let method_state = MethodState::load();
-    method_sync::spawn_watcher(method_state.clone());
 
-    let mut state = ImeState::new(method_state);
+    let mut state = ImeState::new(method_state.clone());
     let mut queue = conn.new_event_queue::<ImeState>();
     let qh: QueueHandle<ImeState> = queue.handle();
     display.get_registry(&qh, ());
@@ -208,6 +217,10 @@ pub fn run_engine() -> Result<()> {
             "another input method already owns the seat".into()
         )));
     }
+
+    // Availability confirmed — now it's safe to start the tray↔engine
+    // method watcher (no IBus fallback will run in this process).
+    method_sync::spawn_watcher(method_state);
 
     tracing::info!("Wayland input method registered; waiting for text-input activation");
     loop {
