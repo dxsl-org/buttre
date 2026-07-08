@@ -557,16 +557,14 @@ fn demote_pass_cannot_recurse_twice() {
 //   so retyping 'd' immediately after DOES satisfy immediacy. This is the
 //   correct analogue of the đ/consonant-class escape hatch.
 // - "cana"+"a"+"n" latch-semantics row: at the PURE `compose()` layer there
-//   is no persistent state, so re-running compose on the grown raw buffer
-//   "canaan" does not "resume" a prior undo — it recomputes from scratch,
-//   and the same 3-occurrence guard that protects "banana"/"dataa" also
-//   blocks any transform from firing here, so the result is the full raw
-//   string typed so far ("canaan", not the display-trimmed "canan"). What
-//   Phase 4 guarantees at this layer — and what the test below asserts — is
-//   the "Gatekeeper passthrough" invariant: no diacritic leaks back in and
-//   no incorrect re-fire happens. Trimming the display to "canan" is a
-//   caller/executor concern (there is no `PipelineExecutor` wiring for this
-//   `compose` module yet — out of Phase 4's file-ownership scope).
+//   is no persistent state — re-running compose on the grown raw buffer
+//   "canaan" recomputes from scratch. The interior spent-undo fold (step
+//   1.5, `check_spent_undo`) recognizes the "canaa" undo event from raw
+//   alone and appends the tail literally, so compose returns the SAME
+//   display-trimmed "canan" the live latched executor shows (the undoing
+//   keystroke is consumed). What Phase 4 guarantees at this layer — and
+//   what the test below asserts — is the "Gatekeeper passthrough"
+//   invariant: no diacritic leaks back in and no incorrect re-fire happens.
 
 #[test]
 fn critical_cana_a_undoes_to_literal_latched() {
@@ -658,13 +656,17 @@ fn high_cana_uppercase_trigger_case_insensitive() {
 
 #[test]
 fn high_cana_latch_survives_recompute_no_reentry() {
-    // "cana"+"a"+"n": see module-level deviation note. At the pure compose()
-    // layer, no diacritic leaks back in and the buffer is never re-entered
-    // into the fired-mark path (the count-of-'a'==3 guard blocks it, exactly
-    // like "banana"/"dataa") — this is the "Gatekeeper passthrough" invariant
-    // Phase 4 owns; display-level trimming to "canan" is a caller concern.
+    // "cana"+"a"+"n": the interior spent-undo fold (step 1.5) now folds the
+    // "canaa" undo event and appends the tail literally, so pure compose()
+    // returns exactly what the live latched display shows — "canan" (the
+    // undoing keystroke is consumed, same as the executor path). Previously
+    // compose() answered the full literal "canaan" and display-level
+    // trimming was a caller concern; the fold moved that concern into
+    // compose so probe/boundary/replay all agree. The invariant this test
+    // exists for is unchanged: the undone â mark must never re-fire.
     let r = compose(&raw("canaan"), &telex_opts());
-    assert_eq!(r.text, "canaan");
+    assert_eq!(r.text, "canan");
+    assert!(r.temp_english);
     assert!(
         !r.text.contains(['â']),
         "the undone â mark must never re-fire on further typing"

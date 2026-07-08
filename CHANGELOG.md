@@ -4,6 +4,10 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- engine: sửa lớp từ tiếng Anh không gõ được (rows, towns, owns, lows) — cặp hủy transform (ww) không còn bị hồi sinh khi có phím dấu theo sau
+- engine: undo dấu không còn nuốt phím dấu bị ghi đè trước đó ("meterss" ra "meters", không phải "metes")
+- test: guard 10.000 từ tiếng Anh thông dụng — mọi từ phải gõ được bằng gõ thẳng hoặc double-key escape, chạy trong CI chống tái phát
+
 ## [0.7.7-beta] — 2026-07-07
 
 - engine: sửa không gõ được "reset"/"resset" — phím sau cặp hủy dấu (ss) không còn hồi sinh dấu sắc thành "rết"; undo giữa từ giờ là chung cuộc đến hết từ (chuẩn Unikey)
