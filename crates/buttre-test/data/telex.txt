@@ -2442,3 +2442,5 @@ ngaos, ngáo
 laayf, lầy
 khum, khum
 toang, toang
+quowts, quớt
+quowt, quơt

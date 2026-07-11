@@ -87,6 +87,14 @@ fn telex_tuong_grave() {
     assert_eq!(compose(&raw("tuongwf"), &telex_opts()).text, "tường");
 }
 
+#[test]
+fn telex_quowt_onset_u_not_claimed_by_uo_rule() {
+    // The u of "qu" is the onset glide: "quowt" must give "quơt" (o→ơ only),
+    // never "qươt" (invalid onset "q" → whole word fell back to raw).
+    assert_eq!(compose(&raw("quowt"), &telex_opts()).text, "quơt");
+    assert_eq!(compose(&raw("quowts"), &telex_opts()).text, "quớt");
+}
+
 // ── Telex undo/toggle ─────────────────────────────────────────────────────────
 
 #[test]
@@ -247,6 +255,20 @@ fn vni_luu7_yields_luu_horn() {
         "lưu",
         "VNI luu7 must produce lưu"
     );
+}
+
+#[test]
+fn vni_quo7t1_yields_quot_acute() {
+    // Regression (docs/TODO.md): the uo compound rule claimed the onset glide
+    // of "qu" and produced invalid "qươt" → raw fallback. Only o→ơ applies.
+    assert_eq!(compose(&raw("quo7t"), &vni_opts()).text, "quơt");
+    assert_eq!(compose(&raw("quo7t1"), &vni_opts()).text, "quớt");
+}
+
+#[test]
+fn vni_huo7t_uo_rule_untouched_by_qu_guard() {
+    // Non-qu onsets keep the both-transformed arm: "huo7t" → "hươt".
+    assert_eq!(compose(&raw("huo7t"), &vni_opts()).text, "hươt");
 }
 
 // ── Regression: tone-before-transform ordering (bug: mieng16/mieng26 VNI) ────
