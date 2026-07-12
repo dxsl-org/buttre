@@ -45,3 +45,37 @@ fn spent_undo_fold_matches_display_for_sibling_words() {
     // must keep the fold out of English double-letter words.
     assert_eq!(type_seq("glasses"), "glasses");
 }
+
+#[test]
+fn spent_transform_undo_is_final_too() {
+    // Transform-toggle analog of "resset" (found by the 10k-word English
+    // scan): "roww" undoes ơ, but a later tone key re-derived the whole raw
+    // and resurrected the spent `w` mark — "rowws" became attested "rớ",
+    // making rows/towns/owns/lows untypeable.
+    assert_eq!(type_seq("roww"), "row", "double-w undo must fire");
+    assert_eq!(
+        type_seq("rowws"),
+        "rows",
+        "the 's' after a spent transform undo must append literally, never resurrect ơ as 'rớ'"
+    );
+    assert_eq!(type_seq("towwns"), "towns");
+    assert_eq!(type_seq("owwns"), "owns");
+    assert_eq!(type_seq("lowws"), "lows");
+}
+
+#[test]
+fn tone_undo_restores_overridden_tone_keys_as_literal() {
+    // "meters"/"donors" (10k-word scan): the trailing double-s undo used to
+    // reconstruct the prefix by DISCARDING every tone-key char it contained,
+    // eating the 'r' — "meterss" gave "metes". An undo returns the user's
+    // literal keystrokes; no keystroke may vanish.
+    assert_eq!(type_seq("meterss"), "meters");
+    assert_eq!(type_seq("donorss"), "donors");
+}
+
+#[test]
+fn yes_class_escape_still_works() {
+    // The classic single-tone escape the users reach for first.
+    assert_eq!(type_seq("yess"), "yes");
+    assert_eq!(type_seq("boss"), "bos", "Unikey undo semantics unchanged");
+}

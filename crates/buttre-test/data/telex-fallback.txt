@@ -14,3 +14,12 @@ cissco, cisco
 dessign, design
 toool, tool
 toools, tools
+resset, reset
+resse, rese
+yess, yes
+rowws, rows
+towwns, towns
+owwns, owns
+lowws, lows
+meterss, meters
+donorss, donors

@@ -485,13 +485,13 @@ fn compose_internal(
         };
     }
 
-    // Step 1.5 — interior spent-tone-undo fold: a deliberate tone undo that
-    // fired EARLIER in raw (no longer at the tail) makes everything after it
-    // a literal append (Unikey multi-level toggle: undo is final for the
-    // rest of the word). Without this, segment would collect the spent tone
-    // pair into `tones` and step 4's last-tone-wins would resurrect the
-    // removed tone ("resse" → "rế" instead of "rese"). See
-    // `fallback::check_spent_tone_undo`.
+    // Step 1.5 — interior spent-undo fold: a deliberate undo (tone OR
+    // transform) that fired EARLIER in raw (no longer at the tail) makes
+    // everything after it a literal append (Unikey multi-level toggle: undo
+    // is final for the rest of the word). Without this, segment would
+    // re-collect the spent pair as live marks and resurrect the very mark
+    // the user removed ("resse" → "rế" instead of "rese", "rowws" → "rớ"
+    // instead of "rows"). See `fallback::check_spent_undo`.
     //
     // Gated on `allow_nonadjacent` like step 0: whether the word is in the
     // post-undo literal zone is decided ONCE, at top level (with the
@@ -499,7 +499,7 @@ fn compose_internal(
     // attestation-gate demote recursion below must not re-litigate it with
     // the stricter flag and diverge from that decision.
     if allow_nonadjacent {
-        if let Some(fb) = fallback::check_spent_tone_undo(raw, opts, true) {
+        if let Some(fb) = fallback::check_spent_undo(raw, opts, true) {
             return ComposeResult {
                 text: fb.text,
                 temp_english: fb.temp_english,

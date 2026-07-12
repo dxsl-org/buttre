@@ -93,7 +93,7 @@ unsafe extern "system" fn window_proc(
                 if let Ok(cands) = cand_lock.lock() {
                     let mut y = 10;
                     for (i, candidate) in cands.iter().take(5).enumerate() {
-                        let text = format!("{}. {}", i + 1, &candidate.text);
+                        let text = format!("{}. {}", i + 1, candidate.text);
                         let mut text_wide: Vec<u16> =
                             text.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -162,7 +162,7 @@ pub fn show_candidates(candidates: Vec<Candidate>, input: String) -> Option<Stri
         if i > 0 {
             formatted.push(' ');
         }
-        formatted.push_str(&format!("{}{}", i + 1, &candidate.text));
+        formatted.push_str(&format!("{}{}", i + 1, candidate.text));
     }
 
     // Store formatted text for later deletion

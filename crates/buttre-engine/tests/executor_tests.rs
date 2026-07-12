@@ -1486,10 +1486,9 @@ fn test_cana_a_n_latches_until_separator() {
     // Once undone, ComposeStage's temp_english branch appends subsequent keys
     // LITERALLY onto the already-undone buffer instead of recomputing from
     // raw — "cana"+"a" undoes to "cana", then "n" appends directly: "canan".
-    // (The one-shot `compose()` unit test on the full 6-key raw buffer gives
-    // a different literal — "canaan" — because it has no persistent latch
-    // state; seeing this diverge from the executor's "canan" is expected and
-    // documented in `compose::tests::high_cana_latch_survives_recompute_no_reentry`.)
+    // (The one-shot `compose()` on the full 6-key raw buffer agrees — the
+    // interior spent-undo fold recognizes the "canaa" undo event from raw
+    // alone; see `compose::tests::high_cana_latch_survives_recompute_no_reentry`.)
     let config = create_telex_config();
     let mut ex = PipelineExecutor::new(config);
     for ch in "canaan".chars() {

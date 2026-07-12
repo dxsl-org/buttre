@@ -255,10 +255,18 @@ fn is_compound_trigger(mark: char, opts: &ComposeOpts) -> bool {
 }
 
 /// Find the char index of "uo" in a lowercase string.
+///
+/// A "u" directly after "q" is the onset glide of `qu`, never the first half
+/// of a `ươ` nucleus (Vietnamese has no `qươ` — `quơ`/`quờ`/`quớt` all keep
+/// the plain `u`), so that pair is skipped and the mark falls through to the
+/// single-vowel o→ơ transform: "quo7t"→"quơt", not the invalid "qươt".
 fn find_uo_pos(lower: &str) -> Option<usize> {
     let chars: Vec<char> = lower.chars().collect();
-    (0..chars.len().saturating_sub(1))
-        .find(|&i| normalize_vowel(chars[i]) == 'u' && normalize_vowel(chars[i + 1]) == 'o')
+    (0..chars.len().saturating_sub(1)).find(|&i| {
+        normalize_vowel(chars[i]) == 'u'
+            && normalize_vowel(chars[i + 1]) == 'o'
+            && (i == 0 || chars[i - 1] != 'q')
+    })
 }
 
 /// True when `ch` is 'ư' (already has the u-horn diacritic).
@@ -340,6 +348,22 @@ mod tests {
         let opts = telex_opts();
         let result = apply_transforms("thuo", &[tm('w', 4)], &opts);
         assert_eq!(result, "thuơ");
+    }
+
+    #[test]
+    fn quo_w_has_coda_transforms_o_only() {
+        // "quowt": the u belongs to the onset "qu" — the compound rule must
+        // not claim it ("qươt" has no valid onset); only o→ơ applies.
+        let opts = telex_opts();
+        let result = apply_transforms("quot", &[tm('w', 3)], &opts);
+        assert_eq!(result, "quơt");
+    }
+
+    #[test]
+    fn quo_w_no_coda_transforms_o_only() {
+        let opts = telex_opts();
+        let result = apply_transforms("quo", &[tm('w', 3)], &opts);
+        assert_eq!(result, "quơ");
     }
 
     #[test]

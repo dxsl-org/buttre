@@ -211,54 +211,62 @@ pub fn check_fallback(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
     FallbackResult::not_handled()
 }
 
-// ── Interior spent-tone-undo fold (step 1.5 of `compose_internal`) ─────────────
+// ── Interior spent-undo fold (step 1.5 of `compose_internal`) ──────────────────
 
-/// Detect a deliberate tone undo that fired EARLIER in `raw` — a contiguous
-/// same-tone-key pair no longer at the tail because more keys were typed
-/// after it ("resse", "tesst", "resset") — and fold everything after the
-/// undo event as a literal append.
+/// Detect a deliberate undo — tone OR transform — that fired EARLIER in
+/// `raw` (a contiguous same-key pair no longer at the tail because more keys
+/// were typed after it: "resse", "resset", "rowws", "towwns") and fold
+/// everything after the undo event as a literal append.
 ///
 /// ## Why this exists
 ///
-/// [`check_fallback`] is tail-anchored: it classifies "ress" as an undo, but
-/// the moment the next key arrives ("resse") no detector matches, `segment`
-/// collects BOTH `s` keys into `tones`, and step 4's last-tone-wins
-/// resurrects the very tone the user deliberately removed — "resse"
-/// recomposed to attested "rế" (the non-adjacent `e..e` mark supplying the
-/// ê), which then passed every `should_unlatch` condition and overwrote the
-/// displayed "res". Unikey semantics say the undo is FINAL for the rest of
-/// the word (multi-level toggle, module doc): once the pair fires, later
-/// keys append literally until the word boundary.
+/// [`check_fallback`] is tail-anchored: it classifies "ress"/"roww" as an
+/// undo, but the moment the next key arrives no detector matches, `segment`
+/// re-collects the spent keys as live marks, and the very tone or transform
+/// the user removed resurrects:
+/// - tone pair: "resse" recomposed to attested "rế" (last-tone-wins re-fired
+///   the spent `s`, the non-adjacent `e..e` mark supplying the ê);
+/// - transform toggle: "rowws" recomposed to attested "rớ" (the spent second
+///   `w` re-fired ơ, the trailing `s` consumed as tone) — which then passed
+///   every `should_unlatch` condition and overwrote the displayed literal,
+///   making "reset"/"rows"/"towns" untypeable.
+///
+/// Unikey semantics say the undo is FINAL for the rest of the word
+/// (multi-level toggle, module doc): once the pair fires, later keys append
+/// literally until the word boundary.
 ///
 /// This fold makes `compose()` itself see that history — the pure
 /// recompute now agrees with the executor's live latched-append display
-/// ("resset" → "reset"), so the un-latch probe, the word-boundary closed
-/// projection, and any fresh replay all derive the same text from raw. The
-/// `latch_from_undo` guard in `PipelineExecutor::boundary_repair` remains as
-/// a second line of defense, but the closed projection no longer contradicts
-/// the displayed text for this class in the first place.
+/// ("resset" → "reset", "rowws" → "rows"), so the un-latch probe, the
+/// word-boundary closed projection, and any fresh replay all derive the same
+/// text from raw. The `latch_from_undo` guard in
+/// `PipelineExecutor::boundary_repair` remains as a second line of defense,
+/// but the closed projection no longer contradicts the displayed text for
+/// this class in the first place.
 ///
 /// ## Detection rule
 ///
 /// The EARLIEST interior pair wins (a later "pair" is inside the literal
 /// zone of the first undo — "asssb" folds at "ass", appending "sb"). A pair
 /// qualifies only when:
-/// - both keys (lowercased) are the SAME tone key, and
-/// - at least one vowel precedes the pair (a tone key with no nucleus is a
-///   literal consonant in `segment`'s classification — English "ss"/"ff"
-///   onsets never qualify), and
+/// - both keys (lowercased) are the SAME key, and that key is either a tone
+///   key with at least one vowel before the pair (a tone key with no nucleus
+///   is a literal consonant in `segment`'s classification — English
+///   "ss"/"ff" onsets never qualify) or a transform trigger char (covers the
+///   `[o,w,w]` / `[a,a,a]` toggle shapes and the non-adjacent retype pair),
+///   and
 /// - [`check_fallback`] on the prefix ENDING at the pair actually fires —
-///   this reuses the full visibility gate, so English words whose tone never
-///   displayed ("glass": "glá" has an invalid onset) are untouched, while
-///   words whose tone WAS on screen ("res" → "ré") keep Unikey undo
-///   semantics.
+///   this reuses the full visibility/attestation gates, so English words
+///   whose mark never displayed ("glass": "glá" has an invalid onset;
+///   "vieet"'s `ee` is a first-time doubling, not an undo) are untouched,
+///   while words whose mark WAS on screen keep Unikey undo semantics.
 ///
 /// Deliberately NOT part of [`check_fallback`]/[`is_last_event_undo`]: those
 /// answer "is the LAST event an undo" (P2's un-latch condition (d), P5's
 /// commit signal) — a word in the post-undo literal zone is not itself a
 /// just-fired undo event (`parity_fold_dessign_undo_fires_at_dess_not_full_word`
 /// pins that distinction).
-pub(super) fn check_spent_tone_undo(
+pub(super) fn check_spent_undo(
     raw: &[char],
     opts: &ComposeOpts,
     allow_nonadjacent: bool,
@@ -267,13 +275,14 @@ pub(super) fn check_spent_tone_undo(
     // strictly interior — a trailing pair is step 1's (check_fallback's) job.
     for i in 1..raw.len().saturating_sub(1) {
         let k = raw[i].to_ascii_lowercase();
-        if raw[i - 1].to_ascii_lowercase() != k || !opts.tone_map.contains_key(&k) {
+        if raw[i - 1].to_ascii_lowercase() != k {
             continue;
         }
-        if !raw[..i - 1]
-            .iter()
-            .any(|&c| is_vowel(c.to_ascii_lowercase()))
-        {
+        let tone_candidate = opts.tone_map.contains_key(&k)
+            && raw[..i - 1]
+                .iter()
+                .any(|&c| is_vowel(c.to_ascii_lowercase()));
+        if !tone_candidate && !is_transform_trigger_char(k, opts) {
             continue;
         }
         let fb = check_fallback(&raw[..=i], opts, allow_nonadjacent);
@@ -696,9 +705,22 @@ fn recompute_prefix_marks(
 /// Used by the tone-undo path to reconstruct the transformed base vowels
 /// (e.g. `[a, 6]` → `"â"`) before appending the literal tone key suffix.
 ///
-/// Any tone keys that `segment()` collects from `raw` are intentionally
-/// discarded — when this function is called, the caller has already decided
-/// that all tone marks in `raw` should be stripped (the undo has fired).
+/// The undo has fired: NO tone may remain in the output. But an undo means
+/// "give me my keystrokes back", so earlier ALPHABETIC tone-key characters
+/// in `raw` — Telex r/s/f/x/j the last-wins rule had overridden or that
+/// never applied — must come back as LITERAL letters at their typed
+/// positions, never silently vanish (same "one keystroke must never vanish"
+/// rule the visibility gate pins for "glass"/"fanss"): "meterss" keeps its
+/// `r` and restores "meters"; before this, the `r` was collected as a tone
+/// and then discarded → "metes". Segmenting with the alphabetic tone keys
+/// removed from the map does exactly that — they stay base letters,
+/// transforms still extract normally.
+///
+/// NON-alphabetic tone keys (VNI digits 1–5) are pure trigger characters
+/// with no letter value, so they keep the collect-and-discard behavior:
+/// surfacing a superseded digit as literal text mid-word ("na1m55" →
+/// "na1m5") would be garbage, not a restored keystroke — the old "nam5"
+/// stands.
 ///
 /// `allow_nonadjacent=false` recurses at most once (mirrors
 /// `compose_internal`'s demote bound): the recursive call passes `false`
@@ -707,7 +729,18 @@ fn apply_transforms_only(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bo
     if raw.is_empty() {
         return String::new();
     }
-    let seg = segment::segment(raw, opts, allow_nonadjacent);
+    let nonalpha_tone_map: std::collections::HashMap<char, ToneMark> = opts
+        .tone_map
+        .iter()
+        .filter(|(k, _)| !k.is_alphabetic())
+        .map(|(&k, &v)| (k, v))
+        .collect();
+    let letters_literal_opts = ComposeOpts {
+        tone_enabled: !nonalpha_tone_map.is_empty(),
+        tone_map: std::sync::Arc::new(nonalpha_tone_map),
+        ..opts.clone()
+    };
+    let seg = segment::segment(raw, &letters_literal_opts, allow_nonadjacent);
     let (text, applied) = transform::apply_transforms(&seg.base, &seg.transforms, opts);
     // `closed=false` (open projection) always: these are mid-word undo/toggle
     // PREFIX reconstructions (detecting "was this raw tail a just-fired undo
@@ -934,6 +967,51 @@ mod tests {
             result.text, "ơ4",
             "o744: should keep ơ and strip tone to give ơ4"
         );
+    }
+
+    #[test]
+    fn tone_undo_restores_alphabetic_tone_keys_as_literal() {
+        // "meterss": the trailing double-s undo reconstructs the prefix
+        // "meter" — the overridden alphabetic tone key 'r' must come back as
+        // a literal letter, never be collected-then-discarded ("metes" ate a
+        // keystroke). Needs the full tone set ('r' = hook, like the shipped
+        // telex preset) for "meters" to compose the visible "mết" frame.
+        let opts = {
+            let mut cfg = PipelineConfig::new("telex");
+            cfg.add_transform("aa", "â");
+            cfg.add_transform("ee", "ê");
+            cfg.add_transform("oo", "ô");
+            cfg.add_transform("ow", "ơ");
+            cfg.add_transform("uw", "ư");
+            cfg.add_transform("dd", "đ");
+            cfg.add_tone('s', ToneMark::Acute);
+            cfg.add_tone('f', ToneMark::Grave);
+            cfg.add_tone('r', ToneMark::Hook);
+            cfg.add_tone('x', ToneMark::Tilde);
+            cfg.add_tone('j', ToneMark::Dot);
+            ComposeOpts::from_config(&cfg)
+        };
+        let raw: Vec<char> = "meterss".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled, "meterss must fire the double-s undo");
+        assert_eq!(result.text, "meters", "the 'r' keystroke must not vanish");
+    }
+
+    #[test]
+    fn vni_tone_undo_still_discards_superseded_digit_tone_keys() {
+        // Digit tone keys are pure triggers with no letter value: a
+        // superseded '1' must NOT resurface as literal text mid-word
+        // ("na1m55" → "nam5", never "na1m5").
+        let opts = vni_opts();
+        let raw: Vec<char> = "na1m55".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled, "na1m55 must fire the double-5 undo");
+        assert_eq!(result.text, "nam5", "superseded digit stays discarded");
+
+        let raw: Vec<char> = "vie65t11".chars().collect();
+        let result = check_fallback(&raw, &opts, true);
+        assert!(result.is_handled, "vie65t11 must fire the double-1 undo");
+        assert_eq!(result.text, "viêt1", "ê transform kept, digits discarded");
     }
 
     #[test]

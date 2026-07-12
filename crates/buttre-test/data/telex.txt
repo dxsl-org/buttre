@@ -185,7 +185,6 @@ chowi, chơi
 chuw, chư
 chuwa, chưa
 chuwn, chưn
-chwowng, chương
 chuowng, chương
 chuwowng, chương
 chuwowcs, chước
@@ -2411,7 +2410,6 @@ uwowms, ướm
 uomws, ướm
 uotws, ướt
 uwowts, ướt
-wowts, ướt
 ar, ả
 aams, ấm
 aans, ấn
@@ -2442,3 +2440,5 @@ ngaos, ngáo
 laayf, lầy
 khum, khum
 toang, toang
+quowts, quớt
+quowt, quơt
