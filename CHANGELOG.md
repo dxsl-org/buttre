@@ -4,6 +4,7 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- app: cửa sổ Cấu hình thêm tab "Từ đã học" (bảng xem/xóa âm tiết đã học, "Quên tất cả", vẫn giữ nút mở tệp gốc) và tab "Gõ tắt" (bảng thêm/sửa/xóa/bật-tắt macro, cảnh báo không chặn khi gõ tắt trùng một âm tiết tiếng Việt thật — điểm khác biệt so với mọi bộ gõ Việt khác)
 - app: thêm cửa sổ Cấu hình native (`buttre --config`, Slint) — tab Chung điều khiển kiểu gõ mặc định, tự động khởi động, chế độ xóa lùi, học thông minh, gõ tắt; lưu là áp dụng ngay cho tray đang chạy (không cần khởi động lại), kể cả khi tray tự đổi cùng lúc; single-instance; process riêng biệt (crash cửa sổ config không ảnh hưởng gõ chữ)
 - core: `Settings::save`/`LearningStore::write_atomic`/`MacroStore::write_atomic` giờ dùng tên file tạm duy nhất theo từng lần gọi (không chỉ theo PID) — tránh race giữa nhiều tiến trình (config window + tray) lẫn nhiều luồng chạy song song trong cùng tiến trình (test suite)
 - core: gộp logic autostart vào crate `buttre-autostart` dùng chung giữa tray và cửa sổ config

@@ -15,9 +15,14 @@
 //! already wired for `learning.toml`/`macros.toml`) picks up the change and
 //! re-applies it live.
 
+use buttre_core::state::learning::LearningStore;
+use buttre_core::state::macros::MacroStore;
 use buttre_core::state::Settings;
 use buttre_core::vietnamese::get_custom_dir;
 use buttre_core::Config as KeyboardConfig;
+
+mod learned_adapter;
+mod macro_adapter;
 
 // `slint::include_modules!()` splices in `build.rs`/`slint-build`'s
 // generated Rust — code this crate does not author or control. Slint emits
@@ -82,6 +87,55 @@ fn discover_methods() -> Vec<MethodChoice> {
         }
     }
     methods
+}
+
+/// Open `path` in the platform's default editor — mirrors
+/// `buttre-platform/src/main.rs`'s `open_learning_file`/`open_macros_file`
+/// (duplicated rather than shared: it's three lines, and sharing it would
+/// mean depending on `buttre-platform`, which this crate deliberately does
+/// not, to keep winit-0.29 out of the `--config` code path).
+fn open_in_editor(path: &std::path::Path) {
+    let result = if cfg!(target_os = "windows") {
+        std::process::Command::new("notepad.exe").arg(path).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(path).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(path).spawn()
+    };
+    if let Err(e) = result {
+        eprintln!("cannot open {}: {e:?}", path.display());
+    }
+}
+
+fn learned_word_row_to_slint(r: &learned_adapter::LearnedWordRow) -> LearnedWordRow {
+    LearnedWordRow {
+        word: r.word.as_str().into(),
+        count: r.count as i32,
+    }
+}
+
+fn macro_row_to_slint(r: &macro_adapter::MacroRow) -> MacroRow {
+    MacroRow {
+        trigger: r.trigger.as_str().into(),
+        expand: r.expand.as_str().into(),
+        enabled: r.enabled,
+    }
+}
+
+fn refresh_learned_words(window: &ConfigWindow) {
+    let rows: Vec<LearnedWordRow> = learned_adapter::load_rows()
+        .iter()
+        .map(learned_word_row_to_slint)
+        .collect();
+    window.set_learned_words(slint::ModelRc::new(slint::VecModel::from(rows)));
+}
+
+fn refresh_macro_rows(window: &ConfigWindow) {
+    let rows: Vec<MacroRow> = macro_adapter::load_rows()
+        .iter()
+        .map(macro_row_to_slint)
+        .collect();
+    window.set_macro_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
 }
 
 /// Entry point called by `buttre-platform`'s `--config` arg-dispatch arm.
@@ -152,6 +206,85 @@ pub fn run() -> anyhow::Result<()> {
 
         if let Err(e) = new_settings.save() {
             eprintln!("failed to save settings.toml: {e:?}");
+        }
+    });
+
+    // ── Từ đã học ─────────────────────────────────────────────────────────
+    refresh_learned_words(&window);
+
+    let weak = window.as_weak();
+    window.on_delete_learned_word(move |word| {
+        let Some(window) = weak.upgrade() else { return };
+        if let Err(e) = learned_adapter::delete_word(&word) {
+            eprintln!("failed to delete learned word: {e:?}");
+        }
+        refresh_learned_words(&window);
+    });
+
+    let weak = window.as_weak();
+    window.on_clear_learned_words(move || {
+        let Some(window) = weak.upgrade() else { return };
+        if let Err(e) = learned_adapter::clear_all() {
+            eprintln!("failed to clear learned words: {e:?}");
+        }
+        refresh_learned_words(&window);
+    });
+
+    window.on_open_learning_file(|| {
+        if let Ok(path) = LearningStore::get_path() {
+            open_in_editor(&path);
+        }
+    });
+
+    // ── Gõ tắt ────────────────────────────────────────────────────────────
+    refresh_macro_rows(&window);
+
+    let weak = window.as_weak();
+    window.on_save_macro(move |old_trigger, new_trigger, expand, enabled| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let result = if old_trigger.is_empty() {
+            macro_adapter::add(&new_trigger, &expand, enabled)
+        } else {
+            macro_adapter::edit(&old_trigger, &new_trigger, &expand, enabled)
+        };
+        match result {
+            Ok(warning) => {
+                window.set_macro_form_is_error(false);
+                window.set_macro_form_message(warning.map(|w| w.0).unwrap_or_default().into());
+                refresh_macro_rows(&window);
+                true
+            }
+            Err(e) => {
+                window.set_macro_form_is_error(true);
+                window.set_macro_form_message(e.0.into());
+                false
+            }
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_delete_macro(move |trigger| {
+        let Some(window) = weak.upgrade() else { return };
+        if let Err(e) = macro_adapter::delete(&trigger) {
+            eprintln!("failed to delete macro: {e:?}");
+        }
+        refresh_macro_rows(&window);
+    });
+
+    let weak = window.as_weak();
+    window.on_toggle_macro_enabled(move |trigger, enabled| {
+        let Some(window) = weak.upgrade() else { return };
+        if let Err(e) = macro_adapter::set_enabled(&trigger, enabled) {
+            eprintln!("failed to toggle macro: {e:?}");
+        }
+        refresh_macro_rows(&window);
+    });
+
+    window.on_open_macros_file(|| {
+        if let Ok(path) = MacroStore::get_path() {
+            open_in_editor(&path);
         }
     });
 

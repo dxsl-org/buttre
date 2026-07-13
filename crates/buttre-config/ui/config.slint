@@ -1,11 +1,22 @@
-import { TabWidget, ComboBox, CheckBox, Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { TabWidget, ComboBox, CheckBox, Button, LineEdit, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+export struct LearnedWordRow {
+    word: string,
+    count: int,
+}
+
+export struct MacroRow {
+    trigger: string,
+    expand: string,
+    enabled: bool,
+}
 
 export component ConfigWindow inherits Window {
     title: "buttre — Cấu hình";
-    preferred-width: 460px;
-    preferred-height: 340px;
-    min-width: 420px;
-    min-height: 300px;
+    preferred-width: 520px;
+    preferred-height: 420px;
+    min-width: 460px;
+    min-height: 360px;
 
     // Mirrors `buttre_core::state::Settings` field-for-field — `run()` sets
     // these from `Settings::load()` and reads them back in `on-save`.
@@ -19,6 +30,32 @@ export component ConfigWindow inherits Window {
     // `run()` handles this: build a `Settings` from the properties above and
     // atomically save it. Fired by the "Lưu" button.
     callback save-settings();
+
+    // ── Từ đã học ─────────────────────────────────────────────────────────
+    in property <[LearnedWordRow]> learned-words: [];
+    callback delete-learned-word(string);
+    callback clear-learned-words();
+    callback open-learning-file();
+
+    // ── Gõ tắt ────────────────────────────────────────────────────────────
+    in property <[MacroRow]> macro-rows: [];
+    // (old-trigger, new-trigger, expand, enabled) -> success. Add if
+    // old-trigger is empty, else rename/edit the row whose CURRENT trigger
+    // is old-trigger. Rust sets `macro-form-message`/`-is-error` BEFORE
+    // returning; the form only clears on `true`.
+    callback save-macro(string, string, string, bool) -> bool;
+    callback delete-macro(string);
+    callback toggle-macro-enabled(string, bool);
+    callback open-macros-file();
+    in property <string> macro-form-message: "";
+    in property <bool> macro-form-is-error: false;
+    // Purely local UI state (the add/edit form below the macro table) —
+    // never touched from Rust. Empty `editing-trigger` = "add new" mode;
+    // non-empty = editing the row whose CURRENT trigger matches it.
+    property <string> editing-trigger: "";
+    property <string> form-trigger: "";
+    property <string> form-expand: "";
+    property <bool> form-enabled: true;
 
     VerticalBox {
         TabWidget {
@@ -56,17 +93,130 @@ export component ConfigWindow inherits Window {
             Tab {
                 title: "Từ đã học";
                 VerticalBox {
-                    Text {
-                        text: "Bảng xem/xóa từ đã học sẽ có ở giai đoạn sau.\nHiện tại: menu tray → \"Từ đã học\" để mở learning.toml.";
-                        wrap: word-wrap;
+                    ScrollView {
+                        VerticalLayout {
+                            for row in root.learned-words: HorizontalBox {
+                                Text {
+                                    text: row.word;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: row.count + "x";
+                                    color: gray;
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Xóa";
+                                    clicked => { root.delete-learned-word(row.word); }
+                                }
+                            }
+                        }
+                    }
+                    if root.learned-words.length == 0: Text {
+                        text: "Chưa học từ nào.";
+                        color: gray;
+                    }
+                    HorizontalBox {
+                        Button {
+                            text: "Quên tất cả";
+                            clicked => { root.clear-learned-words(); }
+                        }
+                        Button {
+                            text: "Mở tệp gốc";
+                            clicked => { root.open-learning-file(); }
+                        }
                     }
                 }
             }
             Tab {
                 title: "Gõ tắt";
                 VerticalBox {
+                    ScrollView {
+                        VerticalLayout {
+                            for row in root.macro-rows: HorizontalBox {
+                                Text {
+                                    text: row.trigger;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: row.expand;
+                                    horizontal-stretch: 2;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                CheckBox {
+                                    checked: row.enabled;
+                                    toggled => { root.toggle-macro-enabled(row.trigger, self.checked); }
+                                }
+                                Button {
+                                    text: "Sửa";
+                                    clicked => {
+                                        editing-trigger = row.trigger;
+                                        form-trigger = row.trigger;
+                                        form-expand = row.expand;
+                                        form-enabled = row.enabled;
+                                    }
+                                }
+                                Button {
+                                    text: "Xóa";
+                                    clicked => { root.delete-macro(row.trigger); }
+                                }
+                            }
+                        }
+                    }
+                    if root.macro-rows.length == 0: Text {
+                        text: "Chưa có gõ tắt nào.";
+                        color: gray;
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: gray;
+                    }
                     Text {
-                        text: "Bảng thêm/sửa/xóa gõ tắt sẽ có ở giai đoạn sau.\nHiện tại: menu tray → \"Quản lý gõ tắt\" để mở macros.toml.";
+                        text: editing-trigger == "" ? "Thêm gõ tắt mới:" : "Đang sửa \"" + editing-trigger + "\":";
+                        font-weight: 700;
+                    }
+                    HorizontalBox {
+                        LineEdit {
+                            placeholder-text: "gõ tắt (vd. vn)";
+                            text <=> form-trigger;
+                            width: 120px;
+                        }
+                        LineEdit {
+                            placeholder-text: "thay bằng (vd. Việt Nam)";
+                            text <=> form-expand;
+                            horizontal-stretch: 1;
+                        }
+                        CheckBox {
+                            text: "Bật";
+                            checked <=> form-enabled;
+                        }
+                        Button {
+                            text: editing-trigger == "" ? "Thêm" : "Lưu";
+                            clicked => {
+                                if (root.save-macro(editing-trigger, form-trigger, form-expand, form-enabled)) {
+                                    editing-trigger = "";
+                                    form-trigger = "";
+                                    form-expand = "";
+                                    form-enabled = true;
+                                }
+                            }
+                        }
+                        if editing-trigger != "": Button {
+                            text: "Hủy";
+                            clicked => {
+                                editing-trigger = "";
+                                form-trigger = "";
+                                form-expand = "";
+                                form-enabled = true;
+                            }
+                        }
+                    }
+                    if root.macro-form-message != "": Text {
+                        text: root.macro-form-message;
+                        color: root.macro-form-is-error ? red : darkorange;
                         wrap: word-wrap;
                     }
                 }

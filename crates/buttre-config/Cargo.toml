@@ -30,6 +30,7 @@ slint = { version = "1.9", default-features = false, features = [
     "renderer-femtovg",
 ] }
 buttre-core = { path = "../buttre-core" }
+buttre-engine = { path = "../buttre-engine" }
 buttre-autostart = { path = "../buttre-autostart" }
 
 [build-dependencies]
