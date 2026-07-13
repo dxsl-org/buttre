@@ -24,12 +24,12 @@ fn test_engine_basic() {
     let mut engine = VietnameseEngine::new(VietnameseMode::Telex);
 
     // Test basic transformation
-    let action = engine.process_key('a');
+    let actions = engine.process_key('a');
     // First 'a' should update composition with 'a'
-    assert!(matches!(
-        action,
+    assert!(actions.iter().all(|a| matches!(
+        a,
         Action::UpdateComposition { .. } | Action::Commit(_) | Action::DoNothing
-    ));
+    )));
 }
 
 #[test]
@@ -38,8 +38,8 @@ fn test_mode_switch() {
 
     // Test Telex: a + s -> á
     engine.process_key('a');
-    let action = engine.process_key('s');
-    assert!(matches!(action, Action::UpdateComposition { .. }));
+    let actions = engine.process_key('s');
+    assert!(actions.iter().any(|a| matches!(a, Action::UpdateComposition { .. })));
     assert_eq!(engine.buffer_content(), "á");
 
     // Switch to VNI
@@ -48,9 +48,34 @@ fn test_mode_switch() {
 
     // Test VNI: a + 1 -> á
     engine.process_key('a');
-    let action = engine.process_key('1');
-    assert!(matches!(action, Action::UpdateComposition { .. }));
+    let actions = engine.process_key('1');
+    assert!(actions.iter().any(|a| matches!(a, Action::UpdateComposition { .. })));
     assert_eq!(engine.buffer_content(), "á");
+}
+
+/// Regression for issue #4: `Keyboard::process` can return
+/// `[ConfirmComposition(word), Commit(separator)]` for a single keystroke
+/// (a punctuation/space key that both closes the current word run AND is
+/// itself the character typed). `process_key` must surface both actions —
+/// dropping the second is exactly how "xin." lost its trailing dot.
+#[test]
+fn test_process_key_surfaces_confirm_and_trailing_separator() {
+    let mut engine = VietnameseEngine::new(VietnameseMode::Telex);
+    engine.process_key('x');
+    engine.process_key('i');
+    engine.process_key('n');
+    let actions = engine.process_key('.');
+
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::ConfirmComposition(_))),
+        "expected a ConfirmComposition action, got {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::Commit(text) if text == ".")),
+        "the trailing separator must not be dropped, got {actions:?}"
+    );
 }
 
 #[test]

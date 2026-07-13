@@ -80,22 +80,24 @@ impl VietnameseEngine {
         }
     }
 
-    /// Process a key press
-    /// Returns first action (main typing action), ignoring candidate UI actions
-    pub fn process_key(&mut self, ch: char) -> Action {
+    /// Process a key press.
+    ///
+    /// Returns every action the engine produced for this key, in order —
+    /// callers MUST apply all of them. A closed word run followed by a
+    /// separator (e.g. `"xin."`) yields `[ConfirmComposition("xin"),
+    /// Commit(".")]`; dropping the trailing action silently swallows the
+    /// separator (issue #4).
+    pub fn process_key(&mut self, ch: char) -> Vec<Action> {
         if let Some(ref mut kb) = self.keyboard {
             match kb.process(ch) {
-                Ok(actions) => {
-                    // Take first action (main typing action)
-                    actions.into_iter().next().unwrap_or(Action::DoNothing)
-                }
+                Ok(actions) => actions,
                 Err(e) => {
                     tracing::warn!("Keyboard process error: {}", e);
-                    Action::DoNothing
+                    vec![Action::DoNothing]
                 }
             }
         } else {
-            Action::DoNothing
+            vec![Action::DoNothing]
         }
     }
 

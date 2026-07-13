@@ -4,6 +4,7 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- windows: sửa TSF nuốt ký tự phân giới ở cuối composition (`xin.` ra `xin`, dấu `.` biến mất) — `VietnameseEngine::process_key` trước đây chỉ lấy action đầu tiên trong `Vec<Action>`, bỏ luôn `Commit(dấu phân giới)` đi kèm `ConfirmComposition`; giờ áp dụng đủ toàn bộ vector. Đồng thời vá race ẩn do fix này mở ra: `write_text` gộp các lần ghi liên tiếp qua `pending_edit` để tối ưu, nhưng nếu session ghi từ vừa xác nhận chưa kịp chạy thì lần ghi dấu phân giới kế tiếp sẽ ghi đè lên nó thay vì tạo session riêng — mất luôn cả từ. `end_composition` giờ luôn làm mới `pending_edit` trước khi trả về (đóng #4)
 - app: tab Giới thiệu trong cửa sổ Cấu hình có nội dung thật (phiên bản qua CARGO_PKG_VERSION, phím tắt, liên kết mở bằng trình duyệt mặc định) — thay MessageBox cũ đã xóa
 - docs: ADR-0002 — tray chỉ sở hữu chọn kiểu gõ, cửa sổ Cấu hình sở hữu mọi thứ còn lại
 - tray: gọn lại còn kiểu gõ + "Cấu hình…" + "Thoát" — Học thông minh/Tự động khởi động/Gõ tắt/Từ đã học/Quản lý gõ tắt/Hướng dẫn chuyển hết vào cửa sổ Cấu hình (mở qua "Cấu hình…", process riêng); xóa MessageBox hướng dẫn cũ

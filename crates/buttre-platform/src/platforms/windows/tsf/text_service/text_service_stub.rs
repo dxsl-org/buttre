@@ -178,6 +178,17 @@ impl TextService {
     pub fn end_composition(&self, context: &ITfContext) -> Result<()> {
         debug!("TextService::end_composition");
 
+        // Invalidate the write-coalescing slot: `write_text` reuses
+        // `pending_edit` while its `SetCompositionString` session is still
+        // queued (TF_ES_ASYNCDONTCARE may defer it past this call). Once a
+        // composition is ending, any LATER `write_text` call in this same
+        // keystroke (e.g. a `Commit` separator immediately after a
+        // `ConfirmComposition`, see issue #4) targets a NEW composition, not
+        // the one being closed — without this, that later call would silently
+        // overwrite the still-pending final text instead of queuing its own
+        // session, losing the confirmed word entirely.
+        *self.pending_edit.borrow_mut() = Weak::new();
+
         if let Some(composition) = self.composition.get() {
             let session = EndComposition::new(context.clone(), composition);
             let session_interface: ITfEditSession = session.into();
@@ -886,107 +897,116 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             // Normal character (including space and punctuation)
             else {
                 debug!("Processing normal key: '{}'", ch);
-                let action = self.this.vietnamese_engine.borrow_mut().process_key(ch);
-                debug!("Engine returned action: {:?}", action);
+                let actions = self.this.vietnamese_engine.borrow_mut().process_key(ch);
+                debug!("Engine returned {} action(s): {:?}", actions.len(), actions);
 
-                match action {
-                    Action::Replace {
-                        backspace_count,
-                        text,
-                    } => {
-                        debug!(
-                            "Vietnamese engine: backspace={}, text={}",
-                            backspace_count, text
-                        );
+                // Apply EVERY action in order, not just the first. A closed
+                // word run followed by a separator produces
+                // [ConfirmComposition(word), Commit(separator)] — stopping
+                // after the first action drops the separator on the floor
+                // (issue #4: "xin." -> "xin"). `handled` is the OR of every
+                // action's outcome: once any action is handled, TSF must not
+                // let the raw key fall through to the app too.
+                let mut handled = BOOL(0);
+                for action in actions {
+                    match action {
+                        Action::Replace {
+                            backspace_count,
+                            text,
+                        } => {
+                            debug!(
+                                "Vietnamese engine: backspace={}, text={}",
+                                backspace_count, text
+                            );
 
-                        if let Err(e) = self.this.write_text(
-                            &context,
-                            &text,
-                            text.chars().count(),
-                            sink.clone(),
-                        ) {
-                            debug!("Failed to write text: {:?}", e);
-                            return Ok(BOOL(0));
-                        }
+                            if let Err(e) = self.this.write_text(
+                                &context,
+                                &text,
+                                text.chars().count(),
+                                sink.clone(),
+                            ) {
+                                debug!("Failed to write text: {:?}", e);
+                                return Ok(BOOL(0));
+                            }
 
-                        Ok(BOOL(1)) // Handled
-                    }
-                    Action::UpdateComposition { text, cursor } => {
-                        debug!("UpdateComposition: text={}, cursor={}", text, cursor);
-                        if let Err(e) = self.this.write_text(&context, &text, cursor, sink.clone())
-                        {
-                            debug!("Failed to update composition: {:?}", e);
-                            return Ok(BOOL(0));
+                            handled = BOOL(1);
                         }
-                        Ok(BOOL(1))
-                    }
-                    Action::ConfirmComposition(text) => {
-                        debug!("ConfirmComposition: text={}", text);
-                        if let Err(e) = self.this.write_text(
-                            &context,
-                            &text,
-                            text.chars().count(),
-                            sink.clone(),
-                        ) {
-                            debug!("Failed to write final text: {:?}", e);
+                        Action::UpdateComposition { text, cursor } => {
+                            debug!("UpdateComposition: text={}, cursor={}", text, cursor);
+                            if let Err(e) = self.this.write_text(&context, &text, cursor, sink.clone())
+                            {
+                                debug!("Failed to update composition: {:?}", e);
+                                return Ok(BOOL(0));
+                            }
+                            handled = BOOL(1);
                         }
-                        if let Err(e) = self.this.end_composition(&context) {
-                            debug!("Failed to end composition: {:?}", e);
-                        }
-
-                        // Reset engine
-                        self.this.vietnamese_engine.borrow_mut().reset();
-
-                        Ok(BOOL(1))
-                    }
-                    Action::Commit(text) => {
-                        debug!("Commit: text={}", text);
-                        if let Err(e) = self.this.write_text(
-                            &context,
-                            &text,
-                            text.chars().count(),
-                            sink.clone(),
-                        ) {
-                            debug!("Failed to write text: {:?}", e);
-                        }
-                        if self.this.composition.is_started() {
+                        Action::ConfirmComposition(text) => {
+                            debug!("ConfirmComposition: text={}", text);
+                            if let Err(e) = self.this.write_text(
+                                &context,
+                                &text,
+                                text.chars().count(),
+                                sink.clone(),
+                            ) {
+                                debug!("Failed to write final text: {:?}", e);
+                            }
                             if let Err(e) = self.this.end_composition(&context) {
                                 debug!("Failed to end composition: {:?}", e);
                             }
+
+                            // Reset engine
+                            self.this.vietnamese_engine.borrow_mut().reset();
+
+                            handled = BOOL(1);
                         }
-                        self.this.vietnamese_engine.borrow_mut().reset();
-                        Ok(BOOL(1))
-                    }
-                    Action::DoNothing => {
-                        // If engine says DoNothing, but we are inside a composition,
-                        // we might need to commit the current composition and pass the key?
-                        // Or just pass the key and let TSF/App handle it.
-                        // However, if we are in composition, passing the key might insert it *inside* the composition
-                        // or corrupt state if the app doesn't know about composition.
-
-                        if self.this.composition.is_started() {
-                            // If we have an active composition and get a character that doesn't affect it (e.g. strange symbol),
-                            // we probably want to commit the composition first.
-                            // But usually buttre-core returns Commit or Confirm in that case.
-                            // If it returns DoNothing, it ignores it.
-
-                            debug!("Engine returned DoNothing inside composition - passing through key '{}'", ch);
-                        } else {
-                            debug!("Engine returned DoNothing - passing through key '{}'", ch);
+                        Action::Commit(text) => {
+                            debug!("Commit: text={}", text);
+                            if let Err(e) = self.this.write_text(
+                                &context,
+                                &text,
+                                text.chars().count(),
+                                sink.clone(),
+                            ) {
+                                debug!("Failed to write text: {:?}", e);
+                            }
+                            if self.this.composition.is_started() {
+                                if let Err(e) = self.this.end_composition(&context) {
+                                    debug!("Failed to end composition: {:?}", e);
+                                }
+                            }
+                            self.this.vietnamese_engine.borrow_mut().reset();
+                            handled = BOOL(1);
                         }
+                        Action::DoNothing => {
+                            // If engine says DoNothing, but we are inside a composition,
+                            // we might need to commit the current composition and pass the key?
+                            // Or just pass the key and let TSF/App handle it.
+                            // However, if we are in composition, passing the key might insert it *inside* the composition
+                            // or corrupt state if the app doesn't know about composition.
 
-                        Ok(BOOL(0))
-                    }
-                    // TODO: Implement candidate UI for TSF mode
-                    Action::ShowCandidates { .. } => {
-                        debug!("ShowCandidates - not yet implemented in TSF");
-                        Ok(BOOL(1))
-                    }
-                    Action::HideCandidates => {
-                        debug!("HideCandidates - not yet implemented in TSF");
-                        Ok(BOOL(1))
+                            if self.this.composition.is_started() {
+                                // If we have an active composition and get a character that doesn't affect it (e.g. strange symbol),
+                                // we probably want to commit the composition first.
+                                // But usually buttre-core returns Commit or Confirm in that case.
+                                // If it returns DoNothing, it ignores it.
+
+                                debug!("Engine returned DoNothing inside composition - passing through key '{}'", ch);
+                            } else {
+                                debug!("Engine returned DoNothing - passing through key '{}'", ch);
+                            }
+                        }
+                        // TODO: Implement candidate UI for TSF mode
+                        Action::ShowCandidates { .. } => {
+                            debug!("ShowCandidates - not yet implemented in TSF");
+                            handled = BOOL(1);
+                        }
+                        Action::HideCandidates => {
+                            debug!("HideCandidates - not yet implemented in TSF");
+                            handled = BOOL(1);
+                        }
                     }
                 }
+                Ok(handled)
             }
         } else {
             // Not a printable key, pass through

@@ -322,12 +322,12 @@ impl PipelineExecutor {
                         // Word-boundary final repair (event-sourcing-completion
                         // Phase 3): `input` (the separator that just triggered
                         // this PassThrough) is the moment of complete evidence
-                        // for the word about to be confirmed. TSF's
-                        // `VietnameseEngine::process_key` consumes only
-                        // `actions[0]`, and its Replace handler ignores
-                        // `backspace_count` — a separate Replace-then-Confirm
-                        // pair is unexecutable there, so the repair MUST be
-                        // folded directly into `ConfirmComposition`'s payload.
+                        // for the word about to be confirmed. The TSF stub's
+                        // Replace handler ignores `backspace_count` (it only
+                        // ever rewrites the live composition) — a separate
+                        // Replace-then-Confirm pair is unexecutable there, so
+                        // the repair MUST be folded directly into
+                        // `ConfirmComposition`'s payload.
                         let confirmed = self
                             .boundary_repair_excluding_last()
                             .unwrap_or_else(|| self.context.syllable_buffer.clone());

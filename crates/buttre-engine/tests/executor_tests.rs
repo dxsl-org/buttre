@@ -1938,11 +1938,12 @@ fn perf_latched_typing_and_backspace_storm_bounded() {
 
 // ── Phase 3: word-boundary final repair — TSF (composition) delivery ────────
 //
-// TSF's `VietnameseEngine::process_key` consumes only `actions[0]`, so the
-// repair MUST be folded directly into the FIRST action's payload
-// (`ConfirmComposition`) rather than delivered as a separate Replace. These
-// tests exercise `PipelineExecutor` directly with `use_composition = true`
-// (the TSF configuration), asserting on `actions[0]`.
+// The TSF stub's Replace handler ignores `backspace_count` (it only ever
+// rewrites the live composition), so a separate Replace-then-Confirm pair is
+// unexecutable there — the repair MUST be folded directly into the FIRST
+// action's payload (`ConfirmComposition`) rather than delivered as a separate
+// Replace. These tests exercise `PipelineExecutor` directly with
+// `use_composition = true` (the TSF configuration), asserting on `actions[0]`.
 
 fn vni_composition_config() -> PipelineConfig {
     let mut config = buttre_engine::pipeline::presets::vni_config();
