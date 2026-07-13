@@ -19,6 +19,7 @@ use anyhow::Result;
 use buttre_core::hotkey::{ButtreHotkeyManager, HotkeyAction};
 use buttre_core::keyboard::BackspaceMode;
 use buttre_core::state::learning::{LearningFile, LearningStore};
+use buttre_core::state::macros::MacroStore;
 use buttre_core::state::{Settings, StateObserver};
 use buttre_core::AppState;
 use buttre_core::Keyboard;
@@ -180,6 +181,85 @@ fn open_learning_file(store: &Arc<Mutex<LearningStore>>) {
     }
 }
 
+/// Watch macros.toml's directory for on-disk changes (config window / hand
+/// edit) — mirrors `watch_learning_file` exactly, same directory, different
+/// filename. Simpler than the learning watcher: nothing at the TYPING layer
+/// ever writes `macros.toml` (see `buttre_core::state::macros`'s module
+/// doc), so there is no own-write suppression concern for THAT writer.
+/// `open_macros_file`'s one-time seed-if-missing write is the sole
+/// exception — it fires this same watcher, but reloading an unchanged
+/// (still-empty) file is an idempotent no-op, so no suppression is needed
+/// there either.
+fn watch_macros_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    use notify::{RecursiveMode, Watcher};
+    let path = match MacroStore::get_path() {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("macros.toml path unresolved, hand-edit reload disabled: {e:?}");
+            return None;
+        }
+    };
+    let dir = path.parent()?.to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
+        return None;
+    }
+    let file_name = path.file_name()?.to_os_string();
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
+                {
+                    let _ = tx.send(());
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("macros.toml watcher failed, hand-edit reload disabled: {e:?}");
+                return None;
+            }
+        };
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+        warn!("macros.toml watch failed, hand-edit reload disabled: {e:?}");
+        return None;
+    }
+    Some(watcher)
+}
+
+/// Tray → "Gõ tắt": open macros.toml in the platform's default editor —
+/// mirrors `open_learning_file`. Writes an empty, self-documented file first
+/// when none exists yet, so the user always opens a real file.
+fn open_macros_file(store: &Arc<Mutex<MacroStore>>) {
+    let path = match MacroStore::get_path() {
+        Ok(p) => p,
+        Err(e) => {
+            error!("macros.toml path unresolved: {e:?}");
+            return;
+        }
+    };
+    if !path.exists() {
+        let file = store.lock().unwrap().snapshot_for_save();
+        if let Err(e) = MacroStore::write_atomic(&file) {
+            error!("cannot create macros.toml: {e:?}");
+            return;
+        }
+    }
+    let result = if cfg!(target_os = "windows") {
+        std::process::Command::new("notepad.exe").arg(&path).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&path).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&path).spawn()
+    };
+    if let Err(e) = result {
+        error!("cannot open macros.toml: {e:?}");
+    }
+}
+
 fn main() -> Result<()> {
     // Initialize tracing (handles both log crate and tracing crate)
     tracing_subscriber::fmt()
@@ -307,7 +387,9 @@ fn main() -> Result<()> {
         custom_items,
         hoc_thong_minh_item,
         khoi_dong_item,
+        go_tat_item,
         tu_da_hoc_item,
+        quan_ly_go_tat_item,
         huong_dan_item,
         thoat_item,
         ..
@@ -364,6 +446,23 @@ fn main() -> Result<()> {
     let _learning_watcher = watch_learning_file(learning_file_tx);
     let mut last_own_save = std::time::Instant::now();
     let mut learning_reload_pending = false;
+
+    // Shorthand/gõ tắt (ADR-0001 — a SEPARATE mechanism from personal
+    // learning, never merged into learning.toml). Simpler wiring than
+    // learning: read-only at the keyboard layer, so no save channel and no
+    // own-write suppression on the watcher — every fire is a real external
+    // edit (config window in a later phase, or a hand-edit today).
+    let mut shorthand_enabled = settings.shorthand;
+    let macros_store = Arc::new(Mutex::new(if shorthand_enabled {
+        MacroStore::load()
+    } else {
+        MacroStore::default()
+    }));
+    if shorthand_enabled {
+        keyboard_manager.set_macros(macros_store.clone());
+    }
+    let (macros_file_tx, macros_file_rx) = mpsc::channel::<()>();
+    let _macros_watcher = watch_macros_file(macros_file_tx);
 
     // Apply initial settings to keyboard
     if let Err(e) = keyboard_manager.set_method(&settings.input_method) {
@@ -540,6 +639,17 @@ fn main() -> Result<()> {
                     keyboard_manager.set_learning(learning_store.clone(), learning_tx.clone());
                 }
 
+                // macros.toml edited on disk (tray → "Gõ tắt" → hand-edit or
+                // a future config window): reload and re-inject live. No
+                // own-write suppression needed — nothing at the typing layer
+                // ever writes this file (see `state::macros`'s module doc),
+                // so every watcher fire is a genuine external edit.
+                if macros_file_rx.try_iter().count() > 0 && shorthand_enabled {
+                    info!("macros.toml changed on disk — reloading");
+                    *macros_store.lock().unwrap() = MacroStore::load();
+                    keyboard_manager.set_macros(macros_store.clone());
+                }
+
                 if let Some(action) = hotkey_manager.check_hotkey() {
                     match action {
                         HotkeyAction::Toggle => {
@@ -634,6 +744,20 @@ fn main() -> Result<()> {
                         }
                     } else if event.id == tu_da_hoc_item.id() {
                         open_learning_file(&learning_store);
+                    } else if event.id == go_tat_item.id() {
+                        shorthand_enabled = go_tat_item.is_checked();
+                        info!("Gõ tắt: {}", shorthand_enabled);
+                        if shorthand_enabled {
+                            *macros_store.lock().unwrap() = MacroStore::load();
+                            keyboard_manager.set_macros(macros_store.clone());
+                        } else {
+                            keyboard_manager.clear_macros();
+                        }
+                        if let Err(e) = app_state.lock().unwrap().set_shorthand(shorthand_enabled) {
+                            error!("Failed to persist shorthand: {:?}", e);
+                        }
+                    } else if event.id == quan_ly_go_tat_item.id() {
+                        open_macros_file(&macros_store);
                     } else {
                         let mut handled = false;
                         for (method_data, item) in &custom_items {

@@ -25,6 +25,11 @@ pub fn show_help_dialog() {
          của bạn vào learning.toml. Xem/sửa: menu \"Từ đã học\".\n\
          Bật/tắt: Tùy chọn → Học thông minh.\n\
          \n\
+         GÕ TẮT:\n\
+         Tự định nghĩa chuỗi gõ tắt (vd. vn → Việt Nam) trong macros.toml.\n\
+         Chỉ nổ khi gõ đúng nguyên cả từ. Đảo lại: Ctrl+Shift+Z.\n\
+         Xem/sửa: menu \"Quản lý gõ tắt\". Bật/tắt: Tùy chọn → Gõ tắt.\n\
+         \n\
          TÀI LIỆU & MÃ NGUỒN:\n\
          https://github.com/dxsl-org/buttre\n\
          \n\

@@ -21,9 +21,13 @@ pub struct MenuItems {
     pub hoc_thong_minh_item: CheckMenuItem,
     /// Tùy chọn → "Tự động khởi động": OS login autostart.
     pub khoi_dong_item: CheckMenuItem,
+    /// Tùy chọn → "Gõ tắt": live on/off for shorthand/macro expansion.
+    pub go_tat_item: CheckMenuItem,
     /// Root-level "Từ đã học": opens learning.toml in the default editor so
     /// the user can inspect and hand-edit what buttre has learned.
     pub tu_da_hoc_item: MenuItem,
+    /// Root-level "Quản lý gõ tắt": opens macros.toml in the default editor.
+    pub quan_ly_go_tat_item: MenuItem,
     pub huong_dan_item: MenuItem,
     pub thoat_item: MenuItem,
 }
@@ -209,9 +213,8 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     }
 
     // 4. Tùy chọn submenu — only REAL, working switches live here.
-    // (The old disabled "Tự động sửa lỗi chính tả"/"Gõ tắt" placeholders are
-    // gone: engine leniency intentionally does no spell-check, and gõ tắt —
-    // if built — gets its own macros.toml mechanism, per ADR-0001.)
+    // (The old disabled "Tự động sửa lỗi chính tả" placeholder is gone:
+    // engine leniency intentionally does no spell-check.)
     let tuy_chon_menu = Submenu::new("Tùy chọn", true);
     // "Học thông minh" — the personal-learning switch, checked from the
     // persisted setting; toggling it takes effect live (no restart).
@@ -220,12 +223,17 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     // "Tự động khởi động" — OS login autostart (registry Run key / XDG
     // autostart); registration is (re-)applied in main.rs.
     let khoi_dong_item = CheckMenuItem::new("Tự động khởi động", true, settings.startup, None);
+    // "Gõ tắt" — shorthand/macro expansion (deterministic, user-authored
+    // macros.toml — deliberately a SEPARATE mechanism from personal
+    // learning, see ADR-0001). Toggling it takes effect live.
+    let go_tat_item = CheckMenuItem::new("Gõ tắt", true, settings.shorthand, None);
     let _chuyen_ma_item = MenuItem::new("Chuyển mã", true, None);
     let huong_dan_item = MenuItem::new("Hướng dẫn", true, None);
-    let _ = tuy_chon_menu.append_items(&[&hoc_thong_minh_item, &khoi_dong_item]);
+    let _ = tuy_chon_menu.append_items(&[&hoc_thong_minh_item, &khoi_dong_item, &go_tat_item]);
 
     // 5. Other items
     let tu_da_hoc_item = MenuItem::new("Từ đã học", true, None);
+    let quan_ly_go_tat_item = MenuItem::new("Quản lý gõ tắt", true, None);
     let thoat_item = MenuItem::new("Thoát", true, None);
 
     // Assemble menu
@@ -244,6 +252,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
         &PredefinedMenuItem::separator(),
         &tuy_chon_menu,
         &tu_da_hoc_item,
+        &quan_ly_go_tat_item,
         &PredefinedMenuItem::separator(),
         &huong_dan_item,
         &thoat_item,
@@ -258,7 +267,9 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
         custom_items,
         hoc_thong_minh_item,
         khoi_dong_item,
+        go_tat_item,
         tu_da_hoc_item,
+        quan_ly_go_tat_item,
         huong_dan_item,
         thoat_item,
     };

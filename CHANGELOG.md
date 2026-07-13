@@ -4,10 +4,12 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- engine: thêm gõ tắt (macros.toml) — tự định nghĩa chuỗi gõ tắt (vd. vn → Việt Nam), chỉ nổ khi gõ đúng nguyên cả từ rồi sang dấu cách/dấu câu (không nổ giữa chừng, không nổ khi là một phần của từ khác); Ctrl+Shift+Z đảo về nguyên văn; cơ chế tách biệt hoàn toàn khỏi học cá nhân hóa (ADR-0001) — deterministic, tự tay định nghĩa, không suy luận
+- tray: thêm "Tùy chọn → Gõ tắt" bật/tắt gõ tắt ngay lập tức + menu "Quản lý gõ tắt" mở macros.toml để xem/tự sửa, tự nạp lại khi sửa tay
 - core: bất biến record-replay cho học cá nhân hóa (ADR-0001) — toggle literal trên raw dạng undo xóa pref cũ thay vì ghi pref không thể replay
 - test: guard hai-phiên chống lớp bug "học xong thì gõ khác đi" — gõ 10k từ Anh (double-key escape) + toàn bộ corpus telex qua 3 phiên chung learning store, output phải giống hệt, chạy trong CI
 - tray: thêm "Tùy chọn → Học thông minh" bật/tắt học cá nhân hóa ngay lập tức, không cần khởi động lại
-- tray: "Tự động khởi động" hoạt động thật — đăng ký/hủy autostart theo OS (Windows Run key, Linux XDG autostart), tự re-đăng ký khi exe đổi chỗ; bỏ 2 mục placeholder tắt sẵn ("Tự động sửa lỗi chính tả", "Gõ tắt")
+- tray: "Tự động khởi động" hoạt động thật — đăng ký/hủy autostart theo OS (Windows Run key, Linux XDG autostart), tự re-đăng ký khi exe đổi chỗ; bỏ mục placeholder tắt sẵn "Tự động sửa lỗi chính tả" (trái thiết kế leniency)
 - tray: thêm menu "Từ đã học" mở learning.toml để xem/tự sửa; file có hướng dẫn ngay đầu; sửa tay được nạp lại tự động khi buttre đang chạy
 - tool: `buttre-test explain <method> <raw> [--learning]` — chẩn đoán từng tầng (pref/overlay/undo/gate) vì sao một chuỗi phím ra kết quả đó, nạp được learning.toml thật của máy
 - docs: ADR-0001 học cá nhân hóa additive-only; hướng dẫn cập nhật hotkey Ctrl+Shift+Z và mục Học thông minh

@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use buttre_core::state::learning::{LearningFile, LearningStore};
+use buttre_core::state::macros::MacroStore;
 use buttre_core::{Keyboard, KeyboardBuilder};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
@@ -29,6 +30,11 @@ pub struct KeyboardManager {
     /// learning_enabled` gating at the call site in `main.rs` (event-
     /// sourcing-completion Phase 5).
     learning: Mutex<Option<LearningWiring>>,
+    /// `None` until `set_macros` is called — mirrors `Settings::shorthand`
+    /// gating at the call site in `main.rs`. Bare `Arc` (no bundling struct
+    /// needed): unlike learning, macros carry no save channel — the store is
+    /// read-only at the keyboard layer (see `buttre_core::state::macros`).
+    macros: Mutex<Option<Arc<Mutex<MacroStore>>>>,
 }
 
 impl KeyboardManager {
@@ -38,6 +44,7 @@ impl KeyboardManager {
             keyboard: Arc::new(RwLock::new(None)),
             current_method: Arc::new(Mutex::new("english".to_string())),
             learning: Mutex::new(None),
+            macros: Mutex::new(None),
         })
     }
 
@@ -78,6 +85,29 @@ impl KeyboardManager {
         if let Ok(mut guard) = self.keyboard.write() {
             if let Some(kb) = guard.as_mut() {
                 kb.clear_learning();
+            }
+        }
+    }
+
+    /// Wire the shorthand/gõ tắt store (mirrors [`Self::set_learning`]'s
+    /// gating and re-apply-on-switch pattern; the CALLER gates calling this
+    /// at all on `Settings::shorthand`).
+    pub fn set_macros(&self, store: Arc<Mutex<MacroStore>>) {
+        *self.macros.lock().unwrap() = Some(store.clone());
+        if let Ok(mut guard) = self.keyboard.write() {
+            if let Some(kb) = guard.as_mut() {
+                kb.set_macros(store);
+            }
+        }
+    }
+
+    /// Unwire shorthand at runtime (tray "Gõ tắt" off) — the exact inverse
+    /// of [`Self::set_macros`].
+    pub fn clear_macros(&self) {
+        *self.macros.lock().unwrap() = None;
+        if let Ok(mut guard) = self.keyboard.write() {
+            if let Some(kb) = guard.as_mut() {
+                kb.clear_macros();
             }
         }
     }
@@ -173,6 +203,12 @@ impl KeyboardManager {
         let wiring = self.learning.lock().unwrap().clone();
         if let Some(wiring) = wiring {
             keyboard.set_learning(wiring.store, wiring.save_tx);
+        }
+        // Same re-apply-on-switch story for shorthand — a fresh `Keyboard`
+        // always starts with `macros == None`.
+        let macros = self.macros.lock().unwrap().clone();
+        if let Some(store) = macros {
+            keyboard.set_macros(store);
         }
 
         *self.keyboard.write().unwrap() = Some(keyboard);

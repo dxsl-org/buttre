@@ -34,6 +34,7 @@
 
 mod app_state;
 pub mod learning;
+pub mod macros;
 mod observer;
 pub mod observers;
 mod settings;

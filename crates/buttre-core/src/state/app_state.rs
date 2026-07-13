@@ -131,6 +131,13 @@ impl AppState {
         self.settings.save()
     }
 
+    /// Persist the "Gõ tắt" (shorthand/macro expansion) switch — same
+    /// owner-object rationale as [`Self::set_learning_enabled`].
+    pub fn set_shorthand(&mut self, enabled: bool) -> anyhow::Result<()> {
+        self.settings.shorthand = enabled;
+        self.settings.save()
+    }
+
     /// Set the input method and notify observers
     ///
     /// This is the primary method for changing the input method. It will:

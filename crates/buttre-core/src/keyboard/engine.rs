@@ -5,6 +5,7 @@
 //! Uses buttre-engine pipeline for processing
 
 use crate::state::learning::{LearningFile, LearningStore, PreferKind};
+use crate::state::macros::MacroStore;
 use crate::Action;
 use buttre_engine::compose::{compose_closed, is_last_event_undo, ComposeOpts, Validator};
 use buttre_engine::pipeline::validation::{is_attested_overlay, SyllableStructure};
@@ -103,6 +104,29 @@ pub struct Keyboard {
     /// `scroll_out_overflow`, `reset`).
     toggle_map: HashMap<usize, bool>,
 
+    /// Shorthand/gõ tắt expansion cache (`crate::state::macros`): raw
+    /// char-index (exclusive end offset, same key space as `toggle_map`) →
+    /// the expansion text to render for that closed word run. Populated by
+    /// `expand_macros` for a newly-closed run whose raw exactly matches an
+    /// enabled trigger; consulted by `compose_window` with LOWER precedence
+    /// than `toggle_map` (a `Ctrl+Shift+Z` toggle always wins — see
+    /// `compose_window`'s doc), so reverting an expansion needs no special
+    /// casing in `toggle_last_word`.
+    ///
+    /// Same INVARIANT as `toggle_map` and mirrored at every one of its
+    /// mutation sites (`backspace_multiword`, `backspace_multiword_raw`,
+    /// `scroll_out_overflow`, `reset`) for the identical reason: any raw
+    /// mutation that isn't a pure append can renumber offsets, so a stale
+    /// entry must never attach to the wrong word.
+    macro_map: HashMap<usize, String>,
+
+    /// Shorthand/gõ tắt store handle (read-only at this layer — see
+    /// `crate::state::macros`'s module doc). `None` (the `Keyboard::new`
+    /// default) until `set_macros` is called; every consultation path is
+    /// then a no-op, byte-identical to `Settings::shorthand == false`. The
+    /// platform layer gates calling `set_macros` at all on that setting.
+    macros: Option<Arc<Mutex<MacroStore>>>,
+
     /// Pending learning signals for Phase 5's collector (see `ToggleSignal`).
     /// Only ever appended to by `toggle_last_word`; drained externally.
     toggle_signals: Vec<ToggleSignal>,
@@ -188,6 +212,8 @@ impl Keyboard {
             raw: Vec::new(),
             committed: String::new(),
             toggle_map: HashMap::new(),
+            macro_map: HashMap::new(),
+            macros: None,
             toggle_signals: Vec::new(),
             backspace_mode: BackspaceMode::default(),
             method,
@@ -231,6 +257,34 @@ impl Keyboard {
     pub fn clear_learning(&mut self) {
         self.learning = None;
         self.apply_learning_snapshot(buttre_engine::compose::LearningSnapshot::default());
+    }
+
+    /// Wire the shorthand/gõ tắt store (`Settings::shorthand`-gated, mirrors
+    /// `set_learning`'s gating). Unlike learning, there is no snapshot to
+    /// push and no save channel — the store is read-only at this layer (see
+    /// `crate::state::macros`'s module doc); the config window/hand-edit is
+    /// the only writer, picked up by the platform layer's file watcher
+    /// replacing this same `Arc`'s contents.
+    ///
+    /// Clears `macro_map`: the platform layer calls this again on every
+    /// hand-edit reload (a fresh `Arc` with new contents, same call), and an
+    /// already-expanded entry in the window must re-resolve against the NEW
+    /// store rather than keep rendering whatever the OLD store produced —
+    /// otherwise an edited/removed trigger's expansion would stick around
+    /// stale until the word scrolls out.
+    pub fn set_macros(&mut self, store: Arc<Mutex<MacroStore>>) {
+        self.macros = Some(store);
+        self.macro_map.clear();
+    }
+
+    /// Unwire shorthand — the runtime counterpart of never calling
+    /// [`Self::set_macros`]: `expand_macros` becomes a no-op, byte-identical
+    /// to `Settings::shorthand == false`. Also clears any already-expanded
+    /// entries so a mid-session disable doesn't leave stale expansions
+    /// rendering from a map that can no longer be refreshed.
+    pub fn clear_macros(&mut self) {
+        self.macros = None;
+        self.macro_map.clear();
     }
 
     /// Push a fresh learning snapshot to both the live executor's compose
@@ -413,6 +467,7 @@ impl Keyboard {
         self.scroll_out_overflow();
 
         let raw = self.raw.clone();
+        self.expand_macros(&raw);
         let window = self.compose_window(&raw);
         let new = format!("{}{}", self.committed, window);
         self.buffer = new.clone();
@@ -552,7 +607,9 @@ impl Keyboard {
         // OTHER, untouched words still in the window — but always correct;
         // the user just re-toggles. `backspace_multiword_raw` (below) is the
         // precise-invalidation counterpart for the pure-truncation case.
+        // `macro_map` shares the exact same invalidation story — mirror it.
         self.toggle_map.clear();
+        self.macro_map.clear();
 
         self.raw = self.find_window_backspace_raw(&raw, &target);
         let raw2 = self.raw.clone();
@@ -583,6 +640,7 @@ impl Keyboard {
         // raw length are stale — drop exactly those, keep the rest.
         let len = self.raw.len();
         self.toggle_map.retain(|&end, _| end <= len);
+        self.macro_map.retain(|&end, _| end <= len);
 
         let raw = self.raw.clone();
         let new_window = self.compose_window(&raw);
@@ -722,8 +780,9 @@ impl Keyboard {
         self.committed.clear();
         // Map invalidation (event-sourcing-completion Phase 4): a hard reset
         // discards `raw` entirely, so every toggle offset is stale by
-        // definition.
+        // definition. `macro_map` shares the same invalidation story.
         self.toggle_map.clear();
+        self.macro_map.clear();
         // Also drop any un-drained learning signals: a hard reset (Enter, mouse,
         // focus change) ends the editing session, so a pending signal whose word
         // never re-commits with a matching raw must not survive to be mis-matched
@@ -835,6 +894,16 @@ impl Keyboard {
                 .filter(|&(&end, _)| end > i)
                 .map(|(&end, &literal)| (end - i, literal))
                 .collect();
+            // `macro_map` shares the exact same re-anchor story as
+            // `toggle_map` above — a scrolled-out expansion is already baked
+            // into `committed` (via `frozen` = `compose_window(&head)`,
+            // computed before this drain), surviving entries shift left.
+            self.macro_map = self
+                .macro_map
+                .iter()
+                .filter(|&(&end, _)| end > i)
+                .map(|(&end, expansion)| (end - i, expansion.clone()))
+                .collect();
         }
     }
 
@@ -894,6 +963,12 @@ impl Keyboard {
     /// compose at all); `Some(false)` renders compose(raw) with `closed =
     /// true` — the toggle itself closed the word, regardless of whether a
     /// real separator ever follows.
+    ///
+    /// Precedence: **toggle > macro > compose**. A run's `macro_map` entry
+    /// (shorthand/gõ tắt expansion, populated by `expand_macros`) is checked
+    /// only when no toggle entry exists, so `Ctrl+Shift+Z` on a just-expanded
+    /// word reverts it to literal raw with zero special-casing in
+    /// `toggle_last_word` — the toggle entry it writes simply wins here.
     fn compose_window(&mut self, raw: &[char]) -> String {
         let runs = self.word_runs(raw);
         let mut out = String::new();
@@ -910,13 +985,63 @@ impl Keyboard {
                 // so a stored `Pref::Literal` can't make this direction
                 // unreachable.
                 Some(false) => self.executor.compose_word_forced_composed(word, true),
-                None => self.compose_one_word(word, end < raw.len()),
+                None => match self.macro_map.get(&end) {
+                    Some(expansion) => expansion.clone(),
+                    None => self.compose_one_word(word, end < raw.len()),
+                },
             };
             out.push_str(&rendered);
             cursor = end;
         }
         out.push_str(&raw[cursor..].iter().collect::<String>());
         out
+    }
+
+    /// Scan the CURRENT window for closed word runs (`end < raw.len()`,
+    /// i.e. a real separator already follows) whose raw exactly matches an
+    /// enabled shorthand/gõ tắt trigger, populating `macro_map` for any run
+    /// not already resolved. Collision safety (see `crate::state::macros`'s
+    /// module doc): the still-open trailing word is never checked, so a
+    /// macro never fires until its full raw run is unambiguously closed.
+    ///
+    /// A run already in `toggle_map` is skipped — `compose_window`'s
+    /// precedence would ignore a macro entry there anyway (toggle wins), so
+    /// inserting one would be dead state. A run already in `macro_map` is
+    /// skipped too (idempotent — this runs on every keystroke while the
+    /// window still contains the closed run).
+    ///
+    /// No-op when shorthand is unwired (`self.macros == None`) —
+    /// byte-identical to `Settings::shorthand == false`.
+    ///
+    /// Known obscure interaction: a `Ctrl+Shift+Z` toggle FORCES a run
+    /// boundary at the toggled word's end (see `toggle_last_word`'s doc), so
+    /// a trigger typed immediately after — e.g. freeze "x", then type
+    /// "vn " — sees "vn" as its own closed run and CAN expand, even though
+    /// no real separator was typed between them. This matches the
+    /// documented "toggle closes the word, continued typing starts a new
+    /// one" model exactly; it is not a bug, just worth knowing if a macro
+    /// ever seems to fire "without a space".
+    fn expand_macros(&mut self, raw: &[char]) {
+        let Some(handle) = self.macros.clone() else {
+            return;
+        };
+        let mut hits = Vec::new();
+        for (start, end) in self.word_runs(raw) {
+            if end >= raw.len() {
+                continue; // still open — the user may still be typing it
+            }
+            if self.toggle_map.contains_key(&end) || self.macro_map.contains_key(&end) {
+                continue;
+            }
+            let word_str: String = raw[start..end].iter().collect();
+            let store = handle.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(expansion) = store.lookup(&word_str) {
+                hits.push((end, expansion.to_string()));
+            }
+        }
+        for (end, expansion) in hits {
+            self.macro_map.insert(end, expansion);
+        }
     }
 
     /// Toggle the last (current) window word between `literal(raw)` and
