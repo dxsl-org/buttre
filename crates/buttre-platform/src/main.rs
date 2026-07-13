@@ -24,9 +24,7 @@ use buttre_core::state::{Settings, StateObserver};
 use buttre_core::AppState;
 use buttre_core::Keyboard;
 use buttre_platform::shared::observers::{KeyboardObserver, MainUICallback, UIEvent, UIObserver};
-use buttre_platform::shared::ui::{
-    build_menu, create_tray_icon, helpers, show_help_dialog, MenuItems,
-};
+use buttre_platform::shared::ui::{build_menu, create_tray_icon, helpers, MenuItems};
 use buttre_platform::shared::{pipe_server, KeyboardManager, MethodRegistry};
 use buttre_platform::{platform_name, Backend, PlatformBackend};
 use log::{error, info, warn};
@@ -162,44 +160,13 @@ fn watch_learning_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatche
     Some(watcher)
 }
 
-/// Tray → "Từ đã học": open learning.toml in the platform's default editor.
-/// Writes the current in-memory state first when the file doesn't exist yet
-/// (a fresh install has nothing on disk until the first word commits), so
-/// the user always opens a real, self-documented file.
-fn open_learning_file(store: &Arc<Mutex<LearningStore>>) {
-    let path = match LearningStore::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            error!("learning.toml path unresolved: {e:?}");
-            return;
-        }
-    };
-    if !path.exists() {
-        let file = store.lock().unwrap().snapshot_for_save();
-        if let Err(e) = LearningStore::write_atomic(&file) {
-            error!("cannot create learning.toml: {e:?}");
-            return;
-        }
-    }
-    let result = if cfg!(target_os = "windows") {
-        // notepad handles .toml with no file association and is always present.
-        std::process::Command::new("notepad.exe").arg(&path).spawn()
-    } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(&path).spawn()
-    } else {
-        std::process::Command::new("xdg-open").arg(&path).spawn()
-    };
-    if let Err(e) = result {
-        error!("cannot open learning.toml: {e:?}");
-    }
-}
-
 /// Watch macros.toml's directory for on-disk changes (config window / hand
 /// edit) — mirrors `watch_learning_file` exactly, same directory, different
 /// filename. Simpler than the learning watcher: nothing at the TYPING layer
 /// ever writes `macros.toml` (see `buttre_core::state::macros`'s module
 /// doc), so there is no own-write suppression concern for THAT writer.
-/// `open_macros_file`'s one-time seed-if-missing write is the sole
+/// The config window's "Mở tệp gốc" (`buttre_config::open_in_editor`,
+/// seed-if-missing) is the sole
 /// exception — it fires this same watcher, but reloading an unchanged
 /// (still-empty) file is an idempotent no-op, so no suppression is needed
 /// there either.
@@ -285,36 +252,6 @@ fn watch_settings_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatche
         return None;
     }
     Some(watcher)
-}
-
-/// Tray → "Gõ tắt": open macros.toml in the platform's default editor —
-/// mirrors `open_learning_file`. Writes an empty, self-documented file first
-/// when none exists yet, so the user always opens a real file.
-fn open_macros_file(store: &Arc<Mutex<MacroStore>>) {
-    let path = match MacroStore::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            error!("macros.toml path unresolved: {e:?}");
-            return;
-        }
-    };
-    if !path.exists() {
-        let file = store.lock().unwrap().snapshot_for_save();
-        if let Err(e) = MacroStore::write_atomic(&file) {
-            error!("cannot create macros.toml: {e:?}");
-            return;
-        }
-    }
-    let result = if cfg!(target_os = "windows") {
-        std::process::Command::new("notepad.exe").arg(&path).spawn()
-    } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(&path).spawn()
-    } else {
-        std::process::Command::new("xdg-open").arg(&path).spawn()
-    };
-    if let Err(e) = result {
-        error!("cannot open macros.toml: {e:?}");
-    }
 }
 
 fn main() -> Result<()> {
@@ -455,12 +392,7 @@ fn main() -> Result<()> {
         vni_item,
         nom_item,
         custom_items,
-        hoc_thong_minh_item,
-        khoi_dong_item,
-        go_tat_item,
-        tu_da_hoc_item,
-        quan_ly_go_tat_item,
-        huong_dan_item,
+        cau_hinh_item,
         thoat_item,
         ..
     } = menu_items;
@@ -796,7 +728,6 @@ fn main() -> Result<()> {
                             } else {
                                 keyboard_manager.clear_learning();
                             }
-                            hoc_thong_minh_item.set_checked(learning_enabled);
                             if let Err(e) = app_state
                                 .lock()
                                 .unwrap()
@@ -816,7 +747,6 @@ fn main() -> Result<()> {
                             } else {
                                 keyboard_manager.clear_macros();
                             }
-                            go_tat_item.set_checked(shorthand_enabled);
                             if let Err(e) =
                                 app_state.lock().unwrap().set_shorthand(shorthand_enabled)
                             {
@@ -826,7 +756,6 @@ fn main() -> Result<()> {
                         if new_settings.startup != known.startup {
                             match buttre_autostart::set_enabled(new_settings.startup) {
                                 Ok(()) => {
-                                    khoi_dong_item.set_checked(new_settings.startup);
                                     if let Err(e) =
                                         app_state.lock().unwrap().set_startup(new_settings.startup)
                                     {
@@ -899,74 +828,32 @@ fn main() -> Result<()> {
                         let _ = app_state.lock().unwrap().set_method("telex");
                     } else if event.id == vni_item.id() {
                         let _ = app_state.lock().unwrap().set_method("vni");
-                    } else if event.id == hoc_thong_minh_item.id() {
-                        // muda already flipped the checkmark; is_checked()
-                        // IS the new state. Applies live: wire/unwire the
-                        // shared store, then persist through AppState (the
-                        // settings owner — an out-of-band Settings save
-                        // would be reverted by the next method switch).
-                        learning_enabled = hoc_thong_minh_item.is_checked();
-                        info!("Học thông minh: {}", learning_enabled);
-                        if learning_enabled {
-                            *learning_store.lock().unwrap() = LearningStore::load();
-                            keyboard_manager
-                                .set_learning(learning_store.clone(), learning_tx.clone());
-                        } else {
-                            keyboard_manager.clear_learning();
-                        }
-                        if let Err(e) = app_state
-                            .lock()
-                            .unwrap()
-                            .set_learning_enabled(learning_enabled)
-                        {
-                            error!("Failed to persist learning_enabled: {:?}", e);
-                        }
-                    } else if event.id == khoi_dong_item.id() {
-                        // muda already flipped the checkmark; register with
-                        // the OS FIRST and revert the checkbox if that
-                        // fails, so the UI never shows a state the OS
-                        // doesn't have.
-                        let enabled = khoi_dong_item.is_checked();
-                        match buttre_autostart::set_enabled(enabled) {
-                            Ok(()) => {
-                                info!("Tự động khởi động: {}", enabled);
-                                if let Err(e) = app_state.lock().unwrap().set_startup(enabled) {
-                                    error!("Failed to persist startup: {:?}", e);
+                    } else if event.id == cau_hinh_item.id() {
+                        // Spawn the config window as a separate PROCESS
+                        // (same exe, `--config` arg-dispatch in `main`) —
+                        // never call `buttre_config::run()` in-process here,
+                        // it owns a competing winit event loop (see
+                        // `buttre-config`'s crate doc). Non-blocking: the
+                        // tray keeps typing live while it's open.
+                        match std::env::current_exe() {
+                            Ok(exe) => {
+                                if let Err(e) =
+                                    std::process::Command::new(exe).arg("--config").spawn()
+                                {
+                                    error!("Failed to spawn config window: {:?}", e);
                                 }
                             }
                             Err(e) => {
-                                error!("autostart set_enabled({enabled}) failed: {e:?}");
-                                khoi_dong_item.set_checked(!enabled);
+                                error!("Failed to resolve current_exe for config window: {:?}", e)
                             }
                         }
-                    } else if event.id == tu_da_hoc_item.id() {
-                        open_learning_file(&learning_store);
-                    } else if event.id == go_tat_item.id() {
-                        shorthand_enabled = go_tat_item.is_checked();
-                        info!("Gõ tắt: {}", shorthand_enabled);
-                        if shorthand_enabled {
-                            *macros_store.lock().unwrap() = MacroStore::load();
-                            keyboard_manager.set_macros(macros_store.clone());
-                        } else {
-                            keyboard_manager.clear_macros();
-                        }
-                        if let Err(e) = app_state.lock().unwrap().set_shorthand(shorthand_enabled) {
-                            error!("Failed to persist shorthand: {:?}", e);
-                        }
-                    } else if event.id == quan_ly_go_tat_item.id() {
-                        open_macros_file(&macros_store);
                     } else {
-                        let mut handled = false;
                         for (method_data, item) in &custom_items {
                             if event.id == item.id() {
                                 // Direct .id access
                                 let _ = app_state.lock().unwrap().set_method(&method_data.id);
-                                handled = true;
                                 break;
                             }
-                        }
-                        if !handled && event.id == huong_dan_item.id() {
-                            show_help_dialog();
                         }
                     }
                 }

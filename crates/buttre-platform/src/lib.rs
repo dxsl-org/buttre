@@ -100,7 +100,7 @@ pub mod shared;
 pub use platforms::Backend;
 
 // Re-export shared utilities for convenience
-pub use shared::ui::{build_menu, create_tray_icon, show_help_dialog, MenuItems};
+pub use shared::ui::{build_menu, create_tray_icon, MenuItems};
 pub use shared::{
     KeyboardManager, KeyboardObserver, MainUICallback, MethodInfo, MethodRegistry, MethodSource,
     UIEvent, UIObserver,

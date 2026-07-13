@@ -14,4 +14,4 @@ pub mod ui;
 pub use config_watcher::{ConfigChangeEvent, ConfigWatcher};
 pub use input::{KeyboardManager, MethodInfo, MethodRegistry, MethodSource};
 pub use observers::{KeyboardObserver, MainUICallback, UIEvent, UIObserver};
-pub use ui::{build_menu, create_tray_icon, show_help_dialog, MenuItems};
+pub use ui::{build_menu, create_tray_icon, MenuItems};
