@@ -7,6 +7,7 @@
 //! 3. Double vowel with final consonant — second vowel (index 1).
 //! 4. Double vowel, open syllable:
 //!    - "ia" / "ua" → first vowel (index 0).
+//!    - "ie" / "ye" (bare transients of iê/yê) → second vowel (index 1).
 //!    - "oa" / "oe" / "uy" → depends on `ToneStyle` (Old→0, New→1).
 //!    - Anything else → first vowel (index 0).
 //! 5. Single vowel → index 0.
@@ -73,6 +74,11 @@ pub fn place(nucleus: &[char], tone_style: ToneStyle, has_final_consonant: bool)
         match (v0, v1) {
             // ia / ua (ưa normalises to ua because ư→u) → first vowel
             ('i', 'a') | ('u', 'a') => return Some(0),
+            // ie / ye are the bare transients of iê / yê (the ê not typed
+            // yet): the tone belongs on the e — where the super-vowel rule
+            // will keep it once ê arrives — never on the glide ("yes" must
+            // show "yé" like Unikey, not "ýe").
+            ('i', 'e') | ('y', 'e') => return Some(1),
             // oa / oe / uy → ToneStyle-dependent
             ('o', 'a') | ('o', 'e') | ('u', 'y') => {
                 return Some(match tone_style {
@@ -158,6 +164,14 @@ mod tests {
     fn ia_open_syllable() {
         let nucleus = ['i', 'a'];
         assert_eq!(place(&nucleus, ToneStyle::Old, false), Some(0));
+    }
+
+    // ye / ie open — bare transients of yê/iê → tone on e (yé, not ýe)
+    #[test]
+    fn ye_ie_open_tone_on_e() {
+        assert_eq!(place(&['y', 'e'], ToneStyle::Old, false), Some(1));
+        assert_eq!(place(&['y', 'e'], ToneStyle::New, false), Some(1));
+        assert_eq!(place(&['i', 'e'], ToneStyle::Old, false), Some(1));
     }
 
     // super-vowel always wins (ê, ô, ơ, ă, â)

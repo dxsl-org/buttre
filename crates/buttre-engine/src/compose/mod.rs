@@ -175,6 +175,12 @@ pub struct ComposeOpts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pref {
     /// Prefer the literal raw keystrokes over any composed projection.
+    ///
+    /// Exception: IGNORED when the raw is undo-shaped
+    /// (`fallback::is_last_event_undo`) — replaying raw-verbatim there
+    /// ("yess") differs from the undo display the user accepted ("yes")
+    /// and would hijack the double-key escape. See `compose_internal`
+    /// step 0.
     Literal,
     /// Prefer the composed Vietnamese projection, ungated.
     Composed,
@@ -460,16 +466,25 @@ fn compose_internal(
     // `compose_internal` at all — see `compose::fallback`'s module doc).
     if allow_nonadjacent {
         if let Some(pref) = lookup_pref(raw, opts) {
-            return match pref {
-                Pref::Literal => ComposeResult {
-                    text: raw.iter().collect(),
-                    temp_english: true,
-                    applied_marks: Vec::new(),
-                    consumed_tone: None,
-                    demoted: false,
-                },
-                Pref::Composed => compose_forced(raw, opts),
-            };
+            match pref {
+                // An undo-shaped raw never replays a Literal pref: the display
+                // the user accepted when it was recorded is the pipeline's own
+                // undo output ("yess" → "yes"), while the raw-verbatim
+                // projection ("yess") would permanently hijack the double-key
+                // escape — the exact contract pinned by telex-fallback.txt.
+                // Falling through re-derives that undo from raw (step 1).
+                Pref::Literal if fallback::is_last_event_undo(raw, opts) => {}
+                Pref::Literal => {
+                    return ComposeResult {
+                        text: raw.iter().collect(),
+                        temp_english: true,
+                        applied_marks: Vec::new(),
+                        consumed_tone: None,
+                        demoted: false,
+                    }
+                }
+                Pref::Composed => return compose_forced(raw, opts),
+            }
         }
     }
 

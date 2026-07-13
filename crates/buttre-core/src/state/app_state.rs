@@ -113,6 +113,24 @@ impl AppState {
         &mut self.settings
     }
 
+    /// Persist the "Học thông minh" (personal learning) switch.
+    ///
+    /// Lives HERE — not as a fresh `Settings::load`-modify-save at the call
+    /// site — because `AppState` owns the settings object and re-saves it
+    /// whole on every method change: an out-of-band write would be silently
+    /// reverted by the next `set_method`.
+    pub fn set_learning_enabled(&mut self, enabled: bool) -> anyhow::Result<()> {
+        self.settings.learning_enabled = enabled;
+        self.settings.save()
+    }
+
+    /// Persist the "Tự động khởi động" (OS autostart) switch — same
+    /// owner-object rationale as [`Self::set_learning_enabled`].
+    pub fn set_startup(&mut self, enabled: bool) -> anyhow::Result<()> {
+        self.settings.startup = enabled;
+        self.settings.save()
+    }
+
     /// Set the input method and notify observers
     ///
     /// This is the primary method for changing the input method. It will:

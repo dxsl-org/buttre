@@ -69,6 +69,19 @@ impl KeyboardManager {
         }
     }
 
+    /// Unwire personal learning at runtime (tray "Học thông minh" off):
+    /// forgets the wiring for future `set_method` builds AND detaches it
+    /// from the currently loaded `Keyboard` — the exact inverse of
+    /// [`Self::set_learning`].
+    pub fn clear_learning(&self) {
+        *self.learning.lock().unwrap() = None;
+        if let Ok(mut guard) = self.keyboard.write() {
+            if let Some(kb) = guard.as_mut() {
+                kb.clear_learning();
+            }
+        }
+    }
+
     /// Set the input method
     pub fn set_method(&self, method: &str) -> Result<()> {
         tracing::info!("KeyboardManager: Setting method to '{}'", method);

@@ -689,36 +689,100 @@ fn automatic_demote_records_nothing_even_after_many_repeats() {
 }
 
 #[test]
-fn undo_shaped_commit_records_literal_pref_recalled_by_new_keyboard_sharing_the_store() {
-    // critical row: a double-tap undo/toggle SHAPE, sitting at the exact
-    // raw the word is committed with, records a literal preference for that
-    // raw sequence. "ress" (r-e-s-s) is the same trailing-double-tone-key
-    // undo shape as the engine's own `check_tone_toggle` fixtures
-    // ("ass"->"as", "seess"->"sês") — `is_last_event_undo(['r','e','s','s'])`
-    // is true for the word's raw exactly as committed.
+fn undo_shaped_commit_records_nothing_escape_never_hijacked() {
+    // critical row (regression: "yes" became untypeable): a double-tap undo
+    // SHAPE ("ress", same trailing-double-tone-key family as "ass"->"as",
+    // "yess"->"yes") must record NO preference. It used to record
+    // Pref::Literal for the exact raw — but the Literal projection ("ress")
+    // differs from the undo display the user actually accepted ("res"), so
+    // the recall permanently hijacked the double-key escape: after one
+    // "yess"->"yes" commit, every later "yess" rendered "yess" and "yes"
+    // could no longer be typed at all.
     let (store, tx) = fresh_learning();
     let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
     kb.set_learning(store.clone(), tx.clone());
 
     type_str(&mut kb, "ress b c d"); // forces "ress" through a real commit
-    assert_eq!(
+    assert!(
         store
             .lock()
             .unwrap()
             .prefs_snapshot_for_method("telex")
-            .get("ress"),
-        Some(&Pref::Literal),
-        "an undo-shaped word-commit must record a literal preference for its exact raw"
+            .get("ress")
+            .is_none(),
+        "an undo-shaped word-commit must record nothing — the undo already re-derives from raw"
     );
 
-    // A brand-new Keyboard sharing the SAME store recalls it immediately —
-    // no re-learning needed, and the recall is LITERAL (all 4 raw chars
-    // verbatim), not the 3-char undo-collapsed form ("res") normal typing
-    // would otherwise produce (honest wording, red-team F12).
+    // A brand-new Keyboard sharing the SAME store keeps the standard
+    // double-key escape, byte-identical to a store-less keyboard.
     let mut kb2 = KeyboardBuilder::telex().expect("telex keyboard");
     kb2.set_learning(store, tx);
     type_str(&mut kb2, "ress");
-    assert_eq!(kb2.buffer(), "ress", "pref recall renders the literal raw verbatim from the very first matching keystroke sequence");
+    assert_eq!(
+        kb2.buffer(),
+        "res",
+        "the double-key escape must never be hijacked by learning"
+    );
+}
+
+#[test]
+fn toggle_literal_on_undo_shaped_raw_clears_stale_pref_instead_of_recording() {
+    // Record-replay invariant (ADR-0001): the user toggles to literal on an
+    // undo-shaped raw ("yess" shown as "yes" → toggle → "yess"). That choice
+    // cannot be replayed (the lookup guard ignores Literal on undo shapes),
+    // so recording it would persist a dead entry — and worse, NOT touching
+    // the store would let a stale opposite pref (Composed) keep winning.
+    // The honest record is: remove whatever pref exists for that raw.
+    let (store, tx) = fresh_learning();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .record_pref("telex", "yess", PreferKind::Composed, true),
+        "seed a stale Composed pref"
+    );
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store.clone(), tx);
+
+    type_str(&mut kb, "yess");
+    kb.toggle_last_word().expect("toggle acts"); // -> literal "yess"
+    type_str(&mut kb, " b c d"); // commit the toggled word
+
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .prefs_snapshot_for_method("telex")
+            .get("yess")
+            .is_none(),
+        "toggle-literal on an undo-shaped raw must clear the stored pref, not record a dead one"
+    );
+}
+
+#[test]
+fn stale_literal_pref_on_undo_shaped_raw_is_ignored_at_recall() {
+    // Files written before the fix may still hold Literal prefs for
+    // undo-shaped raws (auto-recorded by the removed branch — the exact
+    // poison found in a real learning.toml: "yess", "sass", "raww"...).
+    // Recall must ignore them without any file migration: the raw falls
+    // through to the normal pipeline, whose undo output is what the user
+    // accepted when the pref was mistakenly recorded.
+    let (store, tx) = fresh_learning();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .record_pref("telex", "yess", PreferKind::Literal, true),
+        "seed pref must pass the min-specificity floor"
+    );
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    kb.set_learning(store, tx);
+    type_str(&mut kb, "yess");
+    assert_eq!(
+        kb.buffer(),
+        "yes",
+        "a stale Literal pref on an undo-shaped raw must not replay raw-verbatim"
+    );
 }
 
 #[test]
@@ -840,15 +904,13 @@ fn collection_fires_once_at_commit_not_per_keystroke() {
     let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
     kb.set_learning(store.clone(), tx);
 
-    // Mid-word: composing the undo shape "ress" as the OPEN trailing word —
-    // not yet committed, so the store must stay untouched.
-    type_str(&mut kb, "res");
-    assert!(store
-        .lock()
-        .unwrap()
-        .prefs_snapshot_for_method("telex")
-        .is_empty());
-    kb.process('s').expect("process must not error"); // completes "ress", still open
+    // Mid-word: a P4 toggle on the OPEN trailing word queues a signal but
+    // must not touch the store — collection happens only at the boundary.
+    // (The former marker — the undo-shape auto-record for "ress" — no
+    // longer exists: undo shapes record nothing.)
+    type_str(&mut kb, "reset");
+    kb.toggle_last_word()
+        .expect("toggle must act on the open trailing word");
     assert!(
         store
             .lock()
@@ -864,7 +926,7 @@ fn collection_fires_once_at_commit_not_per_keystroke() {
             .lock()
             .unwrap()
             .prefs_snapshot_for_method("telex")
-            .contains_key("ress"),
+            .contains_key("reset"),
         "collection fires exactly once the word crosses the boundary"
     );
 }

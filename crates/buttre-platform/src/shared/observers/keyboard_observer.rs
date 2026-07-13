@@ -3,10 +3,13 @@
 use crate::shared::KeyboardManager;
 use buttre_core::state::{Settings, StateObserver};
 use log::info;
+use std::sync::Arc;
 
 /// Observer that updates the KeyboardManager when input method changes
 pub struct KeyboardObserver {
-    keyboard_manager: KeyboardManager,
+    /// Shared with `main.rs`'s event loop, which also drives the manager
+    /// directly for the live learning toggle (tray "Học thông minh").
+    keyboard_manager: Arc<KeyboardManager>,
 }
 
 impl KeyboardObserver {
@@ -14,7 +17,7 @@ impl KeyboardObserver {
     ///
     /// # Arguments
     /// * `keyboard_manager` - The keyboard manager to update
-    pub fn new(keyboard_manager: KeyboardManager) -> Self {
+    pub fn new(keyboard_manager: Arc<KeyboardManager>) -> Self {
         Self { keyboard_manager }
     }
 }

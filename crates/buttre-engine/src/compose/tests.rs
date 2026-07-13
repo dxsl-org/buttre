@@ -1089,6 +1089,53 @@ fn p5_pref_composed_short_circuits_undo_detection() {
 }
 
 #[test]
+fn p5_pref_literal_never_hijacks_undo_shaped_raw() {
+    // Regression ("yes" untypeable on machines with learning.toml): the undo
+    // auto-record used to store Pref::Literal for raw "yess", and the
+    // short-circuit then replayed the RAW ("yess") instead of the undo
+    // display the user accepted ("yes") — permanently hijacking the
+    // double-key escape pinned by telex-fallback.txt. An undo-shaped raw
+    // must ignore a Literal pref and fall through to the normal pipeline.
+    let mut prefs = HashMap::new();
+    prefs.insert("yess".to_string(), Pref::Literal);
+    let opts = ComposeOpts {
+        raw_prefs: Some(Arc::new(prefs)),
+        ..telex_opts()
+    };
+    let r = compose(&raw("yess"), &opts);
+    assert_eq!(
+        r.text, "yes",
+        "an undo-shaped raw must ignore a Literal pref"
+    );
+
+    // A non-undo-shaped raw still honors its Literal pref (deliberate
+    // toggle replay — p5_pref_literal_short_circuits_before_fallback).
+    // A Composed pref on the undo-shaped raw is also still honored.
+    let mut prefs = HashMap::new();
+    prefs.insert("yess".to_string(), Pref::Composed);
+    let opts = ComposeOpts {
+        raw_prefs: Some(Arc::new(prefs)),
+        ..telex_opts()
+    };
+    assert_eq!(
+        compose(&raw("yess"), &opts).text,
+        "yé",
+        "a Composed pref keeps forcing segment→transform→tone"
+    );
+}
+
+#[test]
+fn telex_yes_tone_on_e_not_on_glide() {
+    // Bare "ye" is the transient of "yê": the tone belongs on the e, where
+    // the super-vowel rule keeps it once ê arrives — Unikey shows "yé".
+    assert_eq!(compose(&raw("yes"), &telex_opts()).text, "yé");
+    // Bare triple "yeu" keeps the tone on the same e (triple-vowel rule);
+    // the delayed ê then absorbs it: "yeeus" → "yếu".
+    assert_eq!(compose(&raw("yesu"), &telex_opts()).text, "yéu");
+    assert_eq!(compose(&raw("yeeus"), &telex_opts()).text, "yếu");
+}
+
+#[test]
 fn p5_pref_lookup_is_exact_full_raw_never_prefix() {
     // The pref short-circuit is gated on `allow_nonadjacent` (never
     // consulted inside a demoted recursive call) and is structurally

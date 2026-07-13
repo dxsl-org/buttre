@@ -223,6 +223,16 @@ impl Keyboard {
         self.learning = Some(LearningHandle { store, save_tx });
     }
 
+    /// Detach the personal-learning store and clear the live snapshot — the
+    /// runtime counterpart of never calling [`Self::set_learning`]: after
+    /// this, collection, snapshot refresh, and pref/overlay consultation all
+    /// no-op, byte-identical to a keyboard built with learning disabled.
+    /// Used by the tray's live "Học thông minh" toggle.
+    pub fn clear_learning(&mut self) {
+        self.learning = None;
+        self.apply_learning_snapshot(buttre_engine::compose::LearningSnapshot::default());
+    }
+
     /// Push a fresh learning snapshot to both the live executor's compose
     /// stage AND this `Keyboard`'s own `compose_opts` copy (event-sourcing-
     /// completion Phase 5) — mirrors `PipelineExecutor::
@@ -282,8 +292,10 @@ impl Keyboard {
     /// out) exists, it is recorded and nothing else is; recording an
     /// unrelated undo-shape/direct-typed guess for the SAME raw afterward
     /// could silently overwrite the user's explicit choice. Otherwise: a
-    /// double-tap undo/toggle shape (`is_last_event_undo`) records a literal
-    /// preference; failing that, a clean direct-typed (no inferred marks,
+    /// double-tap undo/toggle shape (`is_last_event_undo`) records nothing —
+    /// the undo display re-derives deterministically from raw, and a Literal
+    /// pref would replay raw-verbatim instead (see the branch comment);
+    /// failing that, a clean direct-typed (no inferred marks,
     /// not gate-demoted, structurally valid, currently unattested) syllable
     /// feeds the overlay promotion counter (anti-feedback rule (i): an
     /// automatic demote is checked via `ComposeResult::demoted` and records
@@ -312,10 +324,26 @@ impl Keyboard {
                 } else {
                     PreferKind::Composed
                 };
-                store.record_pref(&self.method, &word_str, prefer, has_trigger);
+                // Record-replay invariant (ADR-0001): a Literal pref on an
+                // undo-shaped raw can never replay ("yess" would render
+                // "yes" via the lookup guard, not the literal the toggle
+                // showed) — the honest record for this latest choice is no
+                // pref at all, which also clears any stale opposite pref
+                // instead of leaving it to win by default.
+                if prefer == PreferKind::Literal && is_last_event_undo(word_raw, opts) {
+                    store.remove_pref(&self.method, &word_str);
+                } else {
+                    store.record_pref(&self.method, &word_str, prefer, has_trigger);
+                }
             }
         } else if is_last_event_undo(word_raw, opts) {
-            store.record_pref(&self.method, &word_str, PreferKind::Literal, has_trigger);
+            // Deliberately record NOTHING. The display the user accepted here
+            // is compose's own undo output ("yess" → "yes"), which re-derives
+            // deterministically from raw; a Literal pref replays raw-verbatim
+            // ("yess") instead, permanently hijacking the double-key escape
+            // (the bug that made "yes" untypeable once this fired). Explicit
+            // Ctrl+Shift+Z toggles (branch above) remain the only writer of
+            // Literal prefs.
         } else {
             let result = compose_closed(word_raw, opts);
             let is_direct = !result.temp_english

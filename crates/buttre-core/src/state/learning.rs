@@ -75,6 +75,25 @@ use std::collections::HashSet;
 use buttre_engine::compose::Pref as EnginePref;
 use buttre_engine::pipeline::validation::{bit_index, decompose_ids};
 
+/// Self-documentation header prepended to every `learning.toml` write, so a
+/// user opening the file (tray → "Từ đã học") can read and edit it without
+/// external docs. TOML comments do not round-trip through serde — the file
+/// is always rewritten whole from in-memory state — so prepending on every
+/// save is what keeps the header permanent.
+const FILE_HEADER: &str = "\
+# buttre — từ đã học (tự sửa được, lưu là áp dụng ngay khi buttre đang chạy)
+#
+# [user_attested]  âm tiết lạ bạn hay gõ; đạt 3 lần thì buttre coi như từ thật
+#                  và không hoàn tác dấu nữa. Tự thêm:  \"pó\" = 3
+# [prefs]          ép một chuỗi phím cụ thể hiện nguyên văn (literal) hoặc
+#                  luôn bỏ dấu (composed). Ví dụ:
+#                  \"telex:brb\" = { prefer = \"literal\", last_used = \"2026-07-13\" }
+#
+# Mục không hợp lệ được bỏ qua; pref không dùng >180 ngày tự xóa.
+# Tắt toàn bộ: tray → Tùy chọn → Học thông minh.
+
+";
+
 /// Byte ceiling for `learning.toml` (red-team M1): checked BEFORE
 /// `read_to_string` so a huge/corrupt file is never fully read into memory.
 /// A legitimately-produced file never approaches this — `write_atomic`
@@ -276,7 +295,7 @@ impl LearningStore {
     /// itself does the actual (potentially slow) disk I/O.
     pub fn write_atomic(file: &LearningFile) -> Result<()> {
         let path = Self::get_path()?;
-        let toml_str = toml::to_string_pretty(file)?;
+        let toml_str = format!("{FILE_HEADER}{}", toml::to_string_pretty(file)?);
         let tmp_path = path.with_extension("toml.tmp");
         fs::write(&tmp_path, toml_str)?;
         fs::rename(&tmp_path, &path)?;
@@ -371,6 +390,23 @@ impl LearningStore {
         true
     }
 
+    /// Remove any stored preference for `raw` under `method` — the
+    /// record-replay-invariant escape hatch (ADR-0001): when the user's
+    /// latest deliberate choice CANNOT be replayed faithfully (a Literal
+    /// pref on an undo-shaped raw — lookup would ignore it), the honest
+    /// record is NO pref at all, so a stale opposite pref must not survive
+    /// either. Returns `true` iff an entry was actually removed.
+    pub fn remove_pref(&mut self, method: &str, raw: &str) -> bool {
+        let Some(key) = build_pref_key(method, raw) else {
+            return false;
+        };
+        let removed = self.file.prefs.remove(&key).is_some();
+        if removed {
+            self.dirty = true;
+        }
+        removed
+    }
+
     /// The raw-sequence preference map for ONE method, keyed by raw
     /// sequence alone (the `"method:"` prefix stripped) — the shape
     /// `ComposeOpts::raw_prefs` expects, since `compose()` itself has no
@@ -436,9 +472,13 @@ fn sanitize_pref_key(key: &str) -> Option<String> {
 /// caps enforced on every insert, not just at load).
 fn enforce_cap_by<V>(map: &mut HashMap<String, V>, rank: impl Fn(&str, &V) -> i64) {
     while map.len() > MAX_ENTRIES_PER_TABLE {
+        // Tiebreak equal ranks by key so eviction is DETERMINISTIC, never
+        // HashMap iteration order — the two-session stability guard
+        // (ADR-0001) replays identical corpora and would otherwise flake the
+        // moment a table hits the cap with tied scores.
         let victim = map
             .iter()
-            .min_by_key(|(k, v)| rank(k, v))
+            .min_by_key(|(k, v)| (rank(k, v), (*k).clone()))
             .map(|(k, _)| k.clone());
         match victim {
             Some(k) => {

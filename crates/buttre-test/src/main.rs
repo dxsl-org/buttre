@@ -5,7 +5,16 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+mod explain;
+
 fn main() -> Result<()> {
+    // `buttre-test explain <method> <raw> [--learning]` — one-shot per-layer
+    // diagnosis (ADR-0001's "engine is right but my machine is wrong" tool).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("explain") {
+        return explain::run(&args[1..]);
+    }
+
     println!("{}", "buttre Integration Test Suite".bright_blue().bold());
     println!("---------------------------");
 

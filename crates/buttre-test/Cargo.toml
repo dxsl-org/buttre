@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Buttre Crates
 buttre-core = { path = "../buttre-core" }
+buttre-engine = { path = "../buttre-engine" }
 buttre-platform = { path = "../buttre-platform" }
 
 
