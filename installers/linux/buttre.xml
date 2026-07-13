@@ -13,14 +13,14 @@
         <engine>
             <name>buttre</name>
             <language>vi</language>
-            <license>MPL-2.0</license>
+            <license>GPL-3.0</license>
             <author>buttre project</author>
             <icon>buttre</icon>
             <layout>us</layout>
-            <longname>buttre Vietnamese</longname>
-            <description>buttre — Telex/VNI/Nôm input for Vietnamese and Southeast Asian scripts</description>
+            <longname>buttre</longname>
+            <description>buttre — Telex/VNI input for Vietnamese and Southeast Asian scripts (Latin-based or Nôm)</description>
             <rank>99</rank>
-            <symbol>VI</symbol>
+            <symbol>v🎋</symbol>
         </engine>
     </engines>
 </component>
