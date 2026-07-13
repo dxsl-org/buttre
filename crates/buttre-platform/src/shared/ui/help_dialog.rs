@@ -8,7 +8,7 @@ pub fn show_help_dialog() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
 
     let title = "buttre - Bộ Gõ Tiếng Việt";
-    let message = "Phiên bản: 0.7.5-beta\n\
+    let message = "Phiên bản: 0.7.7-beta\n\
          Giấy phép: GPL 3.0\n\
          Chuẩn mã: NFC (Unicode dựng sẵn)\n\
          \n\
@@ -18,6 +18,12 @@ pub fn show_help_dialog() {
          • Ctrl+Shift+2 → VNI\n\
          • Ctrl+Shift+3 → Nôm\n\
          • Ctrl+Shift+4 → ...\n\
+         • Ctrl+Shift+Z → Đảo từ vừa gõ giữa nguyên văn/bỏ dấu\n\
+         \n\
+         HỌC THÔNG MINH:\n\
+         buttre ghi nhớ âm tiết lạ bạn gõ ≥3 lần và lựa chọn Ctrl+Shift+Z\n\
+         của bạn vào learning.toml. Xem/sửa: menu \"Từ đã học\".\n\
+         Bật/tắt: Tùy chọn → Học thông minh.\n\
          \n\
          TÀI LIỆU & MÃ NGUỒN:\n\
          https://github.com/dxsl-org/buttre\n\

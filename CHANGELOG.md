@@ -4,6 +4,15 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- core: bất biến record-replay cho học cá nhân hóa (ADR-0001) — toggle literal trên raw dạng undo xóa pref cũ thay vì ghi pref không thể replay
+- test: guard hai-phiên chống lớp bug "học xong thì gõ khác đi" — gõ 10k từ Anh (double-key escape) + toàn bộ corpus telex qua 3 phiên chung learning store, output phải giống hệt, chạy trong CI
+- tray: thêm "Tùy chọn → Học thông minh" bật/tắt học cá nhân hóa ngay lập tức, không cần khởi động lại
+- tray: "Tự động khởi động" hoạt động thật — đăng ký/hủy autostart theo OS (Windows Run key, Linux XDG autostart), tự re-đăng ký khi exe đổi chỗ; bỏ 2 mục placeholder tắt sẵn ("Tự động sửa lỗi chính tả", "Gõ tắt")
+- tray: thêm menu "Từ đã học" mở learning.toml để xem/tự sửa; file có hướng dẫn ngay đầu; sửa tay được nạp lại tự động khi buttre đang chạy
+- tool: `buttre-test explain <method> <raw> [--learning]` — chẩn đoán từng tầng (pref/overlay/undo/gate) vì sao một chuỗi phím ra kết quả đó, nạp được learning.toml thật của máy
+- docs: ADR-0001 học cá nhân hóa additive-only; hướng dẫn cập nhật hotkey Ctrl+Shift+Z và mục Học thông minh
+- engine: sửa "yes" không gõ được trên máy đã bật learning — bỏ tự ghi pref literal từ double-tap undo (cái user chấp nhận là kết quả undo "yes", nhưng pref replay raw nguyên văn "yess" nên chiếm vĩnh viễn lối thoát double-key); raw dạng undo giờ không bao giờ replay pref literal, learning.toml cũ tự trung hòa không cần migration
+- engine: dấu thanh trên vần khuyết "ye"/"ie" đặt vào e — "yes" ra "yé" như Unikey, không còn "ýe"
 - engine: sửa lớp từ tiếng Anh không gõ được (rows, towns, owns, lows) — cặp hủy transform (ww) không còn bị hồi sinh khi có phím dấu theo sau
 - engine: undo dấu không còn nuốt phím dấu bị ghi đè trước đó ("meterss" ra "meters", không phải "metes")
 - test: guard 10.000 từ tiếng Anh thông dụng — mọi từ phải gõ được bằng gõ thẳng hoặc double-key escape, chạy trong CI chống tái phát

@@ -100,6 +100,86 @@ fn drain_latest_learning_save(rx: &mpsc::Receiver<LearningFile>) -> Option<Learn
     latest
 }
 
+/// Watch learning.toml's directory for on-disk changes to the file (tray →
+/// "Từ đã học" → user edits and saves). Returns the watcher handle — dropping
+/// it stops the watch, so the caller must keep it alive for the app's
+/// lifetime. `None` (with a log) when the path can't be resolved or the
+/// watch can't be established: hand-edits then simply require a restart,
+/// never an error.
+fn watch_learning_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    use notify::{RecursiveMode, Watcher};
+    let path = match LearningStore::get_path() {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("learning.toml path unresolved, hand-edit reload disabled: {e:?}");
+            return None;
+        }
+    };
+    let dir = path.parent()?.to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
+        return None;
+    }
+    let file_name = path.file_name()?.to_os_string();
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
+                {
+                    let _ = tx.send(());
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("learning.toml watcher failed, hand-edit reload disabled: {e:?}");
+                return None;
+            }
+        };
+    // Watch the DIRECTORY, not the file: `write_atomic`'s rename replaces
+    // the file node, which breaks per-file watches on some backends.
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+        warn!("learning.toml watch failed, hand-edit reload disabled: {e:?}");
+        return None;
+    }
+    Some(watcher)
+}
+
+/// Tray → "Từ đã học": open learning.toml in the platform's default editor.
+/// Writes the current in-memory state first when the file doesn't exist yet
+/// (a fresh install has nothing on disk until the first word commits), so
+/// the user always opens a real, self-documented file.
+fn open_learning_file(store: &Arc<Mutex<LearningStore>>) {
+    let path = match LearningStore::get_path() {
+        Ok(p) => p,
+        Err(e) => {
+            error!("learning.toml path unresolved: {e:?}");
+            return;
+        }
+    };
+    if !path.exists() {
+        let file = store.lock().unwrap().snapshot_for_save();
+        if let Err(e) = LearningStore::write_atomic(&file) {
+            error!("cannot create learning.toml: {e:?}");
+            return;
+        }
+    }
+    let result = if cfg!(target_os = "windows") {
+        // notepad handles .toml with no file association and is always present.
+        std::process::Command::new("notepad.exe").arg(&path).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&path).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&path).spawn()
+    };
+    if let Err(e) = result {
+        error!("cannot open learning.toml: {e:?}");
+    }
+}
+
 fn main() -> Result<()> {
     // Initialize tracing (handles both log crate and tracing crate)
     tracing_subscriber::fmt()
@@ -225,10 +305,22 @@ fn main() -> Result<()> {
         vni_item,
         nom_item,
         custom_items,
+        hoc_thong_minh_item,
+        khoi_dong_item,
+        tu_da_hoc_item,
         huong_dan_item,
         thoat_item,
         ..
     } = menu_items;
+
+    // Re-apply autostart registration while the setting is on: the exe path
+    // may have changed since it was registered (update/move), and re-writing
+    // the same entry is idempotent. Failure is a warning, never fatal.
+    if settings.startup {
+        if let Err(e) = buttre_platform::shared::autostart::set_enabled(true) {
+            warn!("autostart re-registration failed: {e:?}");
+        }
+    }
 
     // --- Tray Setup ---
     // update_tray_icon in helpers handles custom_items with MethodMetadata now
@@ -236,25 +328,42 @@ fn main() -> Result<()> {
         create_tray_icon(&menu, &settings, &custom_items)?;
 
     // --- buttre Keyboard Setup ---
-    let keyboard_manager = KeyboardManager::new()?;
+    // Arc-shared: the `KeyboardObserver` drives it on method switches, and
+    // the event loop below drives it directly for the live "Học thông minh"
+    // toggle and the learning.toml external-edit reload.
+    let keyboard_manager = Arc::new(KeyboardManager::new()?);
 
-    // Personal learning (event-sourcing-completion Phase 5): load-or-default
-    // store + off-thread save channel, gated ENTIRELY on
-    // `Settings::learning_enabled` — when `false`, `learning_save_rx` stays
-    // `None` and the event loop below never touches `learning.toml` at all
-    // (byte-identical to pre-Phase-5 behavior). Wired BEFORE `set_method`
-    // below so the FIRST keyboard instance already has it — see
-    // `Keyboard::set_learning`'s doc on why the initial hand-off matters
-    // (a freshly loaded store should apply from the very first keystroke,
-    // not just the first word boundary).
-    let learning_save_rx = if settings.learning_enabled {
-        let store = Arc::new(Mutex::new(LearningStore::load()));
-        let (tx, rx) = mpsc::channel::<LearningFile>();
-        keyboard_manager.set_learning(store, tx);
-        Some(rx)
+    // Personal learning (event-sourcing-completion Phase 5): store + save
+    // channel always exist (the tray can enable learning at runtime), but
+    // WIRING them into keyboards is gated on `Settings::learning_enabled` —
+    // unwired, no saves are ever sent and no snapshot is ever consulted, so
+    // TYPING is byte-identical to pre-Phase-5 behavior. (The notify watcher
+    // below does run regardless — a deliberate, typing-invisible delta so a
+    // later tray enable needs no lazy watcher setup.) Disk is only read when
+    // learning is actually on; the enable-toggle path does its own fresh
+    // `load()`. Wired BEFORE `set_method` below so the FIRST keyboard
+    // instance already has it — see `Keyboard::set_learning`'s doc on why
+    // the initial hand-off matters.
+    let mut learning_enabled = settings.learning_enabled;
+    let learning_store = Arc::new(Mutex::new(if learning_enabled {
+        LearningStore::load()
     } else {
-        None
-    };
+        LearningStore::default()
+    }));
+    let (learning_tx, learning_save_rx) = mpsc::channel::<LearningFile>();
+    if learning_enabled {
+        keyboard_manager.set_learning(learning_store.clone(), learning_tx.clone());
+    }
+
+    // Watch learning.toml so hand-edits (tray → "Từ đã học") apply live.
+    // The receiver is drained in the event loop; `last_own_save` suppresses
+    // the events triggered by our own `write_atomic` calls below, and
+    // `learning_reload_pending` carries a suppressed-but-real external edit
+    // over to a later iteration instead of dropping it.
+    let (learning_file_tx, learning_file_rx) = mpsc::channel::<()>();
+    let _learning_watcher = watch_learning_file(learning_file_tx);
+    let mut last_own_save = std::time::Instant::now();
+    let mut learning_reload_pending = false;
 
     // Apply initial settings to keyboard
     if let Err(e) = keyboard_manager.set_method(&settings.input_method) {
@@ -325,8 +434,7 @@ fn main() -> Result<()> {
         let mut state = app_state.lock().unwrap();
 
         // Keyboard observer - updates keyboard when method changes
-        let kb_manager = keyboard_manager;
-        state.add_observer(Arc::new(KeyboardObserver::new(kb_manager)));
+        state.add_observer(Arc::new(KeyboardObserver::new(keyboard_manager.clone())));
 
         // Backspace-mode observer (event-sourcing-completion Phase 4) - MUST
         // be registered AFTER KeyboardObserver so the Keyboard instance it
@@ -398,14 +506,38 @@ fn main() -> Result<()> {
                 // Personal-learning off-thread save (event-sourcing-
                 // completion Phase 5, red-team C3): the ONLY place
                 // `LearningStore::write_atomic` is ever called — never from
-                // the hook callback or under the KEYBOARD lock. `None` when
-                // `Settings::learning_enabled` was `false` at startup.
-                if let Some(rx) = &learning_save_rx {
-                    if let Some(file) = drain_latest_learning_save(rx) {
-                        if let Err(e) = LearningStore::write_atomic(&file) {
-                            error!("Failed to save learning.toml: {:?}", e);
-                        }
+                // the hook callback or under the KEYBOARD lock. Nothing is
+                // ever queued while learning is unwired.
+                if let Some(file) = drain_latest_learning_save(&learning_save_rx) {
+                    if let Err(e) = LearningStore::write_atomic(&file) {
+                        error!("Failed to save learning.toml: {:?}", e);
                     }
+                    last_own_save = std::time::Instant::now();
+                }
+
+                // learning.toml edited on disk (tray → "Từ đã học" → user
+                // saved in their editor): reload the shared store and
+                // re-inject so the edit applies live.
+                //
+                // ORDERING (load-bearing): this block must stay BELOW the
+                // save drain above — the drain flushes every dirty in-memory
+                // signal to disk first, so replacing the store with
+                // `LearningStore::load()` can never clobber unsaved state.
+                //
+                // Events within 2s of our own `write_atomic` are (usually)
+                // our own rename landing; those are deferred via
+                // `learning_reload_pending`, not dropped, so a real external
+                // edit that races an autosave still applies once the window
+                // clears — reloading our own write is an idempotent no-op.
+                learning_reload_pending |= learning_file_rx.try_iter().count() > 0;
+                if learning_reload_pending
+                    && learning_enabled
+                    && last_own_save.elapsed() > std::time::Duration::from_secs(2)
+                {
+                    learning_reload_pending = false;
+                    info!("learning.toml changed on disk — reloading");
+                    *learning_store.lock().unwrap() = LearningStore::load();
+                    keyboard_manager.set_learning(learning_store.clone(), learning_tx.clone());
                 }
 
                 if let Some(action) = hotkey_manager.check_hotkey() {
@@ -460,6 +592,48 @@ fn main() -> Result<()> {
                         let _ = app_state.lock().unwrap().set_method("telex");
                     } else if event.id == vni_item.id() {
                         let _ = app_state.lock().unwrap().set_method("vni");
+                    } else if event.id == hoc_thong_minh_item.id() {
+                        // muda already flipped the checkmark; is_checked()
+                        // IS the new state. Applies live: wire/unwire the
+                        // shared store, then persist through AppState (the
+                        // settings owner — an out-of-band Settings save
+                        // would be reverted by the next method switch).
+                        learning_enabled = hoc_thong_minh_item.is_checked();
+                        info!("Học thông minh: {}", learning_enabled);
+                        if learning_enabled {
+                            *learning_store.lock().unwrap() = LearningStore::load();
+                            keyboard_manager
+                                .set_learning(learning_store.clone(), learning_tx.clone());
+                        } else {
+                            keyboard_manager.clear_learning();
+                        }
+                        if let Err(e) = app_state
+                            .lock()
+                            .unwrap()
+                            .set_learning_enabled(learning_enabled)
+                        {
+                            error!("Failed to persist learning_enabled: {:?}", e);
+                        }
+                    } else if event.id == khoi_dong_item.id() {
+                        // muda already flipped the checkmark; register with
+                        // the OS FIRST and revert the checkbox if that
+                        // fails, so the UI never shows a state the OS
+                        // doesn't have.
+                        let enabled = khoi_dong_item.is_checked();
+                        match buttre_platform::shared::autostart::set_enabled(enabled) {
+                            Ok(()) => {
+                                info!("Tự động khởi động: {}", enabled);
+                                if let Err(e) = app_state.lock().unwrap().set_startup(enabled) {
+                                    error!("Failed to persist startup: {:?}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("autostart set_enabled({enabled}) failed: {e:?}");
+                                khoi_dong_item.set_checked(!enabled);
+                            }
+                        }
+                    } else if event.id == tu_da_hoc_item.id() {
+                        open_learning_file(&learning_store);
                     } else {
                         let mut handled = false;
                         for (method_data, item) in &custom_items {

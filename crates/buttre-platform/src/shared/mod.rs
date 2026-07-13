@@ -3,6 +3,7 @@
 //! This module contains code that is used across all platforms,
 //! including UI components, keyboard management, and IPC.
 
+pub mod autostart;
 pub mod config_watcher;
 pub mod engine_bridge;
 pub mod input;

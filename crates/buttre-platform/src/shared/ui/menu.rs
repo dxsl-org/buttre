@@ -5,7 +5,7 @@ use crate::shared::ui::{load_menu_icon, CHECK_ICON_BYTES};
 use buttre_core::state::Settings;
 use buttre_core::vietnamese::config_loader::MethodMetadata;
 use muda::accelerator::{Accelerator, Code, Modifiers};
-use muda::{IconMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{CheckMenuItem, IconMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 /// Menu items that need to be accessed for event handling
 pub struct MenuItems {
@@ -15,6 +15,15 @@ pub struct MenuItems {
     pub vni_item: IconMenuItem,
     pub nom_item: IconMenuItem, // Unified Nôm method
     pub custom_items: Vec<(MethodMetadata, IconMenuItem)>,
+    /// Tùy chọn → "Học thông minh": live on/off for personal learning.
+    /// muda auto-toggles the checkmark on click; the event handler reads
+    /// `is_checked()` for the new state.
+    pub hoc_thong_minh_item: CheckMenuItem,
+    /// Tùy chọn → "Tự động khởi động": OS login autostart.
+    pub khoi_dong_item: CheckMenuItem,
+    /// Root-level "Từ đã học": opens learning.toml in the default editor so
+    /// the user can inspect and hand-edit what buttre has learned.
+    pub tu_da_hoc_item: MenuItem,
     pub huong_dan_item: MenuItem,
     pub thoat_item: MenuItem,
 }
@@ -199,17 +208,24 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
         custom_count += 1;
     }
 
-    // 4. Tùy chọn submenu
+    // 4. Tùy chọn submenu — only REAL, working switches live here.
+    // (The old disabled "Tự động sửa lỗi chính tả"/"Gõ tắt" placeholders are
+    // gone: engine leniency intentionally does no spell-check, and gõ tắt —
+    // if built — gets its own macros.toml mechanism, per ADR-0001.)
     let tuy_chon_menu = Submenu::new("Tùy chọn", true);
-    // Note: muda doesn't have CheckMenuItem, using regular MenuItem for now
-    let auto_correct_item = MenuItem::new("Tự động sửa lỗi chính tả", false, None);
-    let shorthand_item = MenuItem::new("Gõ tắt", false, None);
-    let startup_item = MenuItem::new("Tự động khởi động", false, None);
+    // "Học thông minh" — the personal-learning switch, checked from the
+    // persisted setting; toggling it takes effect live (no restart).
+    let hoc_thong_minh_item =
+        CheckMenuItem::new("Học thông minh", true, settings.learning_enabled, None);
+    // "Tự động khởi động" — OS login autostart (registry Run key / XDG
+    // autostart); registration is (re-)applied in main.rs.
+    let khoi_dong_item = CheckMenuItem::new("Tự động khởi động", true, settings.startup, None);
     let _chuyen_ma_item = MenuItem::new("Chuyển mã", true, None);
     let huong_dan_item = MenuItem::new("Hướng dẫn", true, None);
-    let _ = tuy_chon_menu.append_items(&[&auto_correct_item, &shorthand_item, &startup_item]);
+    let _ = tuy_chon_menu.append_items(&[&hoc_thong_minh_item, &khoi_dong_item]);
 
     // 5. Other items
+    let tu_da_hoc_item = MenuItem::new("Từ đã học", true, None);
     let thoat_item = MenuItem::new("Thoát", true, None);
 
     // Assemble menu
@@ -227,6 +243,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     let _ = menu.append_items(&[
         &PredefinedMenuItem::separator(),
         &tuy_chon_menu,
+        &tu_da_hoc_item,
         &PredefinedMenuItem::separator(),
         &huong_dan_item,
         &thoat_item,
@@ -239,6 +256,9 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
         vni_item,
         nom_item,
         custom_items,
+        hoc_thong_minh_item,
+        khoi_dong_item,
+        tu_da_hoc_item,
         huong_dan_item,
         thoat_item,
     };
