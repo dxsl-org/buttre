@@ -31,6 +31,8 @@ async-queue = []  # Enable async queue processing for hook optimization
 # Core dependencies
 buttre-core = { path = "../buttre-core" }
 buttre-engine = { path = "../buttre-engine" }
+buttre-autostart = { path = "../buttre-autostart" }
+buttre-config = { path = "../buttre-config" }
 log = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

@@ -110,14 +110,31 @@ impl Settings {
         Self::default()
     }
 
-    /// Save settings to file
+    /// Save settings to file — atomically (temp file + rename).
+    ///
+    /// Not just belt-and-suspenders: the config window (a separate process)
+    /// and the tray both now touch this file — the tray watches it for
+    /// live-reload (`buttre-platform/src/main.rs`'s settings watcher) — so a
+    /// plain in-place write could race a concurrent read and hand back a
+    /// half-written, unparseable file. Mirrors `LearningStore::write_atomic`
+    /// / `MacroStore::write_atomic`'s existing pattern.
+    ///
+    /// The temp filename is unique per call (see
+    /// `super::atomic_write::unique_temp_path`'s doc): with two independent
+    /// PROCESSES (the config window and the tray) able to save this same
+    /// file — plus, in tests, many THREADS in one process — a shared temp
+    /// name would let one writer's `fs::write` truncate mid-write of
+    /// another's, or one writer's rename consume the temp file out from
+    /// under a concurrent one.
     ///
     /// # Errors
     /// Returns an error if the settings file cannot be written.
     pub fn save(&self) -> Result<()> {
         let path = Self::get_path()?;
         let content = toml::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        let tmp_path = super::atomic_write::unique_temp_path(&path, "toml");
+        fs::write(&tmp_path, content)?;
+        fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 }

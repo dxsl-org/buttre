@@ -1,0 +1,36 @@
+[package]
+name = "buttre-config"
+version = "0.7.7-beta"
+edition = "2021"
+description = "Native config window for buttre (separate process, launched via `buttre --config`)"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# A library, not a binary: `buttre-platform`'s `--config` arg-dispatch arm
+# calls `buttre_config::run()`. Keeps the winit-0.30 (Slint) dependency out
+# of every OTHER buttre-platform code path — only the thin arg-dispatch arm
+# links it, never coexisting with the tray's own winit-0.29 event loop.
+crate-type = ["lib"]
+
+[dependencies]
+anyhow = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
+single-instance = "0.3"
+# Explicit backend/renderer only — the default feature set pulls in an
+# optional Qt backend (`i-slint-backend-qt`) that this project deliberately
+# does not depend on (no Qt install requirement on any build/CI machine).
+slint = { version = "1.9", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+] }
+buttre-core = { path = "../buttre-core" }
+buttre-autostart = { path = "../buttre-autostart" }
+
+[build-dependencies]
+slint-build = "1.9"

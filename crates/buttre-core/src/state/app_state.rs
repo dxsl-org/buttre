@@ -138,6 +138,16 @@ impl AppState {
         self.settings.save()
     }
 
+    /// Persist the backspace-deletion mode (`"grapheme"`/`"raw"`) — same
+    /// owner-object rationale as [`Self::set_learning_enabled`]. Applying
+    /// the mode to the LIVE keyboard is the caller's responsibility (this
+    /// only updates the persisted setting); `buttre-platform`'s config-
+    /// window watcher does both together.
+    pub fn set_backspace_mode(&mut self, mode: &str) -> anyhow::Result<()> {
+        self.settings.backspace_mode = mode.to_string();
+        self.settings.save()
+    }
+
     /// Set the input method and notify observers
     ///
     /// This is the primary method for changing the input method. It will:

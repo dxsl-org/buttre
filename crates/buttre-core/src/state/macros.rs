@@ -189,11 +189,14 @@ impl MacroStore {
 
     /// Atomically persist `file` to `macros.toml` (temp file + rename) —
     /// mirrors `LearningStore::write_atomic`. Used by the config window
-    /// (P3), not by anything at the typing layer.
+    /// (P3), not by anything at the typing layer. Temp filename is unique
+    /// per call (see `Settings::save`'s doc): this file already has two
+    /// potential writers (tray's seed-if-missing, the future config window)
+    /// in different processes.
     pub fn write_atomic(file: &MacroFile) -> Result<()> {
         let path = Self::get_path()?;
         let toml_str = format!("{FILE_HEADER}{}", toml::to_string_pretty(file)?);
-        let tmp_path = path.with_extension("toml.tmp");
+        let tmp_path = super::atomic_write::unique_temp_path(&path, "toml");
         fs::write(&tmp_path, toml_str)?;
         fs::rename(&tmp_path, &path)?;
         Ok(())

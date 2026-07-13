@@ -1,0 +1,101 @@
+import { TabWidget, ComboBox, CheckBox, Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export component ConfigWindow inherits Window {
+    title: "buttre — Cấu hình";
+    preferred-width: 460px;
+    preferred-height: 340px;
+    min-width: 420px;
+    min-height: 300px;
+
+    // Mirrors `buttre_core::state::Settings` field-for-field — `run()` sets
+    // these from `Settings::load()` and reads them back in `on-save`.
+    in-out property <[string]> method-names: ["English", "Telex", "VNI"];
+    in-out property <int> method-index: 1;
+    in-out property <bool> autostart: false;
+    in-out property <bool> raw-backspace: false;
+    in-out property <bool> learning-enabled: true;
+    in-out property <bool> shorthand-enabled: false;
+
+    // `run()` handles this: build a `Settings` from the properties above and
+    // atomically save it. Fired by the "Lưu" button.
+    callback save-settings();
+
+    VerticalBox {
+        TabWidget {
+            Tab {
+                title: "Chung";
+                VerticalBox {
+                    HorizontalBox {
+                        Text {
+                            text: "Kiểu gõ mặc định:";
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            model: method-names;
+                            current-index <=> method-index;
+                        }
+                    }
+                    CheckBox {
+                        text: "Tự động khởi động cùng hệ điều hành";
+                        checked <=> autostart;
+                    }
+                    CheckBox {
+                        text: "Xóa lùi theo phím thô (thay vì theo ký tự hiển thị)";
+                        checked <=> raw-backspace;
+                    }
+                    CheckBox {
+                        text: "Học thông minh (ghi nhớ âm tiết lạ + lựa chọn của bạn)";
+                        checked <=> learning-enabled;
+                    }
+                    CheckBox {
+                        text: "Gõ tắt (macros.toml)";
+                        checked <=> shorthand-enabled;
+                    }
+                }
+            }
+            Tab {
+                title: "Từ đã học";
+                VerticalBox {
+                    Text {
+                        text: "Bảng xem/xóa từ đã học sẽ có ở giai đoạn sau.\nHiện tại: menu tray → \"Từ đã học\" để mở learning.toml.";
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            Tab {
+                title: "Gõ tắt";
+                VerticalBox {
+                    Text {
+                        text: "Bảng thêm/sửa/xóa gõ tắt sẽ có ở giai đoạn sau.\nHiện tại: menu tray → \"Quản lý gõ tắt\" để mở macros.toml.";
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            Tab {
+                title: "Giới thiệu";
+                VerticalBox {
+                    Text {
+                        text: "buttre — Bộ gõ tiếng Việt";
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "Giấy phép: GPL 3.0";
+                    }
+                    Text {
+                        text: "github.com/dxsl-org/buttre";
+                    }
+                }
+            }
+        }
+        HorizontalBox {
+            alignment: end;
+            Button {
+                text: "Lưu";
+                primary: true;
+                clicked => {
+                    save-settings();
+                }
+            }
+        }
+    }
+}

@@ -56,14 +56,27 @@ fn apply_backspace_mode(keyboard: &Arc<RwLock<Option<Keyboard>>>, mode: Backspac
 /// default, `BackspaceMode::Grapheme`), which would otherwise silently drop
 /// the user's persisted raw-backspace preference. Must be registered AFTER
 /// `KeyboardObserver` so the new instance already exists when this fires.
+///
+/// `mode` is a `Mutex`, not a plain field: before the config window (P2),
+/// backspace mode could only ever be set once at startup (no tray toggle
+/// existed), so a fixed value was sufficient. Now the settings-file watcher
+/// in the event loop below can update it live via `set_mode`, and this
+/// observer must read the CURRENT value on every subsequent method switch,
+/// not whatever was current at construction time.
 struct BackspaceModeObserver {
     keyboard: Arc<RwLock<Option<Keyboard>>>,
-    mode: BackspaceMode,
+    mode: Mutex<BackspaceMode>,
+}
+
+impl BackspaceModeObserver {
+    fn set_mode(&self, mode: BackspaceMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
 }
 
 impl StateObserver for BackspaceModeObserver {
     fn on_method_changed(&self, _method: &str, _enabled: bool) {
-        apply_backspace_mode(&self.keyboard, self.mode);
+        apply_backspace_mode(&self.keyboard, *self.mode.lock().unwrap());
     }
 
     fn on_settings_changed(&self, _settings: &Settings) {}
@@ -230,6 +243,50 @@ fn watch_macros_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher>
     Some(watcher)
 }
 
+/// Watch settings.toml's directory for on-disk changes (the config window's
+/// "Lưu", or a hand-edit) — same shape as `watch_learning_file`/
+/// `watch_macros_file`. See the call site's comment for how the reader
+/// tells its own writes apart from a genuine external change.
+fn watch_settings_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    use notify::{RecursiveMode, Watcher};
+    let path = match Settings::get_path() {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("settings.toml path unresolved, hand-edit reload disabled: {e:?}");
+            return None;
+        }
+    };
+    let dir = path.parent()?.to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
+        return None;
+    }
+    let file_name = path.file_name()?.to_os_string();
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
+                {
+                    let _ = tx.send(());
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("settings.toml watcher failed, hand-edit reload disabled: {e:?}");
+                return None;
+            }
+        };
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+        warn!("settings.toml watch failed, hand-edit reload disabled: {e:?}");
+        return None;
+    }
+    Some(watcher)
+}
+
 /// Tray → "Gõ tắt": open macros.toml in the platform's default editor —
 /// mirrors `open_learning_file`. Writes an empty, self-documented file first
 /// when none exists yet, so the user always opens a real file.
@@ -285,6 +342,19 @@ fn main() -> Result<()> {
         if std::env::args().any(|arg| arg == "--ime") {
             return buttre_platform::platforms::linux::run_engine_auto();
         }
+    }
+
+    // `--config`: launch the native Slint config window as a separate
+    // process sharing this same binary — mirrors the `--ibus`/`--ime`
+    // dispatch above. Checked BEFORE the tray's single-instance lock below:
+    // the config window has its OWN single-instance lock (`buttre-config`'s
+    // `run()`), independent of whether the tray is running, so a user can
+    // open "Cấu hình…" while the tray keeps typing live. Must never run
+    // alongside the tray's own winit-0.29 event loop in the same process —
+    // see `buttre-config`'s crate doc for why the two winit versions can
+    // never coexist.
+    if std::env::args().any(|arg| arg == "--config") {
+        return buttre_config::run();
     }
 
     // Single instance check
@@ -399,7 +469,7 @@ fn main() -> Result<()> {
     // may have changed since it was registered (update/move), and re-writing
     // the same entry is idempotent. Failure is a warning, never fatal.
     if settings.startup {
-        if let Err(e) = buttre_platform::shared::autostart::set_enabled(true) {
+        if let Err(e) = buttre_autostart::set_enabled(true) {
             warn!("autostart re-registration failed: {e:?}");
         }
     }
@@ -528,6 +598,14 @@ fn main() -> Result<()> {
     // --- AppState Setup with Observers ---
     let app_state = Arc::new(Mutex::new(AppState::with_settings(settings.clone())));
 
+    // Held outside the observer list too (Arc is shared, not moved) so the
+    // settings-file watcher below can call `set_mode` directly — the config
+    // window can change backspace mode without a method switch happening.
+    let backspace_mode_observer = Arc::new(BackspaceModeObserver {
+        keyboard: keyboard.clone(),
+        mode: Mutex::new(backspace_mode),
+    });
+
     // Register observers
     let ui_rx = {
         let mut state = app_state.lock().unwrap();
@@ -538,10 +616,7 @@ fn main() -> Result<()> {
         // Backspace-mode observer (event-sourcing-completion Phase 4) - MUST
         // be registered AFTER KeyboardObserver so the Keyboard instance it
         // re-applies the mode to already reflects the new method.
-        state.add_observer(Arc::new(BackspaceModeObserver {
-            keyboard: keyboard.clone(),
-            mode: backspace_mode,
-        }));
+        state.add_observer(backspace_mode_observer.clone());
 
         // Backend observer - updates Platform backend mode
         state.add_observer(backend.clone());
@@ -556,6 +631,20 @@ fn main() -> Result<()> {
         info!("Registered 3 observers");
         ui_rx // Pass receiver to outer scope
     };
+
+    // Watch settings.toml so the config window's "Lưu" applies live without
+    // a tray restart (P2 requirement F5). Own-write suppression here is
+    // COMPARISON-based, not timer-based (unlike the learning.toml watcher):
+    // the tray itself writes this file on every method switch / autostart /
+    // learning / shorthand toggle via `AppState`, so on every watcher fire
+    // the event loop diffs the reloaded file against `AppState`'s own
+    // in-memory settings (always "what the tray itself last intended") —
+    // equal means it was our own write (or a no-op edit), no reload needed;
+    // different means a genuine external change (config window), apply it.
+    // This avoids the "external edit racing our own autosave gets silently
+    // dropped" gap a fixed suppression window would have.
+    let (settings_file_tx, settings_file_rx) = mpsc::channel::<()>();
+    let _settings_watcher = watch_settings_file(settings_file_tx);
 
     // --- Event Loop ---
     let menu_channel = muda::MenuEvent::receiver();
@@ -650,6 +739,114 @@ fn main() -> Result<()> {
                     keyboard_manager.set_macros(macros_store.clone());
                 }
 
+                // settings.toml edited externally (config window's "Lưu", or
+                // a hand-edit): diff against what the tray itself believes
+                // (`AppState`'s in-memory settings — always up to date with
+                // the tray's OWN writes) and apply only the fields that
+                // actually changed, through the exact same code paths the
+                // tray's own menu handlers use below.
+                if settings_file_rx.try_iter().count() > 0 {
+                    let known = app_state.lock().unwrap().settings().clone();
+                    let new_settings = Settings::load();
+                    if new_settings != known {
+                        info!("settings.toml changed externally — applying");
+
+                        // `auto_correct` has no runtime side effect to apply
+                        // (unused field — engine leniency intentionally does
+                        // no spell-check) but MUST still be synced into
+                        // `AppState`'s in-memory copy first: every setter
+                        // below re-saves the WHOLE settings struct, and
+                        // without this sync a lone external edit to
+                        // `auto_correct` would be silently reverted by the
+                        // next field's setter call (stale in-memory value
+                        // winning over the just-applied external one).
+                        if new_settings.auto_correct != known.auto_correct {
+                            app_state.lock().unwrap().settings_mut().auto_correct =
+                                new_settings.auto_correct;
+                        }
+
+                        if new_settings.input_method != known.input_method {
+                            if let Err(e) = app_state
+                                .lock()
+                                .unwrap()
+                                .set_method(&new_settings.input_method)
+                            {
+                                error!("Failed to apply external method change: {:?}", e);
+                            }
+                        }
+                        if new_settings.backspace_mode != known.backspace_mode {
+                            let mode =
+                                BackspaceMode::from_settings_str(&new_settings.backspace_mode);
+                            backspace_mode_observer.set_mode(mode);
+                            apply_backspace_mode(&keyboard, mode);
+                            if let Err(e) = app_state
+                                .lock()
+                                .unwrap()
+                                .set_backspace_mode(&new_settings.backspace_mode)
+                            {
+                                error!("Failed to persist external backspace_mode change: {:?}", e);
+                            }
+                        }
+                        if new_settings.learning_enabled != known.learning_enabled {
+                            learning_enabled = new_settings.learning_enabled;
+                            if learning_enabled {
+                                *learning_store.lock().unwrap() = LearningStore::load();
+                                keyboard_manager
+                                    .set_learning(learning_store.clone(), learning_tx.clone());
+                            } else {
+                                keyboard_manager.clear_learning();
+                            }
+                            hoc_thong_minh_item.set_checked(learning_enabled);
+                            if let Err(e) = app_state
+                                .lock()
+                                .unwrap()
+                                .set_learning_enabled(learning_enabled)
+                            {
+                                error!(
+                                    "Failed to persist external learning_enabled change: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                        if new_settings.shorthand != known.shorthand {
+                            shorthand_enabled = new_settings.shorthand;
+                            if shorthand_enabled {
+                                *macros_store.lock().unwrap() = MacroStore::load();
+                                keyboard_manager.set_macros(macros_store.clone());
+                            } else {
+                                keyboard_manager.clear_macros();
+                            }
+                            go_tat_item.set_checked(shorthand_enabled);
+                            if let Err(e) =
+                                app_state.lock().unwrap().set_shorthand(shorthand_enabled)
+                            {
+                                error!("Failed to persist external shorthand change: {:?}", e);
+                            }
+                        }
+                        if new_settings.startup != known.startup {
+                            match buttre_autostart::set_enabled(new_settings.startup) {
+                                Ok(()) => {
+                                    khoi_dong_item.set_checked(new_settings.startup);
+                                    if let Err(e) =
+                                        app_state.lock().unwrap().set_startup(new_settings.startup)
+                                    {
+                                        error!(
+                                            "Failed to persist external startup change: {:?}",
+                                            e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "autostart set_enabled({}) failed: {e:?}",
+                                        new_settings.startup
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(action) = hotkey_manager.check_hotkey() {
                     match action {
                         HotkeyAction::Toggle => {
@@ -730,7 +927,7 @@ fn main() -> Result<()> {
                         // fails, so the UI never shows a state the OS
                         // doesn't have.
                         let enabled = khoi_dong_item.is_checked();
-                        match buttre_platform::shared::autostart::set_enabled(enabled) {
+                        match buttre_autostart::set_enabled(enabled) {
                             Ok(()) => {
                                 info!("Tự động khởi động: {}", enabled);
                                 if let Err(e) = app_state.lock().unwrap().set_startup(enabled) {

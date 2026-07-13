@@ -293,10 +293,17 @@ impl LearningStore {
     /// Caller is responsible for calling this off any keystroke-handling
     /// lock (see the module doc's save-threading section) — this function
     /// itself does the actual (potentially slow) disk I/O.
+    ///
+    /// Temp filename is unique per call (see `Settings::save`'s doc / the
+    /// shared `atomic_write` module for why): a future writer of this file
+    /// in a SEPARATE process (the config window, P3) must never share a
+    /// temp name with the Hook process's own writes, and multiple TESTS
+    /// running as parallel threads in one process must never share one
+    /// either.
     pub fn write_atomic(file: &LearningFile) -> Result<()> {
         let path = Self::get_path()?;
         let toml_str = format!("{FILE_HEADER}{}", toml::to_string_pretty(file)?);
-        let tmp_path = path.with_extension("toml.tmp");
+        let tmp_path = super::atomic_write::unique_temp_path(&path, "toml");
         fs::write(&tmp_path, toml_str)?;
         fs::rename(&tmp_path, &path)?;
         Ok(())

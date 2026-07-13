@@ -33,6 +33,7 @@
 //! ```
 
 mod app_state;
+mod atomic_write;
 pub mod learning;
 pub mod macros;
 mod observer;

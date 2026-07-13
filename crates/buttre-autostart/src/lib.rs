@@ -1,9 +1,12 @@
-//! OS autostart registration for the tray app (Tùy chọn → "Tự động khởi
-//! động").
+//! OS autostart registration for buttre. Shared by the tray process
+//! (`buttre-platform`'s Tùy chọn → "Tự động khởi động") and the config
+//! window (`buttre-config`'s General tab) so both apply the exact same
+//! per-OS registration logic — a bug fixed once fixes it everywhere.
 //!
-//! Registration is re-applied on every launch while the setting is on (see
-//! `main.rs`), so a moved/updated executable heals its own registration —
-//! the registry/desktop entry always points at the exe that last ran.
+//! Registration is re-applied on every tray launch while the setting is on
+//! (see `buttre-platform/src/main.rs`), so a moved/updated executable heals
+//! its own registration — the registry/desktop entry always points at the
+//! exe that last ran.
 
 /// Register or unregister launching buttre at login for the CURRENT user.
 /// Never requires elevation on any platform.

@@ -4,6 +4,9 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- app: thêm cửa sổ Cấu hình native (`buttre --config`, Slint) — tab Chung điều khiển kiểu gõ mặc định, tự động khởi động, chế độ xóa lùi, học thông minh, gõ tắt; lưu là áp dụng ngay cho tray đang chạy (không cần khởi động lại), kể cả khi tray tự đổi cùng lúc; single-instance; process riêng biệt (crash cửa sổ config không ảnh hưởng gõ chữ)
+- core: `Settings::save`/`LearningStore::write_atomic`/`MacroStore::write_atomic` giờ dùng tên file tạm duy nhất theo từng lần gọi (không chỉ theo PID) — tránh race giữa nhiều tiến trình (config window + tray) lẫn nhiều luồng chạy song song trong cùng tiến trình (test suite)
+- core: gộp logic autostart vào crate `buttre-autostart` dùng chung giữa tray và cửa sổ config
 - engine: thêm gõ tắt (macros.toml) — tự định nghĩa chuỗi gõ tắt (vd. vn → Việt Nam), chỉ nổ khi gõ đúng nguyên cả từ rồi sang dấu cách/dấu câu (không nổ giữa chừng, không nổ khi là một phần của từ khác); Ctrl+Shift+Z đảo về nguyên văn; cơ chế tách biệt hoàn toàn khỏi học cá nhân hóa (ADR-0001) — deterministic, tự tay định nghĩa, không suy luận
 - tray: thêm "Tùy chọn → Gõ tắt" bật/tắt gõ tắt ngay lập tức + menu "Quản lý gõ tắt" mở macros.toml để xem/tự sửa, tự nạp lại khi sửa tay
 - core: bất biến record-replay cho học cá nhân hóa (ADR-0001) — toggle literal trên raw dạng undo xóa pref cũ thay vì ghi pref không thể replay
