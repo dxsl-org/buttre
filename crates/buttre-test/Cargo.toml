@@ -1,6 +1,6 @@
 [package]
 name = "buttre-test"
-version = "0.7.7-beta"
+version.workspace = true
 edition = "2021"
 description = "Unified testing and benchmarking tool for Buttre"
 # Internal workspace crate — never published to crates.io.

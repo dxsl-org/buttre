@@ -49,6 +49,14 @@ export component ConfigWindow inherits Window {
     callback open-macros-file();
     in property <string> macro-form-message: "";
     in property <bool> macro-form-is-error: false;
+
+    // ── Giới thiệu ────────────────────────────────────────────────────────
+    // `run()` sets this from `env!("CARGO_PKG_VERSION")` — single-sourced
+    // from Cargo.toml so the version string can never drift out of sync
+    // with a hardcoded literal (the bug the old help_dialog.rs MessageBox
+    // had: "0.7.7-beta" baked in, silently stale after every release bump).
+    in property <string> version: "";
+    callback open-url(string);
     // Purely local UI state (the add/edit form below the macro table) —
     // never touched from Rust. Empty `editing-trigger` = "add new" mode;
     // non-empty = editing the row whose CURRENT trigger matches it.
@@ -223,16 +231,72 @@ export component ConfigWindow inherits Window {
             }
             Tab {
                 title: "Giới thiệu";
-                VerticalBox {
-                    Text {
-                        text: "buttre — Bộ gõ tiếng Việt";
-                        font-weight: 700;
-                    }
-                    Text {
-                        text: "Giấy phép: GPL 3.0";
-                    }
-                    Text {
-                        text: "github.com/dxsl-org/buttre";
+                ScrollView {
+                    VerticalBox {
+                        Text {
+                            text: "buttre — Bộ Gõ Tiếng Việt";
+                            font-weight: 700;
+                            font-size: 16px;
+                        }
+                        Text {
+                            text: "Phiên bản: " + root.version;
+                        }
+                        Text {
+                            text: "Giấy phép: GPL 3.0";
+                        }
+                        Text {
+                            text: "Chuẩn mã: NFC (Unicode dựng sẵn)";
+                        }
+                        Rectangle { height: 8px; }
+                        Text {
+                            text: "KIỂU GÕ & PHÍM TẮT:";
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "• Ctrl+Shift+Space  →  Bật/Tắt tiếng Việt\n• Ctrl+Shift+1 → Telex\n• Ctrl+Shift+2 → VNI\n• Ctrl+Shift+3 → Nôm\n• Ctrl+Shift+4 → ...\n• Ctrl+Shift+Z → Đảo từ vừa gõ giữa nguyên văn/bỏ dấu";
+                            wrap: word-wrap;
+                        }
+                        Rectangle { height: 8px; }
+                        Text {
+                            text: "HỌC THÔNG MINH:";
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "buttre ghi nhớ âm tiết lạ bạn gõ ≥3 lần và lựa chọn Ctrl+Shift+Z của bạn vào learning.toml. Xem/sửa ở tab \"Từ đã học\". Bật/tắt ở tab \"Chung\".";
+                            wrap: word-wrap;
+                        }
+                        Rectangle { height: 8px; }
+                        Text {
+                            text: "GÕ TẮT:";
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Tự định nghĩa chuỗi gõ tắt (vd. vn → Việt Nam) ở tab \"Gõ tắt\". Chỉ nổ khi gõ đúng nguyên cả từ. Đảo lại: Ctrl+Shift+Z. Bật/tắt ở tab \"Chung\".";
+                            wrap: word-wrap;
+                        }
+                        Rectangle { height: 8px; }
+                        Text {
+                            text: "TÀI LIỆU & MÃ NGUỒN:";
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "github.com/dxsl-org/buttre";
+                            color: blue;
+                            TouchArea {
+                                clicked => { root.open-url("https://github.com/dxsl-org/buttre"); }
+                            }
+                        }
+                        Text {
+                            text: "BÁO LỖI:";
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "github.com/dxsl-org/buttre/issues";
+                            color: blue;
+                            TouchArea {
+                                clicked => { root.open-url("https://github.com/dxsl-org/buttre/issues"); }
+                            }
+                        }
                     }
                 }
             }

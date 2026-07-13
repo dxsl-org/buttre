@@ -89,11 +89,11 @@ fn discover_methods() -> Vec<MethodChoice> {
     methods
 }
 
-/// Open `path` in the platform's default editor — mirrors
-/// `buttre-platform/src/main.rs`'s `open_learning_file`/`open_macros_file`
-/// (duplicated rather than shared: it's three lines, and sharing it would
-/// mean depending on `buttre-platform`, which this crate deliberately does
-/// not, to keep winit-0.29 out of the `--config` code path).
+/// Open `path` in the platform's default editor. Small enough to keep
+/// self-contained rather than pull in a shared helper crate — sharing it
+/// would mean depending on `buttre-platform` (or a new crate) for three
+/// lines, and this crate deliberately stays clear of `buttre-platform`'s
+/// winit-0.29 dependency chain.
 fn open_in_editor(path: &std::path::Path) {
     let result = if cfg!(target_os = "windows") {
         std::process::Command::new("notepad.exe").arg(path).spawn()
@@ -170,6 +170,36 @@ pub fn run() -> anyhow::Result<()> {
     window.set_raw_backspace(settings.backspace_mode == "raw");
     window.set_learning_enabled(settings.learning_enabled);
     window.set_shorthand_enabled(settings.shorthand);
+    // Single-sourced from Cargo.toml — the old help_dialog.rs MessageBox
+    // had this hardcoded ("0.7.7-beta") and silently went stale after every
+    // release bump; `CARGO_PKG_VERSION` can never drift.
+    window.set_version(env!("CARGO_PKG_VERSION").into());
+
+    window.on_open_url(|url| {
+        // Windows: `explorer.exe <url>` (NOT `cmd /C start`) — explorer
+        // passes the URL as a single CreateProcess argv with no cmd.exe
+        // shell re-parse in between, so it can't be confused by shell
+        // metacharacters (`&`, `|`, `^`, …) the way `cmd /C start "" <url>`
+        // can (cmd re-splits its `/C` command line on those even though
+        // `Command::args` already quoted the argv boundary correctly —
+        // e.g. any query-string URL containing `&` would silently break,
+        // or worse, execute a second command if this callback is ever fed
+        // a less-trusted string than today's two hardcoded literals).
+        let result = if cfg!(target_os = "windows") {
+            std::process::Command::new("explorer.exe")
+                .arg(url.as_str())
+                .spawn()
+        } else if cfg!(target_os = "macos") {
+            std::process::Command::new("open").arg(url.as_str()).spawn()
+        } else {
+            std::process::Command::new("xdg-open")
+                .arg(url.as_str())
+                .spawn()
+        };
+        if let Err(e) = result {
+            eprintln!("cannot open {url}: {e:?}");
+        }
+    });
 
     let weak = window.as_weak();
     window.on_save_settings(move || {

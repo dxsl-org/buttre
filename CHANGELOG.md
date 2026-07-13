@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- app: tab Giới thiệu trong cửa sổ Cấu hình có nội dung thật (phiên bản qua CARGO_PKG_VERSION, phím tắt, liên kết mở bằng trình duyệt mặc định) — thay MessageBox cũ đã xóa
+- docs: ADR-0002 — tray chỉ sở hữu chọn kiểu gõ, cửa sổ Cấu hình sở hữu mọi thứ còn lại
 - tray: gọn lại còn kiểu gõ + "Cấu hình…" + "Thoát" — Học thông minh/Tự động khởi động/Gõ tắt/Từ đã học/Quản lý gõ tắt/Hướng dẫn chuyển hết vào cửa sổ Cấu hình (mở qua "Cấu hình…", process riêng); xóa MessageBox hướng dẫn cũ
 - app: cửa sổ Cấu hình thêm tab "Từ đã học" (bảng xem/xóa âm tiết đã học, "Quên tất cả", vẫn giữ nút mở tệp gốc) và tab "Gõ tắt" (bảng thêm/sửa/xóa/bật-tắt macro, cảnh báo không chặn khi gõ tắt trùng một âm tiết tiếng Việt thật — điểm khác biệt so với mọi bộ gõ Việt khác)
 - app: thêm cửa sổ Cấu hình native (`buttre --config`, Slint) — tab Chung điều khiển kiểu gõ mặc định, tự động khởi động, chế độ xóa lùi, học thông minh, gõ tắt; lưu là áp dụng ngay cho tray đang chạy (không cần khởi động lại), kể cả khi tray tự đổi cùng lúc; single-instance; process riêng biệt (crash cửa sổ config không ảnh hưởng gõ chữ)

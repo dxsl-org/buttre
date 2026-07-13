@@ -12,6 +12,13 @@ members = [
 ]
 resolver = "2"
 
+# Single-sourced across every crate via `version.workspace = true` — a
+# release that bumps this once can never leave one crate's Cargo.toml
+# (or the config window's About tab, which reads its own crate's
+# `CARGO_PKG_VERSION`) silently out of sync with the rest.
+[workspace.package]
+version = "0.7.7-beta"
+
 # Workspace-wide dependencies
 [workspace.dependencies]
 unicode-normalization = "0.1"

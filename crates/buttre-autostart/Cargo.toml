@@ -1,6 +1,6 @@
 [package]
 name = "buttre-autostart"
-version = "0.7.7-beta"
+version.workspace = true
 edition = "2021"
 description = "OS login-autostart registration for buttre — shared by the tray process and the config window"
 publish = false

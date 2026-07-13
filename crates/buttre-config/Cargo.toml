@@ -1,6 +1,6 @@
 [package]
 name = "buttre-config"
-version = "0.7.7-beta"
+version.workspace = true
 edition = "2021"
 description = "Native config window for buttre (separate process, launched via `buttre --config`)"
 publish = false
