@@ -2,9 +2,9 @@
 
 > Tổng quan kiến trúc đầy đủ của buttre Vietnamese Input Method Engine
 
-**Cập nhật lần cuối**: 2026-07-03 (event-sourcing-completion: un-latch, boundary repair, learning, controls)
-**Phiên bản**: 0.7.0-beta
-**Trạng thái**: Core sẵn sàng production, Tích hợp platform đang thực hiện
+**Cập nhật lần cuối**: 2026-07-13 (config-window-and-shorthand plan complete: macros, config window, Slint UI, tray refactor)
+**Phiên bản**: 0.7.7-beta
+**Trạng thái**: Core sẵn sàng production, Config window + Shorthand shipped (Win/Linux), macOS config DEFERRED
 
 ---
 
@@ -15,8 +15,9 @@
 3. [Kiến Trúc Pipeline](#kiến-trúc-pipeline)
 4. [Quản Lý State](#quản-lý-state)
 5. [Luồng Dữ Liệu](#luồng-dữ-liệu)
-6. [Tích Hợp Platform](#tích-hợp-platform)
-7. [Nguyên Tắc Thiết Kế](#nguyên-tắc-thiết-kế)
+6. [Gõ Tắt & Cửa Sổ Cấu Hình](#gõ-tắt--cửa-sổ-cấu-hình)
+7. [Tích Hợp Platform](#tích-hợp-platform)
+8. [Nguyên Tắc Thiết Kế](#nguyên-tắc-thiết-kế)
 
 ---
 
@@ -31,26 +32,41 @@ buttre là engine bộ gõ tiếng Việt đa nền tảng được viết bằn
 ### Kiến Trúc Cấp Cao
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Tầng Platform                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ Windows TSF  │  │  macOS IMKit │  │ Linux IBus   │          │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
-└─────────┼──────────────────┼──────────────────┼─────────────────┘
-          │                  │                  │
-┌─────────┼──────────────────┼──────────────────┼─────────────────┐
-│         │      buttre-core (Độc Lập Nền Tảng) │                  │
-│         └──────────────────┴──────────────────┘                 │
-│              Giao Diện Keyboard + Kiểu Action                   │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-┌─────────────────────────┴───────────────────────────────────────┐
-│                   buttre-engine (Pipeline)                        │
-│  ┌────────────────────────────────────────────────────────┐    │
-│  │   Pipeline Xử Lý 7 Giai Đoạn (Config-Driven)           │    │
-│  │   Telex | VNI | VIQR | Hán Nôm                         │    │
-│  └────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                  Tầng UI & Cấu Hình                                  │
+│  ┌──────────────────┐         ┌────────────────────────────────┐    │
+│  │ buttre-platform  │         │   buttre-config (Slint)        │    │
+│  │ (Tray + Tùy chọn)│─────────│   --config: separate process   │    │
+│  └─────────┬────────┘         │   Chung|Từ đã học|Gõ tắt|Giới │    │
+│            │                  └───────────────────┬────────────┘    │
+│            │ File watch + apply via AppState      │                 │
+│  ┌─────────┴──────────────┬──────────────────────┴─────┐            │
+│  │ settings.toml          │ learning.toml              │ macros.toml │
+│  │ (atomic sync)          │ (atomic sync)              │ (atomic)    │
+│  └─────────────┬──────────┴────────────┬───────────────┘            │
+└────────────────┼───────────────────────┼──────────────────────────────┘
+                 │                       │
+              ┌──┴───────────────────────┴──────┐
+              │  buttre-core (Độc Lập Nền Tảng) │
+              │  Keyboard + gõ tắt expand       │
+              └─────────────┬────────────────────┘
+                            │
+    ┌───────────────────────┴───────────────────────┐
+    │       buttre-engine (Pipeline)                 │
+    │  ┌──────────────────────────────────────────┐ │
+    │  │  Pipeline 7 Giai Đoạn (Config-Driven)   │ │
+    │  │  Telex | VNI | VIQR | Hán Nôm           │ │
+    │  └──────────────────────────────────────────┘ │
+    └────────────────┬──────────────────────────────┘
+                     │
+    ┌────────────────┴────────────────────────────┐
+    │      Tầng Platform                          │
+    │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
+    │  │Windows   │  │ macOS    │  │ Linux    │ │
+    │  │ TSF      │  │ IMKit    │  │ IBus/    │ │
+    │  │          │  │ (future) │  │ Fcitx5   │ │
+    │  └──────────┘  └──────────┘  └──────────┘ │
+    └──────────────────────────────────────────────┘
 ```
 
 ---
@@ -210,7 +226,51 @@ buttre-platform/
 
 ---
 
-#### 4. `buttre-test` — Tiện Ích Kiểm Thử
+#### 4. `buttre-config` — Cửa Sổ Cấu Hình (Slint)
+
+**Mục đích**: UI cấu hình native per-platform
+
+**Vị trí**: `crates/buttre-config/`
+
+**Trách nhiệm**:
+- Cửa sổ cấu hình riêng quy trình (Slint GPLv3 branch)
+- Giao diện native (Fluent trên Windows, Cupertino trên macOS sau này)
+- 4 tabs: Chung (settings, autostart, shorthand toggle) / Từ đã học (edit learning.toml) / Gõ tắt (CRUD macros.toml) / Giới thiệu
+- Live sync hai chiều via file watchers (settings.toml / learning.toml / macros.toml)
+- Nút "Cấu hình…" tray spawn process này via `current_exe() --config`
+
+**Các Module Chính**:
+```
+buttre-config/
+├── src/
+│   ├── lib.rs                 # Entry point (run), method discovery
+│   ├── learned_adapter.rs     # Adapter đọc/ghi learning.toml
+│   ├── macro_adapter.rs       # Adapter đọc/ghi macros.toml
+│   └── ui/
+│       └── config.slint       # Giao diện Slint (4 tabs)
+└── build.rs                   # Slint compile-to-Rust
+```
+
+**Đóng gói**: `--config` arg-dispatch là một process RIÊNG (reuse `current_exe()`) vì Slint dùng winit-0.30 còn tray dùng winit-0.29 — hai event loop không thể coexist. One binary, nhưng launch-time dispatch (xem Decision 1 trong plan).
+
+---
+
+#### 5. `buttre-autostart` — Đăng Ký Khởi Động Hệ Thống
+
+**Mục đích**: Per-platform autostart registration
+
+**Vị trí**: `crates/buttre-autostart/`
+
+**Trách nhiệm**:
+- Windows: `HKEY_CURRENT_USER\...\Run` registry entry
+- Linux: `~/.config/autostart/buttre.desktop` (freedesktop XDG)
+- macOS: unsupported-with-reason (IMKit do hệ thống khởi chạy, không có tray process)
+
+Re-applied on every tray launch khi setting on (tay exec heals registration nếu exe di chuyển).
+
+---
+
+#### 6. `buttre-test` — Tiện Ích Kiểm Thử
 
 **Mục đích**: Hạ tầng kiểm thử đa nền tảng
 
@@ -456,6 +516,82 @@ pub enum Action {
     HideCandidates,                         // Ẩn candidates
 }
 ```
+
+---
+
+## Gõ Tắt & Cửa Sổ Cấu Hình
+
+### Gõ Tắt (Shorthand / Macros)
+
+**Mô-đun**: `crates/buttre-core/src/state/macros.rs` + `Keyboard::expand_macros` (`keyboard/engine.rs`)
+
+Gõ tắt là một cơ chế RIÊNG BIỆT từ học cá nhân hóa (ADR-0001):
+- **Deterministic, user-authored**: Người dùng tạo bảng raw→expansion trong `macros.toml` (ví dụ: `vn = { expand = "Việt Nam" }`)
+- **Không bao giờ tự động suy luận**: Khác với learning (overlay từ typing behavior), macros phải viết tay
+- **Giữ bất biến record-replay**: Macro chỉ là một raw sequence → text literal, không ảnh hưởng tới learning engine
+
+**Tệp cấu hình**: `~/.local/share/buttre/macros.toml` (Linux/Windows), `~/Library/Application Support/buttre/macros.toml` (macOS)
+
+**Định dạng**:
+```toml
+[macros]
+vn = { expand = "Việt Nam", enabled = true }
+brb = { expand = "be right back" }    # enabled defaults to true
+```
+
+**Cơ chế mở rộng**:
+- Xảy ra tại tầng `Keyboard` word-boundary layer (xem `Keyboard::expand_macros`)
+- Chỉ nổ trên CLOSED word run — trigger phải khớp CHÍNH XÁC cả từ giữa hai separator (không phát động giữa chừng)
+- Case-insensitive lookup (triggers lưu lowercased, matching learning-key convention)
+- Terminator-only: expansion xảy ra khi gõ dấu cách / dấu câu, không giữa chừng từ
+- Gated by `Settings::shorthand` toggle (toàn bộ tắt via Tray "Tùy chọn" hoặc Config window tab Chung)
+- Nếu một macro vừa nổ, `Ctrl+Shift+Z` revert về literal raw (reuses toggle-freeze cơ chế)
+
+**Tệp quản lý**:
+- **Config window** (tab Gõ tắt): CRUD entries + toggle per-entry
+- **Tray item**: "Quản lý gõ tắt" (xem/sửa raw file)
+- Atomic write + directory watcher (tài xế, tự reload live)
+- Per-entry ceiling (tối đa 256 chars expansion) + file ceiling (256 KB)
+- Collision safety: autogenerated `trigger-must-match-exactly-at-word-boundary` — không cần conflict-detection UI
+
+---
+
+### Cửa Sổ Cấu Hình (Config Window)
+
+**Mô-đun**: `crates/buttre-config/` (Slint, separate-process)
+
+**Mục đích**: UI sở hữu TOÀN BỘ tính năng cấu hình (ADR-0002: tray chỉ sở hữu method selection).
+
+**Spawnpoint**: Tray item "Cấu hình…" → `std::process::Command::new(current_exe()).arg("--config").spawn()`
+
+**Tại sao process riêng?**
+- Slint dùng winit-0.30 API
+- Tray dùng winit-0.29 API
+- Hai event loop không thể coexist trong cùng process
+- Một binary nhưng arg-dispatch tại startup (mirroring `--ibus`/`--ime` logic)
+
+**UI (4 Tabs)**:
+
+| Tab | Nội dung | Ghi |
+|-----|---------|-----|
+| **Chung (General)** | Kiểu gõ mặc định (dropdown), Tự động khởi động (checkbox), Chế độ xóa lùi (dropdown), Học thông minh (checkbox), Gõ tắt (checkbox) | Settings/autostart direct apply |
+| **Từ đã học (Learned)** | Bảng xem/xóa `user_attested` từ learning.toml | Per-row delete button; live reload |
+| **Gõ tắt (Macros)** | Bảng CRUD macros.toml entries (trigger / expand / enabled toggle) | Add/edit/delete rows; atomic save |
+| **Giới thiệu (About)** | Phiên bản (dynamically read từ `CARGO_PKG_VERSION`), phím tắt, liên kết | Read-only |
+
+**Đồng bộ Tray ↔ Config Window** (file-watch, không IPC):
+- Tray chạy directory watchers cho `settings.toml` / `learning.toml` / `macros.toml`
+- Config window ghi atomic-write khi nút Lưu
+- Tray phát hiện change → re-apply qua AppState (cùng code path như tray UI actions)
+- Không cần IPC, no cross-process mutation contention
+
+**Ghi Settings**: Mọi write đi qua `AppState::set_method()` / `set_shorthand()` / v.v., which re-save `Settings` toàn bộ atomic (không có out-of-band `Settings::save` clobbering).
+
+**Single-instance guard**: Nếu user click "Cấu hình…" hai lần, invocation thứ hai exit ngay (no cross-process focus primitive).
+
+**Styling**: Native per-platform (Fluent trên Windows; Cupertino trên macOS sau IMKit release).
+
+**macOS status**: DEFERRED. Win/Linux ship the config window now. macOS edits `macros.toml`/`settings.toml` as raw files until IMKit host + helper `.app` sẵn sàng (Decision 4, plan).
 
 ---
 
