@@ -933,7 +933,8 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                         }
                         Action::UpdateComposition { text, cursor } => {
                             debug!("UpdateComposition: text={}, cursor={}", text, cursor);
-                            if let Err(e) = self.this.write_text(&context, &text, cursor, sink.clone())
+                            if let Err(e) =
+                                self.this.write_text(&context, &text, cursor, sink.clone())
                             {
                                 debug!("Failed to update composition: {:?}", e);
                                 return Ok(BOOL(0));

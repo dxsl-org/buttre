@@ -39,7 +39,9 @@ fn test_mode_switch() {
     // Test Telex: a + s -> á
     engine.process_key('a');
     let actions = engine.process_key('s');
-    assert!(actions.iter().any(|a| matches!(a, Action::UpdateComposition { .. })));
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, Action::UpdateComposition { .. })));
     assert_eq!(engine.buffer_content(), "á");
 
     // Switch to VNI
@@ -49,7 +51,9 @@ fn test_mode_switch() {
     // Test VNI: a + 1 -> á
     engine.process_key('a');
     let actions = engine.process_key('1');
-    assert!(actions.iter().any(|a| matches!(a, Action::UpdateComposition { .. })));
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, Action::UpdateComposition { .. })));
     assert_eq!(engine.buffer_content(), "á");
 }
 
@@ -73,7 +77,9 @@ fn test_process_key_surfaces_confirm_and_trailing_separator() {
         "expected a ConfirmComposition action, got {actions:?}"
     );
     assert!(
-        actions.iter().any(|a| matches!(a, Action::Commit(text) if text == ".")),
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::Commit(text) if text == ".")),
         "the trailing separator must not be dropped, got {actions:?}"
     );
 }
