@@ -64,6 +64,16 @@ pub struct PipelineExecutor {
     /// data" method for the other 6 stages that never consult one. See
     /// [`Self::set_learning_snapshot`].
     compose_live_opts: Option<Arc<RwLock<ComposeOpts>>>,
+
+    /// Raw keys (separator excluded) of the word most recently confirmed by
+    /// the `PassThrough` branch, stashed BEFORE `reset()` wipes
+    /// `char_buffer`. `ConfirmComposition`'s payload alone is not enough for
+    /// callers that need the word's raw identity (the caller layer matches
+    /// raw runs against user-authored tables) — by the time they see the
+    /// action, the buffer is already gone. Consumed via
+    /// [`Self::take_confirmed_raw`]; macro-agnostic: this is raw the
+    /// executor already owns, nothing here knows what callers do with it.
+    last_confirmed_raw: Vec<char>,
 }
 
 impl PipelineExecutor {
@@ -152,6 +162,7 @@ impl PipelineExecutor {
             use_composition,
             boundary_repair_opts,
             compose_live_opts,
+            last_confirmed_raw: Vec::new(),
         }
     }
 
@@ -331,6 +342,12 @@ impl PipelineExecutor {
                         let confirmed = self
                             .boundary_repair_excluding_last()
                             .unwrap_or_else(|| self.context.syllable_buffer.clone());
+                        // Stash the confirmed word's raw run (same slice the
+                        // repair above read) before reset() destroys it — see
+                        // `last_confirmed_raw`'s field doc.
+                        let len = self.context.char_buffer.len();
+                        self.last_confirmed_raw =
+                            self.context.char_buffer[..len.saturating_sub(1)].to_char_vec();
                         debug!("Confirming composition: {}", confirmed);
                         actions.push(Action::ConfirmComposition(confirmed));
                     }
@@ -355,6 +372,22 @@ impl PipelineExecutor {
         // All stages returned Continue — should not happen because OutputStage always emits.
         warn!("All stages returned Continue — OutputStage should have terminated processing");
         vec![Action::DoNothing]
+    }
+
+    /// Take (and clear) the raw keys of the word most recently confirmed via
+    /// `ConfirmComposition` — empty when nothing has been confirmed since the
+    /// last take. See `last_confirmed_raw`'s field doc for why the stash
+    /// exists at all.
+    pub fn take_confirmed_raw(&mut self) -> Vec<char> {
+        std::mem::take(&mut self.last_confirmed_raw)
+    }
+
+    /// Raw keys currently in `char_buffer` (the live, not-yet-confirmed
+    /// word). Companion to [`Self::boundary_repair`] for callers that need
+    /// the word's raw identity at an external commit point (Enter/nav),
+    /// where the buffer has NOT been reset yet.
+    pub fn raw_char_vec(&self) -> Vec<char> {
+        self.context.char_buffer.to_char_vec()
     }
 
     /// Reset the pipeline to initial state (clears char_buffer, syllable_buffer, etc.).

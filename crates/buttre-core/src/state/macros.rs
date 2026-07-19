@@ -152,6 +152,18 @@ impl MacroStore {
         Self::from_file(file)
     }
 
+    /// [`Self::load`] gated on `Settings::shorthand` — the single helper
+    /// every backend (tray, TSF, Linux engine processes) calls so the
+    /// "toggle off == empty store == expansion never fires" equivalence has
+    /// exactly one spelling.
+    pub fn load_gated(shorthand: bool) -> Self {
+        if shorthand {
+            Self::load()
+        } else {
+            Self::default()
+        }
+    }
+
     /// Apply load-time hardening to a raw [`MacroFile`]: sanitize/lowercase
     /// keys, drop entries below the min trigger length or over the max
     /// expansion length, cap total count. A malformed entry is dropped

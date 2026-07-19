@@ -518,9 +518,15 @@ impl Keyboard {
                     });
                 }
                 EngineAction::ConfirmComposition(text) => {
-                    // Update buffer with confirmed text
-                    self.buffer = text.clone();
-                    result.push(Action::ConfirmComposition(text.clone()));
+                    // Composition-mode shorthand seam: the separator that
+                    // produced this action closed the word's raw run — the
+                    // one moment expansion may fire (mirrors multiword's
+                    // closed-run-only rule). No store wired → `apply_macro`
+                    // returns `text` untouched and the take is a free move.
+                    let raw = self.executor.take_confirmed_raw();
+                    let confirmed = self.apply_macro(&raw, text.clone());
+                    self.buffer = confirmed.clone();
+                    result.push(Action::ConfirmComposition(confirmed));
                 }
                 EngineAction::ShowCandidates { candidates, input } => {
                     result.push(Action::ShowCandidates {
@@ -801,11 +807,33 @@ impl Keyboard {
     /// word through `compose_one_word` on every window recompute (see its
     /// doc) — a separate retroactive query there would be redundant, so this
     /// always returns `None` when `multiword` is active.
+    /// Shorthand note: this is the composition mode's SECOND commit surface
+    /// (Enter/nav bypass `process()` entirely), so the same closed-run macro
+    /// lookup applied at `ConfirmComposition` runs here too — a trigger
+    /// committed via Enter must expand exactly like one committed via space.
+    /// The expansion check cannot hide behind the repair's own `None`
+    /// ("projection identical to display", e.g. raw `vn` composes to `vn`):
+    /// identical-projection words are precisely where triggers usually live,
+    /// so the store is consulted whenever macros are wired and the buffer is
+    /// non-empty.
     pub fn boundary_repair(&self) -> Option<String> {
         if self.multiword {
             return None;
         }
-        self.executor.boundary_repair()
+        let repaired = self.executor.boundary_repair();
+        if self.macros.is_some() {
+            let raw = self.executor.raw_char_vec();
+            if !raw.is_empty() {
+                let display = repaired
+                    .clone()
+                    .unwrap_or_else(|| self.executor.syllable().to_string());
+                let expanded = self.apply_macro(&raw, display.clone());
+                if expanded != display {
+                    return Some(expanded);
+                }
+            }
+        }
+        repaired
     }
 
     // ── Multi-word window helpers ─────────────────────────────────────────────
@@ -1041,6 +1069,29 @@ impl Keyboard {
         }
         for (end, expansion) in hits {
             self.macro_map.insert(end, expansion);
+        }
+    }
+
+    /// Composition-mode counterpart of the multiword `macro_map` consult:
+    /// given a CLOSED word run's raw keys and its composed rendering, return
+    /// the expansion when the raw exactly matches an enabled trigger, else
+    /// the composed text unchanged. Pure projection over the raw log — no
+    /// state is written, so re-deriving (backspace re-opens the word, next
+    /// confirm re-checks) is automatic. Callers guarantee closedness: the
+    /// two call sites are `ConfirmComposition` (separator just closed the
+    /// run) and `boundary_repair` (Enter/nav commit closes it).
+    fn apply_macro(&self, raw: &[char], composed: String) -> String {
+        let Some(handle) = self.macros.clone() else {
+            return composed;
+        };
+        if raw.is_empty() {
+            return composed;
+        }
+        let key: String = raw.iter().collect();
+        let store = handle.lock().unwrap_or_else(PoisonError::into_inner);
+        match store.lookup(&key) {
+            Some(expansion) => expansion.to_string(),
+            None => composed,
         }
     }
 
