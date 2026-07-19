@@ -26,14 +26,22 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      # The benchmark action's `cargo` tool parses the TEXT OUTPUT of
-      # `cargo bench` (it understands criterion's "time: [..]" lines) — it
-      # does not read criterion's target/criterion JSON tree. criterion 0.5
-      # prints its report to STDERR (stdout carries only the libtest harness
-      # noise), so both streams must be captured or the action finds no
-      # "time:" lines and fails with "No benchmark result was found".
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion
+
+      # github-action-benchmark's built-in `cargo` parser only understands
+      # libtest's `test ... bench: N ns/iter` format — NOT criterion's
+      # `time: [..]` report, so every prior run stored zero results and
+      # failed with "No benchmark result was found". Emit cargo-criterion's
+      # structured JSON message stream and reduce it to the action's
+      # customSmallerIsBetter schema (nanoseconds, lower is better) with jq
+      # (preinstalled on GitHub runners).
       - name: Run benchmarks
-        run: cargo bench --workspace 2>&1 | tee bench-output.txt
+        run: |
+          cargo criterion --workspace --message-format=json \
+            | jq -s '[.[] | select(.reason == "benchmark-complete")
+                     | {name: .id, unit: .typical.unit, value: .typical.estimate}]' \
+            > bench-output.json
         shell: bash
 
       - name: Store benchmark result
@@ -41,8 +49,8 @@ jobs:
         if: github.event_name != 'pull_request'
         with:
           name: buttre Benchmarks
-          tool: 'cargo'
-          output-file-path: bench-output.txt
+          tool: 'customSmallerIsBetter'
+          output-file-path: bench-output.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           # Show alert when performance degrades
