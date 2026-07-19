@@ -32,8 +32,12 @@ export component ConfigWindow inherits Window {
     in-out property <bool> shorthand-enabled: false;
 
     // `run()` handles this: build a `Settings` from the properties above and
-    // atomically save it. Fired by the "Lưu" button.
+    // atomically save it. Fired by EVERY user change on the "Chung" tab
+    // (instant-apply — there is no explicit save button; the tray's file
+    // watcher picks each write up live).
     callback save-settings();
+    // Close the window ("Đóng") — settings are already saved on change.
+    callback close-window();
 
     // ── Từ đã học ─────────────────────────────────────────────────────────
     in property <[LearnedWordRow]> learned-words: [];
@@ -49,7 +53,6 @@ export component ConfigWindow inherits Window {
     // returning; the form only clears on `true`.
     callback save-macro(string, string, string, bool) -> bool;
     callback delete-macro(string);
-    callback toggle-macro-enabled(string, bool);
     callback open-macros-file();
     in property <string> macro-form-message: "";
     in property <bool> macro-form-is-error: false;
@@ -104,23 +107,31 @@ export component ConfigWindow inherits Window {
                             // showing the first entry ("English") no matter
                             // which method is actually active.
                             current-value <=> method-value;
+                            // User-initiated only (programmatic sets don't
+                            // fire it) — safe with run()'s post-frame
+                            // selection re-assert.
+                            selected => { root.save-settings(); }
                         }
                     }
                     CheckBox {
                         text: "Tự động khởi động cùng hệ điều hành";
                         checked <=> autostart;
+                        toggled => { root.save-settings(); }
                     }
                     CheckBox {
                         text: "Xóa lùi theo phím thô (thay vì theo ký tự hiển thị)";
                         checked <=> raw-backspace;
+                        toggled => { root.save-settings(); }
                     }
                     CheckBox {
                         text: "Học thông minh (ghi nhớ âm tiết lạ + lựa chọn của bạn)";
                         checked <=> learning-enabled;
+                        toggled => { root.save-settings(); }
                     }
                     CheckBox {
                         text: "Gõ tắt (macros.toml)";
                         checked <=> shorthand-enabled;
+                        toggled => { root.save-settings(); }
                     }
                 }
             }
@@ -169,23 +180,34 @@ export component ConfigWindow inherits Window {
                     ScrollView {
                         VerticalLayout {
                             for row in root.macro-rows: HorizontalBox {
+                                // A disabled row is dimmed + labeled; the
+                                // flag itself is only editable through the
+                                // edit form ("Sửa") — no per-row toggle.
                                 Text {
                                     text: row.trigger;
                                     horizontal-stretch: 1;
                                     vertical-alignment: center;
+                                    opacity: row.enabled ? 1 : 0.45;
                                 }
                                 Text {
                                     text: row.expand;
                                     horizontal-stretch: 2;
                                     vertical-alignment: center;
                                     overflow: elide;
+                                    opacity: row.enabled ? 1 : 0.45;
                                 }
-                                CheckBox {
-                                    checked: row.enabled;
-                                    toggled => { root.toggle-macro-enabled(row.trigger, self.checked); }
+                                if !row.enabled: Text {
+                                    text: "tắt";
+                                    color: gray;
+                                    vertical-alignment: center;
                                 }
+                                // "×" (U+00D7), not "✕" (U+2715): the
+                                // latter has no glyph in the default UI
+                                // font and renders as a tofu box.
                                 Button {
-                                    text: "Sửa";
+                                    text: "✎";
+                                    width: 32px;
+                                    height: 32px;
                                     clicked => {
                                         editing-trigger = row.trigger;
                                         form-trigger = row.trigger;
@@ -194,7 +216,9 @@ export component ConfigWindow inherits Window {
                                     }
                                 }
                                 Button {
-                                    text: "Xóa";
+                                    text: "×";
+                                    width: 32px;
+                                    height: 32px;
                                     clicked => { root.delete-macro(row.trigger); }
                                 }
                             }
@@ -322,10 +346,10 @@ export component ConfigWindow inherits Window {
         HorizontalBox {
             alignment: end;
             Button {
-                text: "Lưu";
+                text: "Đóng";
                 primary: true;
                 clicked => {
-                    save-settings();
+                    close-window();
                 }
             }
         }

@@ -11,8 +11,9 @@
 //!
 //! Live-sync with the resident tray process is file-watch only (no IPC): this
 //! window reads `Settings::load()` on open and calls `Settings::save()`
-//! (atomic) on "Lưu" — the tray's own directory watcher (mirroring the one
-//! already wired for `learning.toml`/`macros.toml`) picks up the change and
+//! (atomic) on EVERY control change (instant-apply — the "Đóng" button only
+//! closes) — the tray's own directory watcher (mirroring the one already
+//! wired for `learning.toml`/`macros.toml`) picks up each change and
 //! re-applies it live.
 
 use buttre_core::state::learning::LearningStore;
@@ -313,18 +314,17 @@ pub fn run() -> anyhow::Result<()> {
         refresh_macro_rows(&window);
     });
 
-    let weak = window.as_weak();
-    window.on_toggle_macro_enabled(move |trigger, enabled| {
-        let Some(window) = weak.upgrade() else { return };
-        if let Err(e) = macro_adapter::set_enabled(&trigger, enabled) {
-            eprintln!("failed to toggle macro: {e:?}");
-        }
-        refresh_macro_rows(&window);
-    });
-
     window.on_open_macros_file(|| {
         if let Ok(path) = MacroStore::get_path() {
             open_in_editor(&path);
+        }
+    });
+
+    // "Đóng" — every setting already saved itself on change, so closing is
+    // the button's only job.
+    window.on_close_window(|| {
+        if let Err(e) = slint::quit_event_loop() {
+            eprintln!("quit_event_loop failed: {e:?}");
         }
     });
 

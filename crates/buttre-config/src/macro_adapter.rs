@@ -145,15 +145,6 @@ pub fn edit(
     Ok(check_collision(new_trigger.trim()))
 }
 
-/// Flip a single row's `enabled` flag without touching anything else.
-pub fn set_enabled(trigger: &str, enabled: bool) -> anyhow::Result<()> {
-    let mut store_file = MacroStore::load().snapshot_for_save();
-    if let Some(entry) = store_file.macros.get_mut(&trigger.to_lowercase()) {
-        entry.enabled = enabled;
-    }
-    MacroStore::write_atomic(&store_file)
-}
-
 /// Delete one macro.
 pub fn delete(trigger: &str) -> anyhow::Result<()> {
     let mut store_file = MacroStore::load().snapshot_for_save();
