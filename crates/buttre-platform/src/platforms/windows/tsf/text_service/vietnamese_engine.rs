@@ -4,11 +4,16 @@
 // **Tests**: Integration tests for this module are located in `crates/buttre-platform/tests/platform_windows_tsf_tests.rs`.
 
 use super::candidate_ui::CandidateItem;
+use super::macro_reload::spawn_reload_watcher;
+use buttre_core::state::macros::MacroStore;
 use buttre_core::Action;
 use buttre_core::InputBuffer;
 use buttre_core::Keyboard;
 use buttre_core::KeyboardBuilder;
+use buttre_core::Settings;
+use notify::RecommendedWatcher;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Vietnamese input mode
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,23 +31,58 @@ pub struct VietnameseEngine {
     mode: VietnameseMode,
     keyboard: Option<Keyboard>,
     buffer: InputBuffer,
+    /// Shorthand/gõ tắt store (`wire-shorthand-tsf-linux` Phase 3): shared
+    /// with every `Keyboard` this engine builds via `load_keyboard`, and
+    /// swapped in place by `_macros_watcher` on external `macros.toml` /
+    /// `settings.toml` edits — the live `Keyboard`s see the update through
+    /// the shared `Arc` without needing re-injection.
+    macros: Arc<Mutex<MacroStore>>,
+    /// Live-reload watcher, kept alive only to hold the watch open for this
+    /// engine's lifetime — dropped (stopping the watch) when the engine
+    /// drops, i.e. on TSF `Deactivate`. `None` when the watch could not be
+    /// established (see `spawn_reload_watcher`); typing still works, just
+    /// without live reload.
+    _macros_watcher: Option<RecommendedWatcher>,
 }
 
 impl VietnameseEngine {
-    /// Create a new Vietnamese engine
+    /// Create a new Vietnamese engine.
+    ///
+    /// This is the FIRST config load in the TSF process (no prior code path
+    /// read `settings.toml` or `macros.toml` here) — both `Settings::load`
+    /// and `MacroStore::load_gated` degrade to safe defaults on any IO/parse
+    /// failure rather than erroring, which matters because this DLL runs
+    /// in-process inside an arbitrary host app under `panic = abort`.
     pub fn new(mode: VietnameseMode) -> Self {
-        let keyboard = Self::load_keyboard(&mode);
+        let shorthand = Settings::load().shorthand;
+        let macros = Arc::new(Mutex::new(MacroStore::load_gated(shorthand)));
+        let mut engine = Self::new_with_macros(mode, macros.clone());
+        engine._macros_watcher = spawn_reload_watcher(macros);
+        engine
+    }
 
+    /// Create a new Vietnamese engine with an EXPLICIT shorthand store,
+    /// bypassing `Settings::load`/`MacroStore::load_gated` and the
+    /// live-reload watcher entirely. Used by integration tests
+    /// (`platform_windows_tsf_tests.rs`) that must never touch a real
+    /// `%APPDATA%` file — production code calls [`Self::new`] instead.
+    pub fn new_with_macros(mode: VietnameseMode, macros: Arc<Mutex<MacroStore>>) -> Self {
+        let keyboard = Self::load_keyboard(&mode, &macros);
         Self {
             mode,
             keyboard,
             buffer: InputBuffer::new(),
+            macros,
+            _macros_watcher: None,
         }
     }
 
-    /// Load keyboard instance for given mode
-    fn load_keyboard(mode: &VietnameseMode) -> Option<Keyboard> {
-        match mode {
+    /// Load keyboard instance for given mode, wiring in the shared shorthand
+    /// store (`macros`) for every mode — including when shorthand is off,
+    /// in which case `macros` holds an empty `MacroStore` and every lookup
+    /// is a no-op, byte-identical to shorthand being unwired entirely.
+    fn load_keyboard(mode: &VietnameseMode, macros: &Arc<Mutex<MacroStore>>) -> Option<Keyboard> {
+        let mut kb = match mode {
             VietnameseMode::Telex => KeyboardBuilder::telex_with_composition(true).ok(),
             VietnameseMode::VNI => KeyboardBuilder::vni_with_composition(true).ok(),
             VietnameseMode::Nom => {
@@ -77,7 +117,10 @@ impl VietnameseEngine {
                     None
                 }
             }
-        }
+        }?;
+
+        kb.set_macros(macros.clone());
+        Some(kb)
     }
 
     /// Process a key press.
@@ -149,7 +192,7 @@ impl VietnameseEngine {
     /// Switch input mode
     pub fn set_mode(&mut self, mode: VietnameseMode) {
         if self.mode != mode {
-            self.keyboard = Self::load_keyboard(&mode);
+            self.keyboard = Self::load_keyboard(&mode, &self.macros);
             self.mode = mode;
             self.reset();
         }

@@ -7,6 +7,7 @@ pub mod candidate_ui;
 pub mod composition;
 pub mod display_attribute;
 pub mod edit_session;
+pub mod macro_reload;
 pub mod text_service_stub;
 pub mod vietnamese_engine;
 

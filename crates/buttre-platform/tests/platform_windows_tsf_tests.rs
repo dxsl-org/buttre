@@ -2,6 +2,7 @@
 //! tree does not exist on other targets.
 #![cfg(windows)]
 
+use buttre_core::state::macros::{MacroEntry, MacroFile, MacroStore};
 use buttre_core::Action;
 use buttre_platform::platforms::windows::tsf::text_service::candidate_ui::{
     CandidateItem, NomCandidateUI,
@@ -16,8 +17,23 @@ use buttre_platform::platforms::windows::tsf::text_service::vietnamese_engine::{
     VietnameseEngine, VietnameseMode,
 };
 use buttre_platform::platforms::windows::tsf::{com, logging, CLSID_BUTTRE_TEXT_SERVICE};
+use std::sync::{Arc, Mutex};
 use windows::core::{GUID, HSTRING};
 use windows::Win32::UI::TextServices::ITfDisplayAttributeInfo;
+
+/// An in-memory store with `vn` -> "Việt Nam" — never touches
+/// `%APPDATA%`/`macros.toml`, unlike `MacroStore::load`/`load_gated`.
+fn vn_macro_store() -> Arc<Mutex<MacroStore>> {
+    let mut macros = std::collections::HashMap::new();
+    macros.insert(
+        "vn".to_string(),
+        MacroEntry {
+            expand: "Việt Nam".to_string(),
+            enabled: true,
+        },
+    );
+    Arc::new(Mutex::new(MacroStore::from_file(MacroFile { macros })))
+}
 
 #[test]
 fn test_engine_basic() {
@@ -81,6 +97,86 @@ fn test_process_key_surfaces_confirm_and_trailing_separator() {
             .iter()
             .any(|a| matches!(a, Action::Commit(text) if text == ".")),
         "the trailing separator must not be dropped, got {actions:?}"
+    );
+}
+
+/// Phase 3 (wire-shorthand-tsf-linux) success criterion: a TSF engine with a
+/// `vn` -> "Việt Nam" store wired in expands on the separator that closes the
+/// word, and the separator itself is not swallowed (mirrors
+/// `test_process_key_surfaces_confirm_and_trailing_separator` above).
+#[test]
+fn test_tsf_macro_expands_on_separator() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    engine.process_key('v');
+    engine.process_key('n');
+    let actions = engine.process_key(' ');
+
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::ConfirmComposition(text) if text == "Việt Nam")),
+        "expected ConfirmComposition(\"Việt Nam\"), got {actions:?}"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::Commit(text) if text == " ")),
+        "the separator that closed the word must still be committed, got {actions:?}"
+    );
+}
+
+/// Success criterion: `"vn"` + Enter/boundary commit also expands. TSF's own
+/// Enter/reset-key handling in `text_service_stub.rs` queries
+/// `boundary_repair()` BEFORE ending the composition, bypassing
+/// `process_key`/`ConfirmComposition` entirely — this must independently
+/// apply the same macro lookup (see `Keyboard::boundary_repair`).
+#[test]
+fn test_tsf_macro_expands_on_boundary_repair() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    engine.process_key('v');
+    engine.process_key('n');
+
+    assert_eq!(
+        engine.boundary_repair(),
+        Some("Việt Nam".to_string()),
+        "Enter-path boundary_repair must expand the still-open \"vn\" run"
+    );
+}
+
+/// Method switch (Telex<->VNI) must keep expansion working: `set_mode`
+/// rebuilds the `Keyboard` but must re-inject the SAME shared macros store.
+#[test]
+fn test_tsf_macro_survives_mode_switch() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    engine.set_mode(VietnameseMode::VNI);
+
+    engine.process_key('v');
+    engine.process_key('n');
+    let actions = engine.process_key(' ');
+
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::ConfirmComposition(text) if text == "Việt Nam")),
+        "expansion must survive a Telex->VNI method switch, got {actions:?}"
+    );
+}
+
+/// No store (shorthand off) must be byte-identical to today: composed
+/// passthrough, never an expansion.
+#[test]
+fn test_tsf_no_macro_store_passes_through() {
+    let store = Arc::new(Mutex::new(MacroStore::default()));
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, store);
+    engine.process_key('v');
+    engine.process_key('n');
+    let actions = engine.process_key(' ');
+
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::ConfirmComposition(text) if text == "Việt Nam")),
+        "an empty/unwired store must never expand, got {actions:?}"
     );
 }
 
