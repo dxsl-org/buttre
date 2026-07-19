@@ -14,7 +14,9 @@
 //! `handled` is false the backend forwards the ORIGINAL key event to the
 //! app (after any queued commit, so the committed word always lands first).
 
+use buttre_core::state::macros::MacroStore;
 use buttre_core::{Action, Keyboard, KeyboardBuilder};
+use std::sync::{Arc, Mutex};
 
 /// One IME-visible operation, in emission order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +56,13 @@ fn build_keyboard(method: &str) -> Option<Keyboard> {
 pub struct EngineBridge {
     keyboard: Keyboard,
     preedit: String,
+    /// Shorthand/gõ tắt store, re-applied to every fresh `Keyboard` built by
+    /// [`Self::rebuild`] (a rebuild always starts from a store-less
+    /// `Keyboard`). `None` means no host injected one — byte-identical to
+    /// today's behavior. The bridge stays pure: it only holds and forwards
+    /// the `Arc`, never loads or watches `macros.toml` itself (that is the
+    /// Linux host's `platforms::linux::macro_sync` job).
+    macros: Option<Arc<Mutex<MacroStore>>>,
 }
 
 impl EngineBridge {
@@ -68,6 +77,22 @@ impl EngineBridge {
         Self {
             keyboard,
             preedit: String::new(),
+            macros: None,
+        }
+    }
+
+    /// Same as [`Self::new`] but wires a shorthand store into the keyboard
+    /// at construction, and remembers it so [`Self::rebuild`] can re-apply
+    /// it to every subsequent `Keyboard`.
+    pub fn new_with_macros(method: &str, macros: Arc<Mutex<MacroStore>>) -> Self {
+        let mut keyboard = build_keyboard(method)
+            .or_else(|| build_keyboard("telex"))
+            .expect("the built-in telex keyboard must always build");
+        keyboard.set_macros(macros.clone());
+        Self {
+            keyboard,
+            preedit: String::new(),
+            macros: Some(macros),
         }
     }
 
@@ -77,6 +102,21 @@ impl EngineBridge {
         Some(Self {
             keyboard: build_keyboard(method)?,
             preedit: String::new(),
+            macros: None,
+        })
+    }
+
+    /// Fallible counterpart of [`Self::new_with_macros`] for FFI callers
+    /// (macOS host ctor plumbing) — not yet wired into any caller, kept here
+    /// so the store-holding path compiles and is ready for that host to
+    /// adopt without another `EngineBridge` change.
+    pub fn try_new_with_macros(method: &str, macros: Arc<Mutex<MacroStore>>) -> Option<Self> {
+        let mut keyboard = build_keyboard(method)?;
+        keyboard.set_macros(macros.clone());
+        Some(Self {
+            keyboard,
+            preedit: String::new(),
+            macros: Some(macros),
         })
     }
 
@@ -89,7 +129,14 @@ impl EngineBridge {
     /// the requested method fails to build, so `set_method` can report the
     /// failure rather than silently switching to something else or crashing.
     pub fn rebuild(&mut self, method: &str) -> Option<KeyOutcome> {
-        let keyboard = build_keyboard(method)?;
+        let mut keyboard = build_keyboard(method)?;
+        // A fresh `Keyboard` always starts with no store attached — without
+        // this, a method switch would silently disable shorthand until the
+        // next macro_sync reload happened to fire (same reason
+        // `KeyboardManager` re-injects `learning` on method switch).
+        if let Some(store) = &self.macros {
+            keyboard.set_macros(store.clone());
+        }
         self.keyboard = keyboard;
         let mut outcome = KeyOutcome {
             ops: Vec::new(),

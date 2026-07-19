@@ -30,11 +30,13 @@
 mod dispatch;
 
 use super::engine_bridge::EngineBridge;
+use super::macro_sync;
 use super::method_sync::{self, MethodState};
 use anyhow::{anyhow, Result};
+use buttre_core::state::macros::MacroStore;
 use std::collections::HashSet;
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use wayland_client::protocol::wl_seat;
 use wayland_client::{Connection, QueueHandle};
 use wayland_protocols_misc::zwp_input_method_v2::client::{
@@ -98,7 +100,7 @@ pub(crate) struct ImeState {
 }
 
 impl ImeState {
-    fn new(method_state: Arc<MethodState>) -> Self {
+    fn new(method_state: Arc<MethodState>, macros: Arc<Mutex<MacroStore>>) -> Self {
         let method = method_state.method();
         let seen_generation = method_state.generation();
         Self {
@@ -118,7 +120,7 @@ impl ImeState {
             pending_purpose: 0,
             unavailable: false,
             swallowed: HashSet::new(),
-            bridge: EngineBridge::new(&method),
+            bridge: EngineBridge::new_with_macros(&method, macros),
             method_state,
             seen_generation,
         }
@@ -190,8 +192,12 @@ pub fn run_engine() -> Result<()> {
     // inotify watch for the process lifetime. Defer until availability is
     // confirmed, just before the dispatch loop.
     let method_state = MethodState::load();
+    // Loaded eagerly (unlike the method watcher below): shorthand needs no
+    // deferral — an initial load has no thread/inotify handle to leak if
+    // this function later returns `Unavailable`, only the watcher does.
+    let macros = macro_sync::load_initial();
 
-    let mut state = ImeState::new(method_state.clone());
+    let mut state = ImeState::new(method_state.clone(), macros.clone());
     let mut queue = conn.new_event_queue::<ImeState>();
     let qh: QueueHandle<ImeState> = queue.handle();
     display.get_registry(&qh, ());
@@ -219,8 +225,10 @@ pub fn run_engine() -> Result<()> {
     }
 
     // Availability confirmed — now it's safe to start the tray↔engine
-    // method watcher (no IBus fallback will run in this process).
+    // method watcher and the shorthand/gõ tắt watcher (no IBus fallback will
+    // run in this process, so neither would be orphaned by an early return).
     method_sync::spawn_watcher(method_state);
+    macro_sync::spawn_watcher(macros);
 
     tracing::info!("Wayland input method registered; waiting for text-input activation");
     loop {

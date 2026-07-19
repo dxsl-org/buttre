@@ -6,7 +6,10 @@
 //! reaches a bus. The same bridge drives the Linux backends and the macOS
 //! FFI, so this suite pins composition behavior for both.
 
+use buttre_core::state::macros::{MacroEntry, MacroFile, MacroStore};
 use buttre_platform::shared::engine_bridge::{EngineBridge, ImeOp};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 fn type_chars(bridge: &mut EngineBridge, s: &str) -> Vec<ImeOp> {
     let mut ops = Vec::new();
@@ -132,4 +135,85 @@ fn enter_commits_word_and_passes_through() {
     let enter = bridge.process_char('\n');
     assert!(!enter.handled);
     assert_eq!(commits(&enter.ops), vec!["chào"]);
+}
+
+// ============================================================================
+// Shorthand/gõ tắt wiring (phase-02: EngineBridge holds an injected store)
+// ============================================================================
+
+/// A store with a single enabled `vn` -> "Việt Nam" trigger.
+fn vn_store() -> Arc<Mutex<MacroStore>> {
+    let mut macros = HashMap::new();
+    macros.insert(
+        "vn".to_string(),
+        MacroEntry {
+            expand: "Việt Nam".to_string(),
+            enabled: true,
+        },
+    );
+    Arc::new(Mutex::new(MacroStore::from_file(MacroFile { macros })))
+}
+
+#[test]
+fn injected_store_expands_on_separator_commit() {
+    let mut bridge = EngineBridge::new_with_macros("telex", vn_store());
+    type_chars(&mut bridge, "vn");
+    let space = bridge.process_char(' ');
+    assert!(!space.handled, "separator must pass through to the app");
+    assert_eq!(commits(&space.ops), vec!["Việt Nam"]);
+}
+
+#[test]
+fn injected_store_expands_on_flush_pending() {
+    let mut bridge = EngineBridge::new_with_macros("telex", vn_store());
+    type_chars(&mut bridge, "vn");
+    let flush = bridge.flush_pending();
+    assert_eq!(commits(&flush.ops), vec!["Việt Nam"]);
+}
+
+#[test]
+fn injected_store_expands_on_enter() {
+    let mut bridge = EngineBridge::new_with_macros("telex", vn_store());
+    type_chars(&mut bridge, "vn");
+    let enter = bridge.process_char('\n');
+    assert!(!enter.handled);
+    assert_eq!(commits(&enter.ops), vec!["Việt Nam"]);
+}
+
+#[test]
+fn rebuild_reapplies_the_injected_store() {
+    let mut bridge = EngineBridge::new_with_macros("telex", vn_store());
+    bridge.rebuild("vni").expect("vni must build");
+    type_chars(&mut bridge, "vn");
+    let space = bridge.process_char(' ');
+    assert_eq!(
+        commits(&space.ops),
+        vec!["Việt Nam"],
+        "rebuild must re-attach the store to the fresh keyboard"
+    );
+}
+
+#[test]
+fn content_swap_to_empty_store_disables_expansion() {
+    let store = vn_store();
+    let mut bridge = EngineBridge::new_with_macros("telex", store.clone());
+    // Content swap (the live reload model): same Arc, contents replaced.
+    *store.lock().unwrap() = MacroStore::default();
+    type_chars(&mut bridge, "vn");
+    let space = bridge.process_char(' ');
+    assert_eq!(
+        commits(&space.ops),
+        vec!["vn"],
+        "an emptied store must fall through to plain composition"
+    );
+}
+
+#[test]
+fn no_store_injected_behaves_exactly_like_new() {
+    // `new`/`try_new` with no store must stay byte-identical to today.
+    let mut bridge = EngineBridge::new("telex");
+    type_chars(&mut bridge, "vn");
+    let space = bridge.process_char(' ');
+    assert_eq!(commits(&space.ops), vec!["vn"]);
+    assert!(EngineBridge::try_new("telex").is_some());
 }

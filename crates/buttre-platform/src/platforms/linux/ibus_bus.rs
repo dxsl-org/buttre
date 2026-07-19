@@ -17,11 +17,13 @@
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer};
 
 use super::ibus::ButtreEngine;
+use super::macro_sync;
 use super::method_sync::{self, MethodState};
+use buttre_core::state::macros::MacroStore;
 
 // ============================================================================
 // Private-bus address discovery
@@ -127,6 +129,10 @@ struct ButtreFactory {
     /// Shared with the method-file watcher — new engines start on the
     /// CURRENT method, live ones rebuild lazily per keystroke (B5).
     method_state: Arc<MethodState>,
+    /// Shared with `macro_sync`'s watcher (phase-02) — one reload updates
+    /// every live engine at once, same "one Arc, many consumers" wiring as
+    /// `method_state`.
+    macros: Arc<Mutex<MacroStore>>,
 }
 
 #[dbus_interface(name = "org.freedesktop.IBus.Factory")]
@@ -148,7 +154,8 @@ impl ButtreFactory {
         ))
         .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
-        let engine = ButtreEngine::new_with_state(self.method_state.clone());
+        let engine =
+            ButtreEngine::new_with_state_and_macros(self.method_state.clone(), self.macros.clone());
         server
             .at(&path, engine)
             .await
@@ -203,6 +210,11 @@ pub async fn run_engine() -> Result<()> {
     let method_state = MethodState::load();
     method_sync::spawn_watcher(method_state.clone());
 
+    // Shorthand/gõ tắt (phase-02): shared macro store + its own watcher over
+    // macros.toml + settings.toml.
+    let macros = macro_sync::load_initial();
+    macro_sync::spawn_watcher(macros.clone());
+
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
     let _connection = ConnectionBuilder::address(addr.as_str())?
@@ -211,6 +223,7 @@ pub async fn run_engine() -> Result<()> {
             ButtreFactory {
                 engine_counter: 0,
                 method_state,
+                macros,
             },
         )?
         .name("org.freedesktop.IBus.buttre")?

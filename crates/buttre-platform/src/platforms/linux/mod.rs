@@ -6,6 +6,7 @@
 
 pub mod ibus;
 pub mod ibus_bus;
+pub mod macro_sync;
 pub mod method_sync;
 pub mod wayland;
 

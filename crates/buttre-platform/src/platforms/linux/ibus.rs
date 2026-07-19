@@ -20,6 +20,7 @@
 
 use super::engine_bridge::{is_break_keysym, is_modifier_keysym, keysym_to_char, EngineBridge};
 use super::method_sync::MethodState;
+use buttre_core::state::macros::MacroStore;
 use std::sync::{Arc, Mutex};
 use zbus::zvariant;
 use zbus::{dbus_interface, SignalContext};
@@ -76,6 +77,22 @@ impl ButtreEngine {
         engine.seen_generation = state.generation();
         engine.method_state = Some(state);
         engine
+    }
+
+    /// Factory constructor used once shorthand is wired in: same as
+    /// [`Self::new_with_state`], plus the shared macro store, injected into
+    /// the bridge at construction so it survives every later method-switch
+    /// `rebuild` (`EngineBridge::rebuild` re-applies it).
+    pub fn new_with_state_and_macros(
+        state: Arc<MethodState>,
+        macros: Arc<Mutex<MacroStore>>,
+    ) -> Self {
+        let bridge = EngineBridge::new_with_macros(&state.method(), macros);
+        Self {
+            seen_generation: state.generation(),
+            bridge: Arc::new(Mutex::new(bridge)),
+            method_state: Some(state),
+        }
     }
 
     /// Current preedit text (test/diagnostic accessor).
