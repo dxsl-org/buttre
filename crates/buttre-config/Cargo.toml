@@ -33,5 +33,11 @@ buttre-core = { path = "../buttre-core" }
 buttre-engine = { path = "../buttre-engine" }
 buttre-autostart = { path = "../buttre-autostart" }
 
+# Direct winit access for centering the window on open — Slint exposes
+# window positioning but no display geometry, and mixing Win32 metrics with
+# winit coordinates breaks under DPI virtualization. Version must track the
+# `slint` release above (same workspace upstream).
+i-slint-backend-winit = "1.9"
+
 [build-dependencies]
 slint-build = "1.9"

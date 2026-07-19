@@ -22,6 +22,10 @@ export component ConfigWindow inherits Window {
     // these from `Settings::load()` and reads them back in `on-save`.
     in-out property <[string]> method-names: ["English", "Telex", "VNI"];
     in-out property <int> method-index: 1;
+    // Display text of the selected method — kept in lock-step with
+    // `method-index` by `run()` because ComboBox does not re-render its
+    // value when only the index is set programmatically.
+    in-out property <string> method-value: "";
     in-out property <bool> autostart: false;
     in-out property <bool> raw-backspace: false;
     in-out property <bool> learning-enabled: true;
@@ -66,10 +70,26 @@ export component ConfigWindow inherits Window {
     property <bool> form-enabled: true;
 
     VerticalBox {
+        // App identity lives ABOVE the tab bar so it is visible from every
+        // tab — the "Giới thiệu" tab keeps only the long-form content.
+        Text {
+            text: "buttre — Bộ Gõ Tiếng Việt";
+            font-weight: 700;
+            font-size: 16px;
+        }
+        Text {
+            text: "Phiên bản: " + root.version;
+            color: gray;
+        }
         TabWidget {
             Tab {
                 title: "Chung";
                 VerticalBox {
+                    // Pack controls at the top with their preferred heights —
+                    // without this the box distributes the tab's spare
+                    // vertical space across children and the ComboBox row
+                    // balloons.
+                    alignment: start;
                     HorizontalBox {
                         Text {
                             text: "Kiểu gõ mặc định:";
@@ -78,6 +98,12 @@ export component ConfigWindow inherits Window {
                         ComboBox {
                             model: method-names;
                             current-index <=> method-index;
+                            // Two-way on the displayed text too: setting
+                            // current-index from Rust alone does not refresh
+                            // the rendered value, so the box would keep
+                            // showing the first entry ("English") no matter
+                            // which method is actually active.
+                            current-value <=> method-value;
                         }
                     }
                     CheckBox {
@@ -233,14 +259,6 @@ export component ConfigWindow inherits Window {
                 title: "Giới thiệu";
                 ScrollView {
                     VerticalBox {
-                        Text {
-                            text: "buttre — Bộ Gõ Tiếng Việt";
-                            font-weight: 700;
-                            font-size: 16px;
-                        }
-                        Text {
-                            text: "Phiên bản: " + root.version;
-                        }
                         Text {
                             text: "Giấy phép: GPL 3.0";
                         }

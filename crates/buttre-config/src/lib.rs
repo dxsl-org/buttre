@@ -166,6 +166,16 @@ pub fn run() -> anyhow::Result<()> {
     let window = ConfigWindow::new()?;
     window.set_method_names(slint::ModelRc::new(slint::VecModel::from(method_names)));
     window.set_method_index(method_index);
+    // ComboBox renders `current-value`, and setting `current-index` from
+    // Rust does not refresh it — without this the box always displays the
+    // model's first entry ("English") regardless of the active method.
+    window.set_method_value(
+        methods
+            .get(method_index as usize)
+            .map(|m| m.name.as_str())
+            .unwrap_or("English")
+            .into(),
+    );
     window.set_autostart(settings.startup);
     window.set_raw_backspace(settings.backspace_mode == "raw");
     window.set_learning_enabled(settings.learning_enabled);
@@ -318,6 +328,51 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
 
-    window.run()?;
+    window.show()?;
+    center_on_screen(&window);
+
+    // ComboBox discards its selection (back to the model's first entry) when
+    // its model is replaced, and that reset runs lazily during the FIRST
+    // rendered frame — i.e. after every property set above, which is why
+    // setting `method-index` before `show()` is not enough. Re-assert the
+    // loaded selection once that frame is done, and re-center now that the
+    // window reports its real size instead of the pre-frame estimate.
+    let weak = window.as_weak();
+    let method_name = window.get_method_value();
+    slint::Timer::single_shot(std::time::Duration::from_millis(80), move || {
+        let Some(window) = weak.upgrade() else { return };
+        window.set_method_index(method_index);
+        window.set_method_value(method_name);
+        center_on_screen(&window);
+    });
+
+    slint::run_event_loop()?;
     Ok(())
+}
+
+/// Best-effort center on the monitor the window opened on, called right
+/// after `show()` and again after the first frame (the real outer size is
+/// only known then). Everything stays inside winit's own coordinate space —
+/// mixing in Win32 screen metrics breaks under DPI virtualization (a 150%
+/// display reports a different pixel grid than the one winit positions in).
+/// No-op where the platform forbids client-side positioning (Wayland) or
+/// the monitor/size is not known yet.
+fn center_on_screen(window: &ConfigWindow) {
+    use i_slint_backend_winit::winit::dpi::PhysicalPosition;
+    use i_slint_backend_winit::WinitWindowAccessor;
+
+    window.window().with_winit_window(|w| {
+        let Some(monitor) = w.current_monitor() else {
+            return;
+        };
+        let screen = monitor.size();
+        let origin = monitor.position();
+        let size = w.outer_size();
+        if screen.width == 0 || size.width == 0 {
+            return;
+        }
+        let x = origin.x + ((screen.width as i32 - size.width as i32) / 2).max(0);
+        let y = origin.y + ((screen.height as i32 - size.height as i32) / 2).max(0);
+        w.set_outer_position(PhysicalPosition::new(x, y));
+    });
 }
