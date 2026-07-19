@@ -61,6 +61,28 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
+    "BSL-1.0",
+]
+# Slint (config window UI) is tri-licensed `GPL-3.0-only OR
+# LicenseRef-Slint-Royalty-free OR LicenseRef-Slint-commercial`. buttre's own
+# crates are GPL-3.0-only, so we take Slint's GPL branch — scoped per-crate
+# (not added to `allow`) so any OTHER new GPL dependency is still caught.
+exceptions = [
+    { allow = ["GPL-3.0-only"], crate = "slint" },
+    { allow = ["GPL-3.0-only"], crate = "slint-build" },
+    { allow = ["GPL-3.0-only"], crate = "slint-macros" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-backend-linuxkms" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-backend-selector" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-backend-winit" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-common" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-compiler" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-core" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-core-macros" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-femtovg" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-skia" },
+    # libFuzzer's C++ runtime carries the NCSA license (permissive,
+    # OSI-approved); the crate is a fuzz-target-only dependency, never shipped.
+    { allow = ["MIT", "Apache-2.0", "NCSA"], crate = "libfuzzer-sys" },
 ]
 # Require confidence threshold for license detection
 confidence-threshold = 0.8
