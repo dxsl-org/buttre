@@ -10,7 +10,11 @@ on:
 jobs:
   benchmark:
     name: Run Benchmarks
-    runs-on: windows-latest
+    # Linux, not windows-latest: cargo-criterion's IPC with the benchmark
+    # target is broken on Windows ("Failed to receive message from
+    # Criterion.rs benchmark target"). The engine benchmarks are pure,
+    # platform-independent Rust, so the runner OS does not affect results.
+    runs-on: ubuntu-latest
     # github-action-benchmark pushes its data series to the gh-pages branch
     # (auto-push below) and comments on alerts — both need write access; the
     # repo's default GITHUB_TOKEN is read-only.
@@ -36,9 +40,12 @@ jobs:
       # structured JSON message stream and reduce it to the action's
       # customSmallerIsBetter schema (nanoseconds, lower is better) with jq
       # (preinstalled on GitHub runners).
+      # -p buttre-engine, not --workspace: every bench target lives in that
+      # crate and it depends on no other workspace crate, so the job needs
+      # none of buttre-platform's Linux system libraries (ibus, xdo).
       - name: Run benchmarks
         run: |
-          cargo criterion --workspace --message-format=json \
+          cargo criterion -p buttre-engine --message-format=json \
             | jq -s '[.[] | select(.reason == "benchmark-complete")
                      | {name: .id, unit: .typical.unit, value: .typical.estimate}]' \
             > bench-output.json
