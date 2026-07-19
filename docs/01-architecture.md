@@ -2,9 +2,9 @@
 
 > Tổng quan kiến trúc đầy đủ của buttre Vietnamese Input Method Engine
 
-**Cập nhật lần cuối**: 2026-07-13 (config-window-and-shorthand plan complete: macros, config window, Slint UI, tray refactor)
+**Cập nhật lần cuối**: 2026-07-19 (shorthand-wiring: composition-mode expansion seam for TSF/IBus/Wayland/macOS FFI)
 **Phiên bản**: 0.7.7-beta
-**Trạng thái**: Core sẵn sàng production, Config window + Shorthand shipped (Win/Linux), macOS config DEFERRED
+**Trạng thái**: Core sẵn sàng production, Config window shipped (Win/Linux), Shorthand shipped (hook-multiword + composition-mode TSF/IBus/Wayland/macOS FFI), macOS config DEFERRED
 
 ---
 
@@ -523,12 +523,13 @@ pub enum Action {
 
 ### Gõ Tắt (Shorthand / Macros)
 
-**Mô-đun**: `crates/buttre-core/src/state/macros.rs` + `Keyboard::expand_macros` (`keyboard/engine.rs`)
+**Mô-đun**: `crates/buttre-core/src/state/macros.rs` + `Keyboard` (multiword path `expand_macros` + composition path `apply_macro`)
 
 Gõ tắt là một cơ chế RIÊNG BIỆT từ học cá nhân hóa (ADR-0001):
 - **Deterministic, user-authored**: Người dùng tạo bảng raw→expansion trong `macros.toml` (ví dụ: `vn = { expand = "Việt Nam" }`)
 - **Không bao giờ tự động suy luận**: Khác với learning (overlay từ typing behavior), macros phải viết tay
 - **Giữ bất biến record-replay**: Macro chỉ là một raw sequence → text literal, không ảnh hưởng tới learning engine
+- **Cơ chế mở rộng dùng chung**: Một `MacroStore::lookup` được thực thi tại hai seam khác nhau — multiword và composition mode
 
 **Tệp cấu hình**: `~/.local/share/buttre/macros.toml` (Linux/Windows), `~/Library/Application Support/buttre/macros.toml` (macOS)
 
@@ -539,13 +540,21 @@ vn = { expand = "Việt Nam", enabled = true }
 brb = { expand = "be right back" }    # enabled defaults to true
 ```
 
-**Cơ chế mở rộng**:
-- Xảy ra tại tầng `Keyboard` word-boundary layer (xem `Keyboard::expand_macros`)
+**Chế độ Multiword (Hook) — `Keyboard::expand_macros`** (`crates/buttre-core/src/keyboard/engine.rs`):
+- Xảy ra tại tầng `Keyboard` word-boundary layer, **trước** khi gửi text tới platform
 - Chỉ nổ trên CLOSED word run — trigger phải khớp CHÍNH XÁC cả từ giữa hai separator (không phát động giữa chừng)
 - Case-insensitive lookup (triggers lưu lowercased, matching learning-key convention)
 - Terminator-only: expansion xảy ra khi gõ dấu cách / dấu câu, không giữa chừng từ
-- Gated by `Settings::shorthand` toggle (toàn bộ tắt via Tray "Tùy chọn" hoặc Config window tab Chung)
-- Nếu một macro vừa nổ, `Ctrl+Shift+Z` revert về literal raw (reuses toggle-freeze cơ chế)
+- Nếu một macro vừa nổ, `Ctrl+Shift+Z` revert về literal raw (reuses toggle-freeze cơ chế) — **chỉ hoạt động trong chế độ này**
+
+**Chế độ Composition (TSF/IBus/Wayland/macOS FFI) — `Keyboard::apply_macro`** (`crates/buttre-core/src/keyboard/engine.rs`):
+- Xảy ra tại boundary `ConfirmComposition` + `boundary_repair` (xem `buttre-engine::pipeline::PipelineExecutor`)
+- Projection thuần túy trên raw log — lookup đọc từ `MacroStore` mà KHÔNG thay đổi trạng thái
+- Chỉ nổ trên CLOSED word run (separator vừa đóng từ, hoặc Enter/nav bypass gọi `boundary_repair` explicitly)
+- **Không fire trong English mode** (quyết định thiết kế, mọi platform): chọn method English nghĩa là không có engine/composition nào chạy (Windows: `keyboard = None`; Linux: OS input-source switcher chuyển hẳn khỏi buttre) — seam không có chỗ để tồn tại
+- **Known limitation**: `Ctrl+Shift+Z` revert của expansion là no-op trong chế độ composition (`toggle_last_word` chỉ hỗ trợ multiword) — follow-up riêng nếu cần
+
+**Gated by `Settings::shorthand` toggle** (toàn bộ tắt via Tray "Tùy chọn" hoặc Config window tab Chung)
 
 **Tệp quản lý**:
 - **Config window** (tab Gõ tắt): CRUD entries + toggle per-entry
