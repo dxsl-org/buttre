@@ -4,6 +4,11 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.7.9-beta] — 2026-07-20
+
+- engine: gõ tắt kiểu "đt"/"đc"/"đkkd" chạy được ngay không cần tự định nghĩa — cụm phụ âm không nguyên âm bắt đầu bằng "đ" (chỉ sinh ra được từ phím biến đổi chủ ý dd/d9) giữ nguyên dạng đã ghép thay vì rơi về phím thô; thêm tùy chọn "Kiểm soát gắt gao chính tả tiếng Việt" trong tab Chung để tắt độ lỏng này (mặc định lỏng kiểu Unikey), áp dụng ngay trên mọi backend (hook, TSF, IBus, Wayland)
+- scripts: `build-hook.ps1` build bản release theo mặc định — trước đây build debug (~32MB) khiến bản cài thực tế nặng gấp 5 lần bản release thật (~6.4MB); thêm cờ `-Debug` cho ai cần build nhanh để test, không dùng để cài
+- core: kéo dài thời hạn tự xóa từ-đã-học không dùng tới từ 180 ngày lên 365 ngày — người ít dùng buttre không còn mất hết thiết lập sau nửa năm; cập nhật lại hướng dẫn "tắt toàn bộ" trong learning.toml đã lỗi thời
 - windows: sửa TSF nuốt ký tự phân giới ở cuối composition (`xin.` ra `xin`, dấu `.` biến mất) — `VietnameseEngine::process_key` trước đây chỉ lấy action đầu tiên trong `Vec<Action>`, bỏ luôn `Commit(dấu phân giới)` đi kèm `ConfirmComposition`; giờ áp dụng đủ toàn bộ vector. Đồng thời vá race ẩn do fix này mở ra: `write_text` gộp các lần ghi liên tiếp qua `pending_edit` để tối ưu, nhưng nếu session ghi từ vừa xác nhận chưa kịp chạy thì lần ghi dấu phân giới kế tiếp sẽ ghi đè lên nó thay vì tạo session riêng — mất luôn cả từ. `end_composition` giờ luôn làm mới `pending_edit` trước khi trả về (đóng #4)
 - app: tab Giới thiệu trong cửa sổ Cấu hình có nội dung thật (phiên bản qua CARGO_PKG_VERSION, phím tắt, liên kết mở bằng trình duyệt mặc định) — thay MessageBox cũ đã xóa
 - docs: ADR-0002 — tray chỉ sở hữu chọn kiểu gõ, cửa sổ Cấu hình sở hữu mọi thứ còn lại

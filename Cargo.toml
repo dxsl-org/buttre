@@ -17,7 +17,7 @@ resolver = "2"
 # (or the config window's About tab, which reads its own crate's
 # `CARGO_PKG_VERSION`) silently out of sync with the rest.
 [workspace.package]
-version = "0.7.7-beta"
+version = "0.7.9-beta"
 
 # Workspace-wide dependencies
 [workspace.dependencies]
