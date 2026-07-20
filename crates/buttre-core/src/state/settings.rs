@@ -49,6 +49,16 @@ pub struct Settings {
     /// collection.
     #[serde(default = "default_learning_enabled")]
     pub learning_enabled: bool,
+
+    /// Strict Vietnamese spelling control — the config window's "Kiểm soát
+    /// gắt gao chính tả tiếng Việt" checkbox. `false` (default) keeps the
+    /// Unikey-style deliberate-đ leniency ("ddt" → "đt"); `true` reverts
+    /// vowel-less đ-clusters to their raw keystrokes like any other
+    /// non-syllable. Maps to
+    /// `buttre_engine::pipeline::ValidationSettings::strict_spelling` via
+    /// `Keyboard::set_strict_spelling`.
+    #[serde(default)]
+    pub strict_spelling: bool,
 }
 
 /// `serde(default)` value for `Settings::backspace_mode` — also the fallback
@@ -71,6 +81,7 @@ impl Default for Settings {
             startup: false,
             backspace_mode: default_backspace_mode(),
             learning_enabled: default_learning_enabled(),
+            strict_spelling: false,
         }
     }
 }

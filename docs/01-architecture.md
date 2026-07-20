@@ -317,6 +317,9 @@ Phím Đầu Vào
 │  5. attestation gate — non-adjacent marks  │
 │     phải match attested syllables          │
 │  6. English fallback — nếu không phải VN  │
+│     (lenient: cụm phụ âm bắt đầu bằng đ    │
+│     như "đt"/"đkkd" được GIỮ — chỉ revert  │
+│     khi Settings::strict_spelling = true)  │
 │ Ghi syllable_buffer; đặt temp_english     │
 └────────────────┬───────────────────────────┘
                  ↓

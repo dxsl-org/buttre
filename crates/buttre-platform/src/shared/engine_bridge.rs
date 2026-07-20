@@ -16,6 +16,7 @@
 
 use buttre_core::state::macros::MacroStore;
 use buttre_core::{Action, Keyboard, KeyboardBuilder};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One IME-visible operation, in emission order.
@@ -63,6 +64,16 @@ pub struct EngineBridge {
     /// the `Arc`, never loads or watches `macros.toml` itself (that is the
     /// Linux host's `platforms::linux::macro_sync` job).
     macros: Option<Arc<Mutex<MacroStore>>>,
+    /// `Settings::strict_spelling` mirror injected by the host via
+    /// [`Self::set_strict_flag`] (same purity rule as `macros`: the bridge
+    /// never reads `settings.toml` itself). Written by the host's
+    /// `macro_sync` watcher thread; consumed lazily at the top of
+    /// [`Self::process_char`] — the engine processes have no other event
+    /// delivery path. `None` = permanently lenient (the engine default).
+    strict_spelling: Option<Arc<AtomicBool>>,
+    /// Last value pushed into the live `Keyboard` (see
+    /// `VietnameseEngine::strict_applied` — same cheap-compare pattern).
+    strict_applied: bool,
 }
 
 impl EngineBridge {
@@ -78,6 +89,8 @@ impl EngineBridge {
             keyboard,
             preedit: String::new(),
             macros: None,
+            strict_spelling: None,
+            strict_applied: false,
         }
     }
 
@@ -93,6 +106,8 @@ impl EngineBridge {
             keyboard,
             preedit: String::new(),
             macros: Some(macros),
+            strict_spelling: None,
+            strict_applied: false,
         }
     }
 
@@ -103,6 +118,8 @@ impl EngineBridge {
             keyboard: build_keyboard(method)?,
             preedit: String::new(),
             macros: None,
+            strict_spelling: None,
+            strict_applied: false,
         })
     }
 
@@ -117,11 +134,35 @@ impl EngineBridge {
             keyboard,
             preedit: String::new(),
             macros: Some(macros),
+            strict_spelling: None,
+            strict_applied: false,
         })
     }
 
     pub fn preedit(&self) -> &str {
         &self.preedit
+    }
+
+    /// Inject the host's `Settings::strict_spelling` mirror (see the
+    /// `strict_spelling` field doc) and apply its current value immediately.
+    /// Hosts call this once, right after construction — later changes flow
+    /// through the shared flag and are picked up by [`Self::process_char`].
+    pub fn set_strict_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.strict_spelling = Some(flag);
+        self.sync_strict_spelling();
+    }
+
+    /// Push a changed strict-spelling value into the live `Keyboard`. Cheap
+    /// when nothing changed: one relaxed atomic load + bool compare.
+    fn sync_strict_spelling(&mut self) {
+        let Some(flag) = &self.strict_spelling else {
+            return;
+        };
+        let strict = flag.load(Ordering::Relaxed);
+        if strict != self.strict_applied {
+            self.keyboard.set_strict_spelling(strict);
+            self.strict_applied = strict;
+        }
     }
 
     /// Switch input method, discarding any live composition (a mode switch
@@ -138,6 +179,10 @@ impl EngineBridge {
             keyboard.set_macros(store.clone());
         }
         self.keyboard = keyboard;
+        // A fresh `Keyboard` always starts lenient — force the next
+        // `process_char` sync to re-push the user's strict-spelling choice.
+        self.strict_applied = false;
+        self.sync_strict_spelling();
         let mut outcome = KeyOutcome {
             ops: Vec::new(),
             handled: true,
@@ -151,6 +196,7 @@ impl EngineBridge {
 
     /// Feed one character. The engine classifies separators itself.
     pub fn process_char(&mut self, ch: char) -> KeyOutcome {
+        self.sync_strict_spelling();
         let actions = match self.keyboard.process(ch) {
             Ok(actions) => actions,
             Err(e) => {

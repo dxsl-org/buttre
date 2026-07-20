@@ -13,10 +13,14 @@
 use buttre_core::state::macros::MacroStore;
 use buttre_core::Settings;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// Watch the buttre data directory for changes to `macros.toml` or
 /// `settings.toml` and swap `store`'s contents in place on any such change.
+/// The same `settings.toml` read also refreshes `strict` (the
+/// `Settings::strict_spelling` mirror consumed lazily by
+/// `VietnameseEngine::process_key`) — one watcher serves both flags.
 ///
 /// The callback runs on notify's OWN background thread and swaps the store
 /// DIRECTLY — unlike the tray (`buttre-platform/src/main.rs`), a TSF text
@@ -34,7 +38,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// is deliberate: it ties the watch to the `VietnameseEngine`'s (and thus
 /// the TSF text service instance's) lifetime, so no watcher thread survives
 /// deactivation.
-pub fn spawn_reload_watcher(store: Arc<Mutex<MacroStore>>) -> Option<RecommendedWatcher> {
+pub fn spawn_reload_watcher(
+    store: Arc<Mutex<MacroStore>>,
+    strict: Arc<AtomicBool>,
+) -> Option<RecommendedWatcher> {
     let dir = match MacroStore::get_path() {
         Ok(path) => path.parent()?.to_path_buf(),
         Err(e) => {
@@ -64,8 +71,10 @@ pub fn spawn_reload_watcher(store: Arc<Mutex<MacroStore>>) -> Option<Recommended
             // Build the replacement BEFORE taking the lock: the same Mutex
             // sits on the keystroke path (`apply_macro`), so holding it
             // across file IO would stall the host app's input thread.
-            let next = MacroStore::load_gated(Settings::load().shorthand);
+            let settings = Settings::load();
+            let next = MacroStore::load_gated(settings.shorthand);
             *store.lock().unwrap_or_else(PoisonError::into_inner) = next;
+            strict.store(settings.strict_spelling, Ordering::Relaxed);
         }) {
             Ok(w) => w,
             Err(e) => {
@@ -93,6 +102,6 @@ mod tests {
         // resolve/watch a real data dir) is not asserted, only that calling
         // it is safe.
         let store = Arc::new(Mutex::new(MacroStore::default()));
-        let _ = spawn_reload_watcher(store);
+        let _ = spawn_reload_watcher(store, Arc::new(AtomicBool::new(false)));
     }
 }

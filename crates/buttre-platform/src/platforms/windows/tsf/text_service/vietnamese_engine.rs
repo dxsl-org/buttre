@@ -13,6 +13,7 @@ use buttre_core::KeyboardBuilder;
 use buttre_core::Settings;
 use notify::RecommendedWatcher;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Vietnamese input mode
@@ -37,6 +38,15 @@ pub struct VietnameseEngine {
     /// `settings.toml` edits — the live `Keyboard`s see the update through
     /// the shared `Arc` without needing re-injection.
     macros: Arc<Mutex<MacroStore>>,
+    /// `Settings::strict_spelling` mirror, written by `_macros_watcher`'s
+    /// callback (notify's own thread) and consumed lazily at the top of
+    /// [`Self::process_key`] — a TSF text service has no event loop to
+    /// deliver the change on, so the keystroke path itself picks it up.
+    strict_spelling: Arc<AtomicBool>,
+    /// Last value actually pushed into the live `Keyboard` — lets the
+    /// per-keystroke check be a cheap atomic load + compare instead of an
+    /// unconditional `set_strict_spelling` write.
+    strict_applied: bool,
     /// Live-reload watcher, kept alive only to hold the watch open for this
     /// engine's lifetime — dropped (stopping the watch) when the engine
     /// drops, i.e. on TSF `Deactivate`. `None` when the watch could not be
@@ -54,10 +64,14 @@ impl VietnameseEngine {
     /// failure rather than erroring, which matters because this DLL runs
     /// in-process inside an arbitrary host app under `panic = abort`.
     pub fn new(mode: VietnameseMode) -> Self {
-        let shorthand = Settings::load().shorthand;
-        let macros = Arc::new(Mutex::new(MacroStore::load_gated(shorthand)));
+        let settings = Settings::load();
+        let macros = Arc::new(Mutex::new(MacroStore::load_gated(settings.shorthand)));
         let mut engine = Self::new_with_macros(mode, macros.clone());
-        engine._macros_watcher = spawn_reload_watcher(macros);
+        engine
+            .strict_spelling
+            .store(settings.strict_spelling, Ordering::Relaxed);
+        engine._macros_watcher =
+            spawn_reload_watcher(macros, engine.strict_spelling.clone());
         engine
     }
 
@@ -73,6 +87,11 @@ impl VietnameseEngine {
             keyboard,
             buffer: InputBuffer::new(),
             macros,
+            // Starts lenient (`false`) — the engine default. `new()` stores
+            // the real `Settings::strict_spelling` right after construction;
+            // `process_key`'s lazy sync then pushes it into the keyboard.
+            strict_spelling: Arc::new(AtomicBool::new(false)),
+            strict_applied: false,
             _macros_watcher: None,
         }
     }
@@ -131,6 +150,7 @@ impl VietnameseEngine {
     /// Commit(".")]`; dropping the trailing action silently swallows the
     /// separator (issue #4).
     pub fn process_key(&mut self, ch: char) -> Vec<Action> {
+        self.sync_strict_spelling();
         if let Some(ref mut kb) = self.keyboard {
             match kb.process(ch) {
                 Ok(actions) => actions,
@@ -193,8 +213,24 @@ impl VietnameseEngine {
     pub fn set_mode(&mut self, mode: VietnameseMode) {
         if self.mode != mode {
             self.keyboard = Self::load_keyboard(&mode, &self.macros);
+            // A fresh `Keyboard` always starts lenient — force the next
+            // `process_key` to re-push the user's strict-spelling choice.
+            self.strict_applied = false;
             self.mode = mode;
             self.reset();
+        }
+    }
+
+    /// Push a changed `Settings::strict_spelling` into the live `Keyboard`
+    /// (see the `strict_spelling` field doc). Cheap when nothing changed:
+    /// one relaxed atomic load + bool compare.
+    fn sync_strict_spelling(&mut self) {
+        let strict = self.strict_spelling.load(Ordering::Relaxed);
+        if strict != self.strict_applied {
+            if let Some(kb) = self.keyboard.as_mut() {
+                kb.set_strict_spelling(strict);
+            }
+            self.strict_applied = strict;
         }
     }
 

@@ -35,6 +35,10 @@ pub struct KeyboardManager {
     /// needed): unlike learning, macros carry no save channel — the store is
     /// read-only at the keyboard layer (see `buttre_core::state::macros`).
     macros: Mutex<Option<Arc<Mutex<MacroStore>>>>,
+    /// Mirrors `Settings::strict_spelling` — remembered here (like the two
+    /// fields above) because a fresh `Keyboard` built in `set_method` always
+    /// starts lenient and must have the user's choice re-applied.
+    strict_spelling: Mutex<bool>,
 }
 
 impl KeyboardManager {
@@ -45,6 +49,7 @@ impl KeyboardManager {
             current_method: Arc::new(Mutex::new("english".to_string())),
             learning: Mutex::new(None),
             macros: Mutex::new(None),
+            strict_spelling: Mutex::new(false),
         })
     }
 
@@ -97,6 +102,18 @@ impl KeyboardManager {
         if let Ok(mut guard) = self.keyboard.write() {
             if let Some(kb) = guard.as_mut() {
                 kb.set_macros(store);
+            }
+        }
+    }
+
+    /// Apply `Settings::strict_spelling` to the current `Keyboard` (if any)
+    /// and remember it for every future `set_method` build — same
+    /// re-apply-on-switch pattern as learning/macros above.
+    pub fn set_strict_spelling(&self, strict: bool) {
+        *self.strict_spelling.lock().unwrap() = strict;
+        if let Ok(mut guard) = self.keyboard.write() {
+            if let Some(kb) = guard.as_mut() {
+                kb.set_strict_spelling(strict);
             }
         }
     }
@@ -209,6 +226,11 @@ impl KeyboardManager {
         let macros = self.macros.lock().unwrap().clone();
         if let Some(store) = macros {
             keyboard.set_macros(store);
+        }
+        // And for strict spelling — a fresh `Keyboard` always starts lenient.
+        let strict = *self.strict_spelling.lock().unwrap();
+        if strict {
+            keyboard.set_strict_spelling(true);
         }
 
         *self.keyboard.write().unwrap() = Some(keyboard);

@@ -100,9 +100,15 @@ pub(crate) struct ImeState {
 }
 
 impl ImeState {
-    fn new(method_state: Arc<MethodState>, macros: Arc<Mutex<MacroStore>>) -> Self {
+    fn new(
+        method_state: Arc<MethodState>,
+        macros: Arc<Mutex<MacroStore>>,
+        strict: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         let method = method_state.method();
         let seen_generation = method_state.generation();
+        let mut bridge = EngineBridge::new_with_macros(&method, macros);
+        bridge.set_strict_flag(strict);
         Self {
             seat: None,
             im_manager: None,
@@ -120,7 +126,7 @@ impl ImeState {
             pending_purpose: 0,
             unavailable: false,
             swallowed: HashSet::new(),
-            bridge: EngineBridge::new_with_macros(&method, macros),
+            bridge,
             method_state,
             seen_generation,
         }
@@ -196,8 +202,9 @@ pub fn run_engine() -> Result<()> {
     // deferral — an initial load has no thread/inotify handle to leak if
     // this function later returns `Unavailable`, only the watcher does.
     let macros = macro_sync::load_initial();
+    let strict = macro_sync::load_initial_strict();
 
-    let mut state = ImeState::new(method_state.clone(), macros.clone());
+    let mut state = ImeState::new(method_state.clone(), macros.clone(), strict.clone());
     let mut queue = conn.new_event_queue::<ImeState>();
     let qh: QueueHandle<ImeState> = queue.handle();
     display.get_registry(&qh, ());
@@ -228,7 +235,7 @@ pub fn run_engine() -> Result<()> {
     // method watcher and the shorthand/gõ tắt watcher (no IBus fallback will
     // run in this process, so neither would be orphaned by an early return).
     method_sync::spawn_watcher(method_state);
-    macro_sync::spawn_watcher(macros);
+    macro_sync::spawn_watcher(macros, strict);
 
     tracing::info!("Wayland input method registered; waiting for text-input activation");
     loop {

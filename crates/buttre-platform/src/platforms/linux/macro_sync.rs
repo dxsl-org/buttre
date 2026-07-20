@@ -21,6 +21,7 @@
 use buttre_core::state::macros::MacroStore;
 use buttre_core::state::Settings;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Build the initial store for engine-process startup, gated on
@@ -34,12 +35,28 @@ pub fn load_initial() -> Arc<Mutex<MacroStore>> {
     Arc::new(Mutex::new(MacroStore::load_gated(shorthand)))
 }
 
-/// Re-read `Settings::shorthand` and swap `store`'s contents to match —
-/// the single reload spelling both watch callbacks below share.
-fn reload(store: &Arc<Mutex<MacroStore>>) {
-    let shorthand = Settings::load().shorthand;
-    *store.lock().unwrap_or_else(|e| e.into_inner()) = MacroStore::load_gated(shorthand);
-    tracing::info!("macro_sync: reloaded (shorthand={shorthand})");
+/// Build the initial `Settings::strict_spelling` mirror for engine-process
+/// startup — injected into every `EngineBridge` (`set_strict_flag`) and kept
+/// current by the same watcher that reloads the macro store (both flags live
+/// in `settings.toml`, one re-read serves both).
+pub fn load_initial_strict() -> Arc<AtomicBool> {
+    let strict = Settings::load().strict_spelling;
+    tracing::info!("macro_sync: initial strict_spelling = {strict}");
+    Arc::new(AtomicBool::new(strict))
+}
+
+/// Re-read `settings.toml` and swap `store`'s contents + refresh `strict`
+/// to match — the single reload spelling both watch callbacks below share.
+fn reload(store: &Arc<Mutex<MacroStore>>, strict: &Arc<AtomicBool>) {
+    let settings = Settings::load();
+    *store.lock().unwrap_or_else(|e| e.into_inner()) =
+        MacroStore::load_gated(settings.shorthand);
+    strict.store(settings.strict_spelling, Ordering::Relaxed);
+    tracing::info!(
+        "macro_sync: reloaded (shorthand={}, strict_spelling={})",
+        settings.shorthand,
+        settings.strict_spelling
+    );
 }
 
 /// Collect the (deduplicated) directories that hold `macros.toml` and
@@ -72,7 +89,7 @@ fn push_parent(dirs: &mut Vec<PathBuf>, path: PathBuf) {
 /// (notify's callbacks are sync); lives for the process lifetime — the
 /// daemon/compositor owns the engine process, so there is no teardown path
 /// to plumb (mirrors `method_sync::spawn_watcher`).
-pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>) {
+pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>, strict: Arc<AtomicBool>) {
     let dirs = watch_dirs();
     if dirs.is_empty() {
         tracing::warn!("macro_sync: no watchable directory found, watcher not started");
@@ -84,6 +101,7 @@ pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>) {
         .spawn(move || {
             use notify::{RecursiveMode, Watcher};
             let store_cb = store.clone();
+            let strict_cb = strict.clone();
             let mut watcher =
                 match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                     // The watched dirs also hold unrelated state (method
@@ -100,7 +118,7 @@ pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>) {
                         )
                     });
                     if relevant {
-                        reload(&store_cb);
+                        reload(&store_cb, &strict_cb);
                     }
                 }) {
                     Ok(w) => w,

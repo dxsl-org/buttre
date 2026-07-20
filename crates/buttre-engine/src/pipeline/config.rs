@@ -65,6 +65,15 @@ pub struct ValidationSettings {
 
     /// Allow invalid syllables to pass through
     pub allow_invalid: bool,
+
+    /// Strict Vietnamese spelling control (the config window's "Kiểm soát
+    /// gắt gao chính tả tiếng Việt" switch). `false` (default) keeps the
+    /// Unikey-style leniency for deliberate-đ abbreviations: a vowel-less
+    /// consonant cluster starting with `đ` ("đt", "đc", "đkkd") stays
+    /// composed instead of reverting to its raw keystrokes — `đ` can only
+    /// arise from an explicit transform ("dd"/"d9"), so the Vietnamese
+    /// intent is unambiguous. `true` restores the strict revert.
+    pub strict_spelling: bool,
 }
 
 impl Default for ValidationSettings {
@@ -72,6 +81,7 @@ impl Default for ValidationSettings {
         Self {
             syllable_structure: "vietnamese".to_string(),
             allow_invalid: false,
+            strict_spelling: false,
         }
     }
 }

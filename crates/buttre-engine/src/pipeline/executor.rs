@@ -195,6 +195,25 @@ impl PipelineExecutor {
         }
     }
 
+    /// Flip the strict-spelling gate consulted by `could_be_vietnamese`'s
+    /// deliberate-đ leniency branch (see
+    /// [`crate::pipeline::ValidationSettings::strict_spelling`]). Dual-write
+    /// for the same reason as [`Self::set_learning_snapshot`]: the live
+    /// compose stage's opts AND the cached `boundary_repair_opts` must agree,
+    /// or the open- and closed-projection gates silently diverge.
+    pub fn set_strict_spelling(&mut self, strict: bool) {
+        if let Some(handle) = &self.compose_live_opts {
+            let mut guard = match handle.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.strict_spelling = strict;
+        }
+        if let Some(opts) = self.boundary_repair_opts.as_mut() {
+            opts.strict_spelling = strict;
+        }
+    }
+
     /// Compose `word` forcing the COMPOSED interpretation, IGNORING any stored
     /// raw-preference (event-sourcing-completion Phase 4: a word toggle → composed
     /// must override a `Pref::Literal`, per the Combined Contract's

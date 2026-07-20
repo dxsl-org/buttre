@@ -287,6 +287,19 @@ impl Keyboard {
         self.macro_map.clear();
     }
 
+    /// Apply `Settings::strict_spelling` (see its doc for the user-facing
+    /// contract). Dual-write for the same reason as
+    /// [`Self::apply_learning_snapshot`]: the learning collector composes
+    /// directly against this `Keyboard`'s own `compose_opts` copy, so it
+    /// must agree with the live pipeline on what counts as a plausible
+    /// syllable, or collection and display could silently diverge.
+    pub fn set_strict_spelling(&mut self, strict: bool) {
+        if let Some(opts) = self.compose_opts.as_mut() {
+            opts.strict_spelling = strict;
+        }
+        self.executor.set_strict_spelling(strict);
+    }
+
     /// Push a fresh learning snapshot to both the live executor's compose
     /// stage AND this `Keyboard`'s own `compose_opts` copy (event-sourcing-
     /// completion Phase 5) — mirrors `PipelineExecutor::

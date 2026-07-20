@@ -666,6 +666,7 @@ mod tests {
         cfg.validation = Some(ValidationSettings {
             syllable_structure: "hmong".to_string(),
             allow_invalid: true,
+            ..Default::default()
         });
         ComposeOpts::from_config(&cfg)
     }

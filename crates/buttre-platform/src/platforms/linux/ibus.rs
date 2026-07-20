@@ -80,14 +80,17 @@ impl ButtreEngine {
     }
 
     /// Factory constructor used once shorthand is wired in: same as
-    /// [`Self::new_with_state`], plus the shared macro store, injected into
-    /// the bridge at construction so it survives every later method-switch
-    /// `rebuild` (`EngineBridge::rebuild` re-applies it).
+    /// [`Self::new_with_state`], plus the shared macro store and the
+    /// strict-spelling mirror, injected into the bridge at construction so
+    /// they survive every later method-switch `rebuild`
+    /// (`EngineBridge::rebuild` re-applies both).
     pub fn new_with_state_and_macros(
         state: Arc<MethodState>,
         macros: Arc<Mutex<MacroStore>>,
+        strict: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
-        let bridge = EngineBridge::new_with_macros(&state.method(), macros);
+        let mut bridge = EngineBridge::new_with_macros(&state.method(), macros);
+        bridge.set_strict_flag(strict);
         Self {
             seen_generation: state.generation(),
             bridge: Arc::new(Mutex::new(bridge)),

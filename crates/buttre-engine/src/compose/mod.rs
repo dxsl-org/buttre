@@ -153,6 +153,13 @@ pub struct ComposeOpts {
     /// scan over every rule key.
     pub standalone_keys: Arc<HashSet<char>>,
 
+    /// Strict Vietnamese spelling control — mirrors
+    /// [`crate::pipeline::ValidationSettings::strict_spelling`] (see its doc
+    /// for the user-facing contract). Consulted only by
+    /// [`could_be_vietnamese`]'s deliberate-đ leniency branch; `false`
+    /// (default) = lenient.
+    pub strict_spelling: bool,
+
     /// Raw-sequence preference memory (event-sourcing-completion Phase 5):
     /// exact raw sequence (lowercase, already scoped to THIS method by the
     /// caller — see `LearningStore::prefs_snapshot_for_method`) → the
@@ -289,6 +296,10 @@ impl ComposeOpts {
             standalone_keys: Arc::new(standalone_keys),
             attest_non_adjacent,
             user_attested: None,
+            strict_spelling: config
+                .validation
+                .as_ref()
+                .is_some_and(|v| v.strict_spelling),
             raw_prefs: None,
         }
     }
@@ -907,6 +918,20 @@ fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
     if nucleus.is_empty() && coda.is_empty() && !onset.is_empty() {
         return true;
     }
+    // Deliberate-đ abbreviation (leniency, Unikey parity): a vowel-less
+    // cluster can only contain 'đ' through an explicit transform keystroke
+    // ("dd" Telex, "d9" VNI) — the user unambiguously asked for Vietnamese,
+    // so "đt"/"đc"/"đkkd" stay composed instead of reverting to raw. Only
+    // letters from the Vietnamese consonant inventory qualify: "đf"-shaped
+    // results (f/j/w/z can never follow đ in an abbreviation) still revert.
+    // Gated off by `strict_spelling` — the config window's "Kiểm soát gắt
+    // gao chính tả tiếng Việt" switch.
+    if !opts.strict_spelling
+        && normalized.starts_with('đ')
+        && normalized.chars().skip(1).all(is_vietnamese_consonant)
+    {
+        return true;
+    }
     // KEEP (phase-03 adjudication table — REVISED from the original plan's
     // DELETE verdict; re-adjudicated after a confirmed regression, see below).
     //
@@ -939,6 +964,18 @@ fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
         return true;
     }
     false
+}
+
+/// The Vietnamese consonant letter inventory (lowercase, tone-stripped
+/// input — see [`could_be_vietnamese`]'s deliberate-đ branch, its only
+/// caller). Excludes f/j/w/z: they exist on the keyboard but never inside
+/// a Vietnamese word or abbreviation.
+fn is_vietnamese_consonant(c: char) -> bool {
+    matches!(
+        c,
+        'b' | 'c' | 'd' | 'đ' | 'g' | 'h' | 'k' | 'l' | 'm' | 'n' | 'p' | 'q' | 'r' | 's' | 't'
+            | 'v' | 'x'
+    )
 }
 
 /// Collapse runs of consecutive identical characters down to one

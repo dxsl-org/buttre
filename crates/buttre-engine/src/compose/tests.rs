@@ -488,6 +488,7 @@ fn medium_hmong_config_gate_off() {
     cfg.validation = Some(ValidationSettings {
         syllable_structure: "hmong".to_string(),
         allow_invalid: true,
+        ..Default::default()
     });
     let opts = ComposeOpts::from_config(&cfg);
     assert!(

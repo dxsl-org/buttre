@@ -466,6 +466,11 @@ fn main() -> Result<()> {
     let (macros_file_tx, macros_file_rx) = mpsc::channel::<()>();
     let _macros_watcher = watch_macros_file(macros_file_tx);
 
+    // Strict-spelling control ("Kiểm soát gắt gao chính tả tiếng Việt") —
+    // remembered by the manager and re-applied on every method switch, so
+    // wiring it BEFORE `set_method` below mirrors the learning/macros order.
+    keyboard_manager.set_strict_spelling(settings.strict_spelling);
+
     // Apply initial settings to keyboard
     if let Err(e) = keyboard_manager.set_method(&settings.input_method) {
         error!("Failed to set initial input method: {:?}", e);
@@ -751,6 +756,19 @@ fn main() -> Result<()> {
                                 app_state.lock().unwrap().set_shorthand(shorthand_enabled)
                             {
                                 error!("Failed to persist external shorthand change: {:?}", e);
+                            }
+                        }
+                        if new_settings.strict_spelling != known.strict_spelling {
+                            keyboard_manager.set_strict_spelling(new_settings.strict_spelling);
+                            if let Err(e) = app_state
+                                .lock()
+                                .unwrap()
+                                .set_strict_spelling(new_settings.strict_spelling)
+                            {
+                                error!(
+                                    "Failed to persist external strict_spelling change: {:?}",
+                                    e
+                                );
                             }
                         }
                         if new_settings.startup != known.startup {

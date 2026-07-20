@@ -28,6 +28,7 @@ export component ConfigWindow inherits Window {
     in-out property <string> method-value: "";
     in-out property <bool> autostart: false;
     in-out property <bool> raw-backspace: false;
+    in-out property <bool> strict-spelling: false;
     in-out property <bool> learning-enabled: true;
     in-out property <bool> shorthand-enabled: false;
 
@@ -121,6 +122,11 @@ export component ConfigWindow inherits Window {
                     CheckBox {
                         text: "Xóa lùi theo phím thô (thay vì theo ký tự hiển thị)";
                         checked <=> raw-backspace;
+                        toggled => { root.save-settings(); }
+                    }
+                    CheckBox {
+                        text: "Kiểm soát gắt gao chính tả tiếng Việt (tắt = gõ thoáng kiểu Unikey)";
+                        checked <=> strict-spelling;
                         toggled => { root.save-settings(); }
                     }
                     CheckBox {

@@ -138,6 +138,15 @@ impl AppState {
         self.settings.save()
     }
 
+    /// Persist the "Kiểm soát gắt gao chính tả tiếng Việt" (strict
+    /// spelling) switch — same owner-object rationale as
+    /// [`Self::set_learning_enabled`]. Applying it to the LIVE keyboard is
+    /// the caller's responsibility (`KeyboardManager::set_strict_spelling`).
+    pub fn set_strict_spelling(&mut self, strict: bool) -> anyhow::Result<()> {
+        self.settings.strict_spelling = strict;
+        self.settings.save()
+    }
+
     /// Persist the backspace-deletion mode (`"grapheme"`/`"raw"`) — same
     /// owner-object rationale as [`Self::set_learning_enabled`]. Applying
     /// the mode to the LIVE keyboard is the caller's responsibility (this

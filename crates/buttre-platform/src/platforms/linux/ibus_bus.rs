@@ -133,6 +133,10 @@ struct ButtreFactory {
     /// every live engine at once, same "one Arc, many consumers" wiring as
     /// `method_state`.
     macros: Arc<Mutex<MacroStore>>,
+    /// `Settings::strict_spelling` mirror, kept current by the same
+    /// `macro_sync` watcher — every engine's bridge consults it lazily per
+    /// keystroke (`EngineBridge::set_strict_flag`).
+    strict: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[dbus_interface(name = "org.freedesktop.IBus.Factory")]
@@ -154,8 +158,11 @@ impl ButtreFactory {
         ))
         .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
-        let engine =
-            ButtreEngine::new_with_state_and_macros(self.method_state.clone(), self.macros.clone());
+        let engine = ButtreEngine::new_with_state_and_macros(
+            self.method_state.clone(),
+            self.macros.clone(),
+            self.strict.clone(),
+        );
         server
             .at(&path, engine)
             .await
@@ -213,7 +220,8 @@ pub async fn run_engine() -> Result<()> {
     // Shorthand/gõ tắt (phase-02): shared macro store + its own watcher over
     // macros.toml + settings.toml.
     let macros = macro_sync::load_initial();
-    macro_sync::spawn_watcher(macros.clone());
+    let strict = macro_sync::load_initial_strict();
+    macro_sync::spawn_watcher(macros.clone(), strict.clone());
 
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
@@ -224,6 +232,7 @@ pub async fn run_engine() -> Result<()> {
                 engine_counter: 0,
                 method_state,
                 macros,
+                strict,
             },
         )?
         .name("org.freedesktop.IBus.buttre")?

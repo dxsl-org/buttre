@@ -179,6 +179,7 @@ pub fn run() -> anyhow::Result<()> {
     );
     window.set_autostart(settings.startup);
     window.set_raw_backspace(settings.backspace_mode == "raw");
+    window.set_strict_spelling(settings.strict_spelling);
     window.set_learning_enabled(settings.learning_enabled);
     window.set_shorthand_enabled(settings.shorthand);
     // Single-sourced from Cargo.toml — the old help_dialog.rs MessageBox
@@ -234,6 +235,7 @@ pub fn run() -> anyhow::Result<()> {
                 "grapheme".to_string()
             },
             learning_enabled: window.get_learning_enabled(),
+            strict_spelling: window.get_strict_spelling(),
         };
 
         // Autostart registration is a per-OS side effect, not just a

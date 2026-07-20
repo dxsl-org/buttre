@@ -829,6 +829,7 @@ fn test_validation_permissive_mode() {
     config.validation = Some(ValidationSettings {
         syllable_structure: "vietnamese".to_string(),
         allow_invalid: true,
+        ..Default::default()
     });
 
     let mut executor = PipelineExecutor::new(config);
@@ -849,6 +850,7 @@ fn test_validation_strict_mode() {
     config.validation = Some(ValidationSettings {
         syllable_structure: "vietnamese".to_string(),
         allow_invalid: false,
+        ..Default::default()
     });
 
     let mut executor = PipelineExecutor::new(config);
