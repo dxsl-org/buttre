@@ -31,7 +31,7 @@ pub fn load_rows() -> Vec<LearnedWordRow> {
 
 /// Remove one learned word and persist — `prefs` is read fresh from disk
 /// and written back unedited (it goes through the SAME
-/// `LearningStore::load` hardening any read does — e.g. a pref idle >180
+/// `LearningStore::load` hardening any read does — e.g. a pref idle >365
 /// days is dropped, same as it would be on the next real load — this
 /// function itself never touches the `prefs` map).
 pub fn delete_word(word: &str) -> anyhow::Result<()> {

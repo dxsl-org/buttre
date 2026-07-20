@@ -39,7 +39,7 @@
 //! `decompose_ids` are RETAINED in the file but never activated (the id
 //! space renumbers on a static-table regen — see the P1/P6 memory on coda
 //! "k" — so a future regen may re-activate them); (iv) pref keys sanitized
-//! (ASCII alphanumeric only) and lowercased; (v) prefs idle >180 days are
+//! (ASCII alphanumeric only) and lowercased; (v) prefs idle >365 days are
 //! dropped at load; (vi) load-or-default — never panics on malformed TOML.
 //!
 //! ## Save threading (red-team C3)
@@ -89,8 +89,10 @@ const FILE_HEADER: &str = "\
 #                  luôn bỏ dấu (composed). Ví dụ:
 #                  \"telex:brb\" = { prefer = \"literal\", last_used = \"2026-07-13\" }
 #
-# Mục không hợp lệ được bỏ qua; pref không dùng >180 ngày tự xóa.
-# Tắt toàn bộ: tray → Tùy chọn → Học thông minh.
+# Mục không hợp lệ được bỏ qua; pref không dùng >365 ngày (1 năm) tự xóa
+# (mỗi lần dùng lại được tính mới — chỉ pref bỏ xó cả năm mới bị dọn).
+# Tắt toàn bộ: mở Cấu hình (tray → Cấu hình…, hoặc chạy `buttre --config`)
+# → tab Chung → bỏ chọn \"Học thông minh\".
 
 ";
 
@@ -106,7 +108,14 @@ const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_ENTRIES_PER_TABLE: usize = 500;
 
 /// Prefs idle longer than this (days since `last_used`) are dropped at load.
-const MAX_IDLE_DAYS: i64 = 180;
+///
+/// A full year, not shorter: an infrequent typist must not lose their
+/// choices just for stepping away a season. Not removed entirely either —
+/// idle decay is the self-healing valve for a WRONG pref (a stale
+/// `Pref::Literal` once made common English words untypeable until it was
+/// hand-deleted); without decay such a pref would persist forever. Every
+/// use refreshes `last_used`, so an active pref never expires.
+const MAX_IDLE_DAYS: i64 = 365;
 
 /// Hit-count threshold at which a directly-typed unattested syllable
 /// becomes user-attested (Requirement (a)).
@@ -706,7 +715,7 @@ mod tests {
         });
         assert!(
             !store.file.prefs.contains_key("telex:oldword"),
-            "idle (>180d) pref must be dropped at load"
+            "idle (>MAX_IDLE_DAYS) pref must be dropped at load"
         );
         assert!(store.file.prefs.contains_key("telex:freshword"));
     }
