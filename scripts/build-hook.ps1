@@ -8,21 +8,23 @@
     target\hook-zip\buttre\ so you can run buttre.exe directly — no installer,
     no regsvr32, no admin. Much faster than the CI release script.
 
-    By default uses a fast debug build (unoptimized but quick compile).
-    Pass -Release for an optimized build.
+    By default builds the optimized RELEASE profile — the staged zip is what
+    ends up installed, and a debug buttre.exe is ~5x larger and slower (a
+    32MB debug build once shipped to Program Files this way). Pass -Debug
+    only for quick compile-test iteration you will not install.
 
 .EXAMPLE
-    # Fast debug build:
+    # Optimized release build (default):
     .\scripts\build-hook.ps1
 
-    # Optimized release build:
-    .\scripts\build-hook.ps1 -Release
+    # Fast unoptimized build for local iteration only:
+    .\scripts\build-hook.ps1 -Debug
 
     # Build and run immediately:
     .\scripts\build-hook.ps1 -Run
 #>
 param(
-    [switch]$Release,
+    [switch]$Debug,
     [switch]$Run,
     [switch]$NoZip
 )
@@ -32,8 +34,8 @@ $repoRoot = Resolve-Path "$PSScriptRoot\.."
 
 Push-Location $repoRoot
 try {
-    $profile_ = if ($Release) { "release" } else { "debug" }
-    $profileLabel = if ($Release) { "release (optimized)" } else { "debug (fast)" }
+    $profile_ = if ($Debug) { "debug" } else { "release" }
+    $profileLabel = if ($Debug) { "debug (fast, DO NOT install)" } else { "release (optimized)" }
 
     Write-Host ""
     Write-Host "  buttre hook-mode quick build" -ForegroundColor Cyan
@@ -42,7 +44,7 @@ try {
 
     # ── Build ────────────────────────────────────────────────────────────
     $buildArgs = @("build", "-p", "buttre-platform")
-    if ($Release) { $buildArgs += "--release" }
+    if (-not $Debug) { $buildArgs += "--release" }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Write-Host "[1/3] Building..." -ForegroundColor Yellow
