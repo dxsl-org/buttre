@@ -260,6 +260,32 @@ fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // Informational flags are handled before ANY backend or UI setup: they
+    // need no display, and letting them fall through to the tray path below
+    // panics on Linux (the tray builds a GTK menu). Unknown flags still start
+    // the tray, matching prior behaviour; `--ibus`/`--ime`/`--config` are
+    // matched further down.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("buttre {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "buttre {ver} — Vietnamese input method\n\n\
+             Usage: buttre [FLAG]\n\n\
+             Flags:\n  \
+             (none)      Launch the system-tray app (choose method, open settings)\n  \
+             --ibus      Run as the IBus engine (spawned by ibus-daemon, not by hand)\n  \
+             --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
+             --config    Open the settings window\n  \
+             --version   Print version and exit\n  \
+             --help      Print this help and exit",
+            ver = env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
+
     // Engine modes (Linux) — must branch BEFORE the single-instance lock
     // (engine processes coexist with the user's tray instance) and before
     // any UI/winit setup (engines are headless).
@@ -379,6 +405,17 @@ fn main() -> Result<()> {
     let _window = WindowBuilder::new()
         .with_visible(false)
         .build(&event_loop)?;
+
+    // tray-icon and muda render the tray menu through GTK on Linux, so GTK
+    // must be initialised on this (the tray-owning) thread BEFORE any menu or
+    // tray widget is built — otherwise menu construction panics with "GTK has
+    // not been initialized". Its main context is pumped from the winit loop
+    // below (see `AboutToWait`) so tray/menu callbacks are actually delivered.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = gtk::init() {
+        error!("gtk::init failed — system tray unavailable: {e}");
+        return Err(anyhow::anyhow!("gtk::init failed: {e}"));
+    }
 
     // --- Menu Setup ---
     // Build menu from registry
@@ -598,6 +635,16 @@ fn main() -> Result<()> {
             } => elwt.exit(),
 
             Event::AboutToWait => {
+                // Service GTK on Linux: the tray icon and its menu live on the
+                // GTK main context (see `gtk::init` above). winit owns this
+                // thread, so GTK's own events fire only if we pump them here —
+                // without this the tray never appears and menu clicks are never
+                // delivered to `menu_channel` below.
+                #[cfg(target_os = "linux")]
+                while gtk::events_pending() {
+                    gtk::main_iteration_do(false);
+                }
+
                 // Process UI events from observers
                 while let Ok(ui_event) = ui_rx.try_recv() {
                     match ui_event {

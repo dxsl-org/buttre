@@ -10,6 +10,12 @@ echo "🐧 Installing buttre IBus Engine..."
 PREFIX="${PREFIX:-/usr}"
 BINDIR="$PREFIX/bin"
 COMPONENTDIR="$PREFIX/share/ibus/component"
+# hicolor 128x128 backs the <icon>buttre</icon> the component XML advertises.
+ICONDIR="$PREFIX/share/icons/hicolor/128x128/apps"
+PIXMAPDIR="$PREFIX/share/pixmaps"
+# Honour CARGO_TARGET_DIR: on a VirtualBox shared folder (vboxsf) build-script
+# outputs land empty, so builds are commonly redirected to a real filesystem.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -25,14 +31,23 @@ cargo build --release -p buttre-platform
 echo "📁 Creating directories..."
 mkdir -p "$BINDIR"
 mkdir -p "$COMPONENTDIR"
+mkdir -p "$ICONDIR"
+mkdir -p "$PIXMAPDIR"
 
 # Install binary (component XML expects /usr/bin/buttre)
 echo "📥 Installing binary..."
-install -m 755 target/release/buttre "$BINDIR/"
+install -m 755 "$TARGET_DIR/release/buttre" "$BINDIR/"
 
 # Install component XML
 echo "📄 Installing component..."
 install -m 644 installers/linux/buttre.xml "$COMPONENTDIR/buttre.xml"
+
+# Install engine icon: hicolor for GNOME/IBus, pixmaps as a legacy fallback.
+# Resolves <icon>buttre</icon> in buttre.xml (else the switcher shows only text).
+echo "🎨 Installing icon..."
+install -m 644 crates/buttre-platform/icons/vietnamese.png "$ICONDIR/buttre.png"
+install -m 644 crates/buttre-platform/icons/vietnamese.png "$PIXMAPDIR/buttre.png"
+gtk-update-icon-cache -f "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 
 # Restart IBus
 echo "🔄 Restarting IBus..."

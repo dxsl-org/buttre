@@ -94,6 +94,10 @@ objc = "0.2"
 
 # Linux-specific dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
+# GTK is pulled in transitively by tray-icon/muda's Linux backend; declared
+# directly so `main` can call `gtk::init()` before building the tray menu.
+# Pinned to 0.18 to unify with the exact gtk already in the dependency tree.
+gtk = "0.18"
 zbus = "3.0"
 tokio = { version = "1.0", features = ["full"] }
 x11 = { version = "2.21", features = ["xlib", "xtest"] }
@@ -141,6 +145,8 @@ assets = [
     ["target/release/buttre",                                  "usr/bin/",                              "755"],
     ["target/release/buttre_nom.db",                           "usr/share/buttre/",                     "644"],
     ["../../installers/linux/buttre.xml",                      "usr/share/ibus/component/",             "644"],
+    # Backs <icon>buttre</icon> in buttre.xml — without it the input-source switcher shows text only.
+    ["icons/vietnamese.png",                                   "usr/share/icons/hicolor/128x128/apps/buttre.png", "644"],
     ["../../keyboards/cham.toml",                              "usr/share/buttre/keyboards/",           "644"],
     ["../../keyboards/cham_akhar_thrah.toml",                  "usr/share/buttre/keyboards/",           "644"],
     ["../../keyboards/hmong.toml",                             "usr/share/buttre/keyboards/",           "644"],
@@ -161,6 +167,7 @@ assets = [
     { source = "target/release/buttre",                        dest = "/usr/bin/buttre",                                        mode = "755" },
     { source = "target/release/buttre_nom.db",                 dest = "/usr/share/buttre/buttre_nom.db",                        mode = "644" },
     { source = "../../installers/linux/buttre.xml",            dest = "/usr/share/ibus/component/buttre.xml",                   mode = "644" },
+    { source = "icons/vietnamese.png",                         dest = "/usr/share/icons/hicolor/128x128/apps/buttre.png",       mode = "644" },
     { source = "../../keyboards/cham.toml",                    dest = "/usr/share/buttre/keyboards/cham.toml",                  mode = "644" },
     { source = "../../keyboards/cham_akhar_thrah.toml",        dest = "/usr/share/buttre/keyboards/cham_akhar_thrah.toml",      mode = "644" },
     { source = "../../keyboards/hmong.toml",                   dest = "/usr/share/buttre/keyboards/hmong.toml",                 mode = "644" },
@@ -176,5 +183,5 @@ ibus = ">= 1.5"
 glibc = ">= 2.31"
 
 [package.metadata.generate-rpm.scripts]
-post = "if command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi"
+post = "if command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi; if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true; fi"
 postun = "if [ \"$1\" = \"0\" ] && command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi"

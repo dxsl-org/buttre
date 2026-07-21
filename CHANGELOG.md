@@ -4,8 +4,12 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
-## [0.7.9-beta] — 2026-07-20
+## [0.7.9-beta] — 2026-07-21
 
+- linux: sửa tray app crash ngay khi mở (`GTK has not been initialized. Call gtk::init first.`) — `main` dựng menu tray qua GTK (tray-icon/muda) nhưng chưa gọi `gtk::init()`; giờ init GTK trên thread sở hữu tray trước khi dựng menu và bơm GTK main loop trong vòng lặp winit (`AboutToWait`) để icon khay hiện và menu nhận được click. Đây là lỗi chặn toàn bộ việc chọn kiểu gõ/cấu hình trên Linux
+- linux: `buttre --version` và `buttre --help` in thông tin rồi thoát sạch — trước đây cờ lạ rơi vào đường khởi động tray và panic
+- linux: gói .deb/.rpm nay kèm icon engine tại `/usr/share/icons/hicolor/128x128/apps/buttre.png` khớp `<icon>buttre</icon>` trong component XML (trước đây bộ chọn input source chỉ hiện chữ); postinst/postrm refresh icon cache; `install-ibus.sh` cũng cài icon và tôn trọng `CARGO_TARGET_DIR`
+- linux: sửa version trong `installers/linux/buttre.xml` (0.6.3 → 0.7.9-beta) cho khớp phiên bản workspace
 - engine: gõ tắt kiểu "đt"/"đc"/"đkkd" chạy được ngay không cần tự định nghĩa — cụm phụ âm không nguyên âm bắt đầu bằng "đ" (chỉ sinh ra được từ phím biến đổi chủ ý dd/d9) giữ nguyên dạng đã ghép thay vì rơi về phím thô; thêm tùy chọn "Kiểm soát gắt gao chính tả tiếng Việt" trong tab Chung để tắt độ lỏng này (mặc định lỏng kiểu Unikey), áp dụng ngay trên mọi backend (hook, TSF, IBus, Wayland)
 - scripts: `build-hook.ps1` build bản release theo mặc định — trước đây build debug (~32MB) khiến bản cài thực tế nặng gấp 5 lần bản release thật (~6.4MB); thêm cờ `-Debug` cho ai cần build nhanh để test, không dùng để cài
 - core: kéo dài thời hạn tự xóa từ-đã-học không dùng tới từ 180 ngày lên 365 ngày — người ít dùng buttre không còn mất hết thiết lập sau nửa năm; cập nhật lại hướng dẫn "tắt toàn bộ" trong learning.toml đã lỗi thời

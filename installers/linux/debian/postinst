@@ -6,6 +6,10 @@ case "$1" in
         if command -v ibus >/dev/null 2>&1; then
             ibus write-cache --system >/dev/null 2>&1 || true
         fi
+        # Refresh the hicolor cache so the freshly installed engine icon resolves.
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+        fi
         ;;
 esac
 

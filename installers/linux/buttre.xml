@@ -3,7 +3,7 @@
     <name>org.freedesktop.IBus.buttre</name>
     <description>buttre Vietnamese IME</description>
     <exec>/usr/bin/buttre --ibus</exec>
-    <version>0.6.3</version>
+    <version>0.7.9-beta</version>
     <author>buttre project</author>
     <license>MPL-2.0</license>
     <homepage>https://github.com/dxsl-org/buttre</homepage>
