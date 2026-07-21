@@ -184,4 +184,4 @@ glibc = ">= 2.31"
 
 [package.metadata.generate-rpm.scripts]
 post = "if command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi; if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true; fi"
-postun = "if [ \"$1\" = \"0\" ] && command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi"
+postun = "if [ \"$1\" = \"0\" ] && command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi; if [ \"$1\" = \"0\" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true; fi"
