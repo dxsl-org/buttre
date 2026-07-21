@@ -31,6 +31,10 @@ export component ConfigWindow inherits Window {
     in-out property <bool> strict-spelling: false;
     in-out property <bool> learning-enabled: true;
     in-out property <bool> shorthand-enabled: false;
+    // Checkbox ON = no-preedit (gõ thẳng) = Settings.use_preedit == false.
+    // Inverted at the UI edge so the label reads naturally while the stored
+    // setting stays positive.
+    in-out property <bool> use-preedit-off: false;
 
     // `run()` handles this: build a `Settings` from the properties above and
     // atomically save it. Fired by EVERY user change on the "Chung" tab
@@ -137,6 +141,11 @@ export component ConfigWindow inherits Window {
                     CheckBox {
                         text: "Gõ tắt (macros.toml)";
                         checked <=> shorthand-enabled;
+                        toggled => { root.save-settings(); }
+                    }
+                    CheckBox {
+                        text: "Gõ thẳng không gạch chân — Telex/VNI (chỉ app hỗ trợ; terminal vẫn gạch chân)";
+                        checked <=> use-preedit-off;
                         toggled => { root.save-settings(); }
                     }
                 }

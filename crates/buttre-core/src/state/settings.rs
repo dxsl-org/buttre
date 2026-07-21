@@ -65,6 +65,17 @@ pub struct Settings {
     /// `Keyboard::set_strict_spelling`.
     #[serde(default)]
     pub strict_spelling: bool,
+
+    /// Show the composition as underlined preedit (`true`, the long-standing
+    /// behavior) or commit text as-you-go with NO underline (`false`,
+    /// Unikey-style). Honored only by the Linux/macOS preedit backends —
+    /// Windows already commits real text. Nôm always uses preedit regardless
+    /// (its candidate popup needs it). `false` relies on the focused app
+    /// supporting in-place text deletion; backends that can't do it for a given
+    /// client fall back to preedit rather than corrupt input. Default `true` so
+    /// an upgrade never changes a user's typing out from under them.
+    #[serde(default = "default_use_preedit")]
+    pub use_preedit: bool,
 }
 
 /// `serde(default)` value for `Settings::backspace_mode` — also the fallback
@@ -78,6 +89,13 @@ fn default_learning_enabled() -> bool {
     true
 }
 
+/// `serde(default)` value for `Settings::use_preedit` — preedit ON, matching
+/// the behavior every prior release shipped so an old `settings.toml` (and a
+/// fresh install) keeps the known-good underline model until the user opts out.
+fn default_use_preedit() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -88,6 +106,7 @@ impl Default for Settings {
             backspace_mode: default_backspace_mode(),
             learning_enabled: default_learning_enabled(),
             strict_spelling: false,
+            use_preedit: default_use_preedit(),
         }
     }
 }
@@ -179,6 +198,23 @@ mod tests {
         let settings: Settings =
             toml::from_str(toml_str).expect("must deserialize without backspace_mode present");
         assert_eq!(settings.backspace_mode, "grapheme");
+    }
+
+    #[test]
+    fn use_preedit_defaults_true_when_absent_from_toml() {
+        // Every settings.toml written before this field existed must load with
+        // preedit ON (the prior behavior), not fail or silently flip to the
+        // no-underline model.
+        let toml_str = r#"
+            input_method = "telex"
+            auto_correct = false
+            shorthand = false
+            startup = false
+        "#;
+        let settings: Settings =
+            toml::from_str(toml_str).expect("must deserialize without use_preedit present");
+        assert!(settings.use_preedit);
+        assert!(Settings::default().use_preedit);
     }
 
     #[test]

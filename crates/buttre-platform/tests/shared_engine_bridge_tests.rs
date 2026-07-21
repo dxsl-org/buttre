@@ -25,7 +25,10 @@ fn commits(ops: &[ImeOp]) -> Vec<String> {
     ops.iter()
         .filter_map(|op| match op {
             ImeOp::Commit(t) => Some(t.clone()),
-            ImeOp::Preedit(_) | ImeOp::Candidates { .. } | ImeOp::HideCandidates => None,
+            ImeOp::Preedit(_)
+            | ImeOp::Candidates { .. }
+            | ImeOp::HideCandidates
+            | ImeOp::DeleteSurrounding(_) => None,
         })
         .collect()
 }
@@ -216,4 +219,89 @@ fn no_store_injected_behaves_exactly_like_new() {
     let space = bridge.process_char(' ');
     assert_eq!(commits(&space.ops), vec!["vn"]);
     assert!(EngineBridge::try_new("telex").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// No-preedit (commit-as-you-go) mode — Telex/VNI with composition turned off.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_bridge_uses_the_preedit_model() {
+    // Constructors must stay composition=true so macOS/Wayland/Windows and the
+    // IBus default are unchanged — the first key emits a Preedit op.
+    let mut bridge = EngineBridge::new("telex");
+    let out = bridge.process_char('v');
+    assert!(
+        out.ops.iter().any(|o| matches!(o, ImeOp::Preedit(_))),
+        "default bridge must compose (emit preedit), got {:?}",
+        out.ops
+    );
+}
+
+#[test]
+fn direct_mode_passes_plain_letter_then_replaces_on_tone() {
+    let mut bridge = EngineBridge::new("telex");
+    // Fresh bridge has nothing pending, so flipping emits nothing.
+    assert!(bridge.set_use_composition(false).ops.is_empty());
+
+    // A plain letter with no transform is a natural passthrough: the app
+    // inserts it, the engine just tracks it (no ops, not handled).
+    let a = bridge.process_char('a');
+    assert!(!a.handled, "plain letter passes through in direct mode");
+    assert!(a.ops.is_empty());
+
+    // The Telex tone key rewrites the committed letter in place: delete 1, then
+    // commit the toned form — NO preedit, so no underline ever appears.
+    let s = bridge.process_char('s');
+    assert!(s.handled);
+    assert_eq!(
+        s.ops,
+        vec![ImeOp::DeleteSurrounding(1), ImeOp::Commit("á".to_string())]
+    );
+}
+
+#[test]
+fn direct_mode_separator_passes_through() {
+    let mut bridge = EngineBridge::new("telex");
+    bridge.set_use_composition(false);
+    bridge.process_char('a');
+    // Space is a separator; the word is already committed as-you-go, so nothing
+    // to correct — it passes through to the app.
+    let space = bridge.process_char(' ');
+    assert!(!space.handled, "separator passes through in direct mode");
+}
+
+#[test]
+fn mid_word_flip_to_direct_commits_pending_word() {
+    // Flipping the model mid-composition must COMMIT the pending word (not drop
+    // it) before switching, so no text is lost.
+    let mut bridge = EngineBridge::new("telex");
+    bridge.process_char('v');
+    bridge.process_char('i'); // preedit "vi"
+    let flip = bridge.set_use_composition(false);
+    assert_eq!(
+        commits(&flip.ops),
+        vec!["vi"],
+        "mid-word flip must commit the pending word, got {:?}",
+        flip.ops
+    );
+}
+
+#[test]
+fn set_use_composition_is_a_noop_for_nom() {
+    // Nôm always composes (its candidate popup needs the preedit); the toggle
+    // must not flip it.
+    let mut bridge = EngineBridge::new("nom");
+    assert!(
+        bridge.set_use_composition(false).ops.is_empty(),
+        "Nôm must ignore the no-preedit toggle"
+    );
+    // Still composing: a keystroke yields a preedit, not a direct commit.
+    let out = bridge.process_char('a');
+    assert!(
+        out.ops.iter().any(|o| matches!(o, ImeOp::Preedit(_)))
+            || out.ops.iter().any(|o| matches!(o, ImeOp::Candidates { .. })),
+        "Nôm stays in composition after the toggle, got {:?}",
+        out.ops
+    );
 }

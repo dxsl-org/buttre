@@ -203,6 +203,10 @@ pub fn run_engine() -> Result<()> {
     // this function later returns `Unavailable`, only the watcher does.
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
+    // Wayland stays on the preedit model for now; it loads the flag only so the
+    // shared settings watcher keeps its signature, and the no-preedit model can
+    // be wired to this backend later without touching macro_sync again.
+    let use_preedit = macro_sync::load_initial_use_preedit();
 
     let mut state = ImeState::new(method_state.clone(), macros.clone(), strict.clone());
     let mut queue = conn.new_event_queue::<ImeState>();
@@ -235,7 +239,7 @@ pub fn run_engine() -> Result<()> {
     // method watcher and the shorthand/gõ tắt watcher (no IBus fallback will
     // run in this process, so neither would be orphaned by an early return).
     method_sync::spawn_watcher(method_state);
-    macro_sync::spawn_watcher(macros, strict);
+    macro_sync::spawn_watcher(macros, strict, use_preedit);
 
     tracing::info!("Wayland input method registered; waiting for text-input activation");
     loop {

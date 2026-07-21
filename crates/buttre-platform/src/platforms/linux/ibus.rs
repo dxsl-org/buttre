@@ -50,6 +50,14 @@ const KEY_DOWN: u32 = 0xFF54;
 const KEY_PAGE_UP: u32 = 0xFF55;
 const KEY_PAGE_DOWN: u32 = 0xFF56;
 
+/// `IBusCapabilite::IBUS_CAP_SURROUNDING_TEXT` = `1 << 5` — the client can
+/// report and delete text around the cursor. Preferred delete primitive for the
+/// no-preedit model (`delete_surrounding_text`). (NOT `4`; that bit is
+/// `IBUS_CAP_LOOKUP_TABLE`. Verified against live SetCapabilities values:
+/// gnome-text-editor reports 41 = 0x29 with this bit set, a browser reports 9
+/// without it.)
+const IBUS_CAP_SURROUNDING_TEXT: u32 = 1 << 5;
+
 /// IBusPreeditFocusMode::COMMIT — the client commits a visible preedit when
 /// focus changes, so a mouse click elsewhere never eats the current word.
 const PREEDIT_FOCUS_COMMIT: u32 = 1;
@@ -69,6 +77,19 @@ pub struct ButtreEngine {
     /// Last [`MethodState::generation`] this engine applied; compared per
     /// keystroke (one atomic load) for lazy keyboard rebuild on switch.
     seen_generation: u64,
+    /// Shared `Settings::use_preedit` mirror (`macro_sync`). `None` in
+    /// standalone construction (tests). `true` = preedit/underline model,
+    /// `false` = commit-as-you-go. Consulted per keystroke.
+    use_preedit: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Client capability bits from the last `SetCapabilities`. The no-preedit
+    /// model is only engaged when `caps & IBUS_CAP_SURROUNDING_TEXT != 0`
+    /// (the client can delete already-committed text); otherwise the engine
+    /// stays on preedit even with the setting off, so input is never corrupted.
+    caps: u32,
+    /// The no-preedit state currently applied to the bridge — compared per
+    /// keystroke against the desired state so a setting/capability change flips
+    /// the model exactly once. `false` = preedit (the safe startup default).
+    applied_no_preedit: bool,
 }
 
 impl ButtreEngine {
@@ -81,6 +102,9 @@ impl ButtreEngine {
             bridge: Arc::new(Mutex::new(EngineBridge::new(method_name))),
             method_state: None,
             seen_generation: 0,
+            use_preedit: None,
+            caps: 0,
+            applied_no_preedit: false,
         }
     }
 
@@ -102,6 +126,7 @@ impl ButtreEngine {
         state: Arc<MethodState>,
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
+        use_preedit: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let mut bridge = EngineBridge::new_with_macros(&state.method(), macros);
         bridge.set_strict_flag(strict);
@@ -109,6 +134,9 @@ impl ButtreEngine {
             seen_generation: state.generation(),
             bridge: Arc::new(Mutex::new(bridge)),
             method_state: Some(state),
+            use_preedit: Some(use_preedit),
+            caps: 0,
+            applied_no_preedit: false,
         }
     }
 
@@ -207,6 +235,17 @@ impl ButtreEngine {
     #[dbus_interface(signal)]
     async fn hide_lookup_table(ctx: &SignalContext<'_>) -> zbus::Result<()>;
 
+    /// Delete text around the cursor in the focused client (no-preedit mode).
+    /// `offset` is signed CHARACTERS relative to the cursor; `(-n, n)` deletes
+    /// the `n` characters immediately before it. Only sent to clients that
+    /// advertised `IBUS_CAP_SURROUNDING_TEXT`.
+    #[dbus_interface(signal)]
+    async fn delete_surrounding_text(
+        ctx: &SignalContext<'_>,
+        offset: i32,
+        nchars: u32,
+    ) -> zbus::Result<()>;
+
     // --- Method handlers ---
 
     /// Process keyboard event. Returns true if the event was consumed.
@@ -230,6 +269,10 @@ impl ButtreEngine {
 
         // Apply a pending tray-side method switch before processing (B5).
         self.sync_method(&ctx).await;
+
+        // Apply a pending preedit-model change (setting toggle or capability
+        // update) before processing this key.
+        self.sync_use_preedit(&ctx).await;
 
         // Shortcuts (Ctrl+C, Alt+F4, …): commit the pending word so it isn't
         // lost, then let the app receive the combo.
@@ -449,8 +492,13 @@ impl ButtreEngine {
         tracing::debug!("SetCursorLocation: x={}, y={}, w={}, h={}", x, y, w, h);
     }
 
+    /// Record the client's capabilities. Sync (no `SignalContext`), so it only
+    /// stores the bits; the next `process_key_event` calls `sync_use_preedit`
+    /// which applies any resulting model change. Caps arrive before typing, so
+    /// this self-heals on the first keystroke.
     fn set_capabilities(&mut self, caps: u32) {
         tracing::debug!("SetCapabilities: {}", caps);
+        self.caps = caps;
     }
 
     /// `ContentType` is a write-only PROPERTY `(uu)` in the engine
@@ -524,6 +572,14 @@ impl ButtreEngine {
                 ImeOp::HideCandidates => {
                     Self::hide_lookup_table(ctx).await.ok();
                 }
+                ImeOp::DeleteSurrounding(n) => {
+                    // Atomic delete of the n chars before the cursor. Only ever
+                    // reached when the client advertised surrounding-text (the
+                    // gate in sync_use_preedit), so no fallback is needed.
+                    Self::delete_surrounding_text(ctx, -(n as i32), n as u32)
+                        .await
+                        .ok();
+                }
             }
         }
     }
@@ -552,5 +608,36 @@ impl ButtreEngine {
             // retry the same broken method every keystroke.
             None => tracing::warn!("Method switch to {method} failed; keeping current"),
         }
+    }
+
+    /// Apply a pending preedit-model change. No-preedit (commit-as-you-go)
+    /// engages only when the user turned the setting off AND the client can
+    /// delete already-committed text (`IBUS_CAP_SURROUNDING_TEXT`). Clients
+    /// without it (terminals, some GUIs) stay on preedit: neither
+    /// `forward_key_event` nor a committed DEL reliably deletes there — verified
+    /// on Ptyxis (GTK4/VTE), which ignores forwarded keys and drops committed
+    /// control chars, so no-preedit would corrupt input. Nôm ignores the whole
+    /// thing in the bridge (`set_use_composition` no-ops for Nôm).
+    async fn sync_use_preedit(&mut self, ctx: &SignalContext<'_>) {
+        let want_no_preedit = self
+            .use_preedit
+            .as_ref()
+            .map(|flag| !flag.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false);
+        let has_surrounding = self.caps & IBUS_CAP_SURROUNDING_TEXT != 0;
+        let effective = want_no_preedit && has_surrounding;
+        if effective == self.applied_no_preedit {
+            return;
+        }
+        self.applied_no_preedit = effective;
+        // set_use_composition commits any pending word before switching models;
+        // the guard is dropped before the await (owned outcome returned).
+        let outcome = self
+            .bridge
+            .lock()
+            .unwrap()
+            .set_use_composition(!effective);
+        self.emit_ops(ctx, outcome.ops).await;
+        tracing::info!("Preedit model: no_preedit={effective}");
     }
 }

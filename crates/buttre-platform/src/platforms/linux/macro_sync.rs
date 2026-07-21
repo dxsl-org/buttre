@@ -45,17 +45,34 @@ pub fn load_initial_strict() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(strict))
 }
 
-/// Re-read `settings.toml` and swap `store`'s contents + refresh `strict`
-/// to match — the single reload spelling both watch callbacks below share.
-fn reload(store: &Arc<Mutex<MacroStore>>, strict: &Arc<AtomicBool>) {
+/// Build the initial `Settings::use_preedit` mirror for engine-process startup
+/// — rides the SAME `settings.toml` watcher as `strict_spelling` (one re-read
+/// serves shorthand + strict + use_preedit). The IBus engine consults it per
+/// keystroke to decide the preedit vs commit-as-you-go model.
+pub fn load_initial_use_preedit() -> Arc<AtomicBool> {
+    let use_preedit = Settings::load().use_preedit;
+    tracing::info!("macro_sync: initial use_preedit = {use_preedit}");
+    Arc::new(AtomicBool::new(use_preedit))
+}
+
+/// Re-read `settings.toml` and swap `store`'s contents + refresh `strict` and
+/// `use_preedit` to match — the single reload spelling both watch callbacks
+/// below share.
+fn reload(
+    store: &Arc<Mutex<MacroStore>>,
+    strict: &Arc<AtomicBool>,
+    use_preedit: &Arc<AtomicBool>,
+) {
     let settings = Settings::load();
     *store.lock().unwrap_or_else(|e| e.into_inner()) =
         MacroStore::load_gated(settings.shorthand);
     strict.store(settings.strict_spelling, Ordering::Relaxed);
+    use_preedit.store(settings.use_preedit, Ordering::Relaxed);
     tracing::info!(
-        "macro_sync: reloaded (shorthand={}, strict_spelling={})",
+        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={})",
         settings.shorthand,
-        settings.strict_spelling
+        settings.strict_spelling,
+        settings.use_preedit
     );
 }
 
@@ -89,7 +106,11 @@ fn push_parent(dirs: &mut Vec<PathBuf>, path: PathBuf) {
 /// (notify's callbacks are sync); lives for the process lifetime — the
 /// daemon/compositor owns the engine process, so there is no teardown path
 /// to plumb (mirrors `method_sync::spawn_watcher`).
-pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>, strict: Arc<AtomicBool>) {
+pub fn spawn_watcher(
+    store: Arc<Mutex<MacroStore>>,
+    strict: Arc<AtomicBool>,
+    use_preedit: Arc<AtomicBool>,
+) {
     let dirs = watch_dirs();
     if dirs.is_empty() {
         tracing::warn!("macro_sync: no watchable directory found, watcher not started");
@@ -102,6 +123,7 @@ pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>, strict: Arc<AtomicBool>) {
             use notify::{RecursiveMode, Watcher};
             let store_cb = store.clone();
             let strict_cb = strict.clone();
+            let use_preedit_cb = use_preedit.clone();
             let mut watcher =
                 match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                     // The watched dirs also hold unrelated state (method
@@ -118,7 +140,7 @@ pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>, strict: Arc<AtomicBool>) {
                         )
                     });
                     if relevant {
-                        reload(&store_cb, &strict_cb);
+                        reload(&store_cb, &strict_cb, &use_preedit_cb);
                     }
                 }) {
                     Ok(w) => w,

@@ -182,6 +182,8 @@ pub fn run() -> anyhow::Result<()> {
     window.set_strict_spelling(settings.strict_spelling);
     window.set_learning_enabled(settings.learning_enabled);
     window.set_shorthand_enabled(settings.shorthand);
+    // Checkbox is inverted: ON = no-preedit = use_preedit false.
+    window.set_use_preedit_off(!settings.use_preedit);
     // Single-sourced from Cargo.toml — the old help_dialog.rs MessageBox
     // had this hardcoded ("0.7.7-beta") and silently went stale after every
     // release bump; `CARGO_PKG_VERSION` can never drift.
@@ -236,6 +238,7 @@ pub fn run() -> anyhow::Result<()> {
             },
             learning_enabled: window.get_learning_enabled(),
             strict_spelling: window.get_strict_spelling(),
+            use_preedit: !window.get_use_preedit_off(),
         };
 
         // Autostart registration is a per-OS side effect, not just a

@@ -137,6 +137,10 @@ struct ButtreFactory {
     /// `macro_sync` watcher — every engine's bridge consults it lazily per
     /// keystroke (`EngineBridge::set_strict_flag`).
     strict: Arc<std::sync::atomic::AtomicBool>,
+    /// `Settings::use_preedit` mirror on the same watcher — each engine reads
+    /// it per keystroke to choose the preedit vs commit-as-you-go model
+    /// (gated on the client's surrounding-text capability).
+    use_preedit: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[dbus_interface(name = "org.freedesktop.IBus.Factory")]
@@ -162,6 +166,7 @@ impl ButtreFactory {
             self.method_state.clone(),
             self.macros.clone(),
             self.strict.clone(),
+            self.use_preedit.clone(),
         );
         server
             .at(&path, engine)
@@ -221,7 +226,8 @@ pub async fn run_engine() -> Result<()> {
     // macros.toml + settings.toml.
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
-    macro_sync::spawn_watcher(macros.clone(), strict.clone());
+    let use_preedit = macro_sync::load_initial_use_preedit();
+    macro_sync::spawn_watcher(macros.clone(), strict.clone(), use_preedit.clone());
 
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
@@ -233,6 +239,7 @@ pub async fn run_engine() -> Result<()> {
                 method_state,
                 macros,
                 strict,
+                use_preedit,
             },
         )?
         .name("org.freedesktop.IBus.buttre")?
