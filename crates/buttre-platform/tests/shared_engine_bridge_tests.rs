@@ -25,7 +25,7 @@ fn commits(ops: &[ImeOp]) -> Vec<String> {
     ops.iter()
         .filter_map(|op| match op {
             ImeOp::Commit(t) => Some(t.clone()),
-            ImeOp::Preedit(_) => None,
+            ImeOp::Preedit(_) | ImeOp::Candidates { .. } | ImeOp::HideCandidates => None,
         })
         .collect()
 }
