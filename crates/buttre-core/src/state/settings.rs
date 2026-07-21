@@ -24,7 +24,13 @@ pub struct Settings {
     /// Enable shorthand/macro expansion
     pub shorthand: bool,
 
-    /// Launch buttre on system startup
+    /// Launch buttre on system startup. Default `true`: a fresh install (no
+    /// `settings.toml` yet) starts with autostart ON, and the tray registers
+    /// the per-OS login entry on its first launch (see
+    /// `buttre-platform/src/main.rs`) — matching the "always start with the
+    /// OS" expectation of an input method. Existing users are unaffected:
+    /// their saved `settings.toml` already carries an explicit choice, and
+    /// `load()` reads it verbatim rather than this default.
     pub startup: bool,
 
     /// Backspace deletion granularity (event-sourcing-completion Phase 4):
@@ -78,7 +84,7 @@ impl Default for Settings {
             input_method: "english".to_string(),
             auto_correct: false,
             shorthand: false,
-            startup: false,
+            startup: true,
             backspace_mode: default_backspace_mode(),
             learning_enabled: default_learning_enabled(),
             strict_spelling: false,

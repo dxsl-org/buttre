@@ -26,8 +26,19 @@ fn main() {
     let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
     let src_keyboards = workspace_root.join("keyboards");
 
-    let profile = env::var("PROFILE").unwrap();
-    let target_dir = workspace_root.join("target").join(profile);
+    // Honor CARGO_TARGET_DIR instead of assuming `<workspace>/target/<profile>`:
+    // derive the profile output dir from OUT_DIR, which cargo always sets to
+    // `<target>/<profile>/build/<pkg>-<hash>/out` under the REAL target dir. A
+    // redirected target (common on a VirtualBox shared folder, where build
+    // outputs must live on a real filesystem) would otherwise stage assets
+    // where cargo-deb / cargo-generate-rpm never look, and packaging fails on a
+    // missing buttre_nom.db.
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let target_dir = Path::new(&out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("OUT_DIR is always <target>/<profile>/build/<pkg>/out")
+        .to_path_buf();
     let dest_keyboards = target_dir.join("keyboards");
 
     println!("cargo:rerun-if-changed={}", src_keyboards.display());

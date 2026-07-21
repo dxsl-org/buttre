@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=buttre
+Comment=Bộ gõ tiếng Việt
+Exec=/usr/bin/buttre
+Icon=buttre
+Terminal=false
+Categories=Utility;

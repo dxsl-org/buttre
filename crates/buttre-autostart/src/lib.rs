@@ -37,17 +37,40 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
 
 /// XDG autostart entry (`~/.config/autostart/buttre.desktop`) — the
 /// freedesktop mechanism every major desktop (GNOME/KDE/XFCE) honors.
+///
+/// Disable does NOT delete the entry: the `.deb`/`.rpm` package ships a
+/// system entry at `/etc/xdg/autostart/buttre.desktop`, and a per-user file of
+/// the same basename overrides it. Deleting our per-user file would let the
+/// system entry win and the tray would keep starting — so "off" writes a
+/// `Hidden=true` MASK, which the spec defines to suppress the same-named entry
+/// from every lower-priority directory.
 #[cfg(target_os = "linux")]
 pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
     let dir = dirs::config_dir()
         .ok_or_else(|| anyhow::anyhow!("no XDG config dir"))?
         .join("autostart");
-    let path = dir.join("buttre.desktop");
-    if enabled {
-        std::fs::create_dir_all(&dir)?;
-        let exe = std::env::current_exe()?;
-        std::fs::write(
-            &path,
+    let exe = std::env::current_exe()?;
+    linux_impl::write_autostart(&dir, enabled, &exe)
+}
+
+#[cfg(target_os = "linux")]
+mod linux_impl {
+    use std::path::{Path, PathBuf};
+
+    /// Per-user autostart entry within `dir`. Its basename matches the packaged
+    /// system entry so this file overrides it (XDG same-name precedence).
+    pub(super) fn entry_path(dir: &Path) -> PathBuf {
+        dir.join("buttre.desktop")
+    }
+
+    /// Write the per-user autostart entry: a launch entry when `enabled`, a
+    /// `Hidden=true` mask when not (see [`super::set_enabled`] for why disable
+    /// masks rather than deletes). Splits the path out of `set_enabled` so the
+    /// enable/disable/round-trip behavior is unit-testable against a temp dir
+    /// without touching the real `$XDG_CONFIG_HOME`.
+    pub(super) fn write_autostart(dir: &Path, enabled: bool, exe: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let content = if enabled {
             format!(
                 "[Desktop Entry]\n\
                  Type=Application\n\
@@ -56,12 +79,69 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
                  Exec=\"{}\"\n\
                  X-GNOME-Autostart-enabled=true\n",
                 exe.display()
-            ),
-        )?;
-    } else if path.exists() {
-        std::fs::remove_file(&path)?;
+            )
+        } else {
+            // `Hidden=true` is the freedesktop "deleted at this level" marker;
+            // `X-GNOME-Autostart-enabled=false` covers GNOME builds that key on
+            // it. Either alone suppresses launch — both are written for breadth.
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=buttre\n\
+             Hidden=true\n\
+             X-GNOME-Autostart-enabled=false\n"
+                .to_string()
+        };
+        std::fs::write(entry_path(dir), content)?;
+        Ok(())
     }
-    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::linux_impl::{entry_path, write_autostart};
+    use std::path::{Path, PathBuf};
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("buttre-autostart-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn enable_writes_launch_entry() {
+        let dir = fresh_dir("enable");
+        write_autostart(&dir, true, Path::new("/usr/bin/buttre")).unwrap();
+        let content = std::fs::read_to_string(entry_path(&dir)).unwrap();
+        assert!(content.contains("Exec=\"/usr/bin/buttre\""));
+        assert!(content.contains("X-GNOME-Autostart-enabled=true"));
+        assert!(!content.contains("Hidden=true"));
+    }
+
+    #[test]
+    fn disable_masks_instead_of_deleting() {
+        // Turning autostart off must leave a Hidden override, not remove the
+        // file — otherwise the packaged /etc/xdg/autostart entry keeps the tray
+        // launching and the toggle appears to do nothing.
+        let dir = fresh_dir("disable");
+        write_autostart(&dir, true, Path::new("/usr/bin/buttre")).unwrap();
+        write_autostart(&dir, false, Path::new("/usr/bin/buttre")).unwrap();
+        let path = entry_path(&dir);
+        assert!(path.exists(), "disable must leave a masking file behind");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Hidden=true"));
+        assert!(content.contains("X-GNOME-Autostart-enabled=false"));
+        assert!(!content.contains("enabled=true"));
+    }
+
+    #[test]
+    fn toggle_off_then_on_round_trips_to_a_launch_entry() {
+        let dir = fresh_dir("roundtrip");
+        write_autostart(&dir, false, Path::new("/usr/bin/buttre")).unwrap();
+        write_autostart(&dir, true, Path::new("/usr/bin/buttre")).unwrap();
+        let content = std::fs::read_to_string(entry_path(&dir)).unwrap();
+        assert!(content.contains("X-GNOME-Autostart-enabled=true"));
+        assert!(!content.contains("Hidden=true"));
+    }
 }
 
 /// macOS: the IMKit host is launched by the SYSTEM when the input source is
