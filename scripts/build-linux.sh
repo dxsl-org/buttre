@@ -24,14 +24,9 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# vboxsf reports statfs magic 0x786f4256 ("VBox"); a native filesystem (ext4,
-# btrfs, …) reports anything else. Only redirect when we must, so this stays a
-# transparent `cargo` wrapper everywhere else.
-FS_MAGIC="$(stat -f -c '%t' . 2>/dev/null || echo '')"
-if [ "$FS_MAGIC" = "786f4256" ]; then
-    export CARGO_TARGET_DIR="${BUTTRE_TARGET_DIR:-/dev/shm/buttre-target}"
-    echo "🔀 Repo is on a VirtualBox shared folder — building to CARGO_TARGET_DIR=$CARGO_TARGET_DIR" >&2
-fi
+# Redirect the target dir off vboxsf when needed (no-op on a native disk).
+# shellcheck source=scripts/lib/vboxsf-target-dir.sh
+. "$PROJECT_ROOT/scripts/lib/vboxsf-target-dir.sh"
 
 # No args → debug-build the shippable Linux crates. Any args are forwarded
 # verbatim to cargo (test, clippy, run, --release, -p …).
