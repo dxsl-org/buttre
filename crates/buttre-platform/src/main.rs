@@ -254,6 +254,47 @@ fn watch_settings_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatche
     Some(watcher)
 }
 
+/// Watch the shared method file (`~/.config/buttre/method`) so a switch made
+/// from the IBus panel — which the engine persists there and the tray does not
+/// otherwise observe — reflects in the tray menu and icon. Same shape as
+/// `watch_settings_file`; the call site diffs the file against `AppState` to
+/// tell the tray's own writes from a genuine external change.
+#[cfg(platform_linux)]
+fn watch_method_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    use buttre_platform::platforms::linux::method_sync;
+    use notify::{RecursiveMode, Watcher};
+    let path = method_sync::method_file_path()?;
+    let dir = path.parent()?.to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("cannot create {dir:?}, IBus-panel method sync disabled: {e:?}");
+        return None;
+    }
+    let file_name = path.file_name()?.to_os_string();
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
+                {
+                    let _ = tx.send(());
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("method-file watcher failed, IBus-panel method sync disabled: {e:?}");
+                return None;
+            }
+        };
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+        warn!("method-file watch failed, IBus-panel method sync disabled: {e:?}");
+        return None;
+    }
+    Some(watcher)
+}
+
 fn main() -> Result<()> {
     // Initialize tracing (handles both log crate and tracing crate)
     tracing_subscriber::fmt()
@@ -620,6 +661,13 @@ fn main() -> Result<()> {
     let (settings_file_tx, settings_file_rx) = mpsc::channel::<()>();
     let _settings_watcher = watch_settings_file(settings_file_tx);
 
+    // Watch the IBus-shared method file so a panel-side switch (persisted there
+    // by the engine, never in settings.toml) reflects in the tray. Linux-only.
+    #[cfg(platform_linux)]
+    let (method_file_tx, method_file_rx) = mpsc::channel::<()>();
+    #[cfg(platform_linux)]
+    let _method_watcher = watch_method_file(method_file_tx);
+
     // --- Event Loop ---
     let menu_channel = muda::MenuEvent::receiver();
 
@@ -837,6 +885,34 @@ fn main() -> Result<()> {
                                     );
                                 }
                             }
+                        }
+                    }
+                }
+
+                // The IBus panel persists a method switch to the shared method
+                // file (not settings.toml), so drain that watcher and apply any
+                // genuine change through the same `set_method` path the tray's
+                // own menu uses. Pre-compare against AppState suppresses our own
+                // writes: `set_method` → LinuxBackend re-writes the file with the
+                // SAME value → this watcher refires → `disk == known` ⇒ ignored;
+                // the settings.toml write it also triggers is likewise a no-op
+                // for the settings watcher (AppState already matches).
+                //
+                // `disk` is always a real engine method (telex/vni/nom) written
+                // on an explicit panel switch — the file's only writers are that
+                // switch and the tray's own echo. So comparing against AppState's
+                // current method (which may be "english" or a custom id) is
+                // deliberate: picking a Vietnamese method from the IBus panel
+                // while the tray is in English adopts it, flipping to Vietnamese.
+                #[cfg(platform_linux)]
+                if method_file_rx.try_iter().count() > 0 {
+                    use buttre_platform::platforms::linux::method_sync;
+                    let known = app_state.lock().unwrap().settings().input_method.clone();
+                    let disk = method_sync::read_method();
+                    if disk != known {
+                        info!("method file changed externally — applying {disk}");
+                        if let Err(e) = app_state.lock().unwrap().set_method(&disk) {
+                            error!("Failed to apply external method change: {e:?}");
                         }
                     }
                 }

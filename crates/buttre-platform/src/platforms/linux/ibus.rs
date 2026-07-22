@@ -601,11 +601,22 @@ impl ButtreEngine {
         match outcome {
             Some(outcome) => {
                 self.emit_ops(ctx, outcome.ops).await;
+                // Move the panel radio to the new method now instead of waiting
+                // for the next focus_in — a switch made from the tray or the
+                // config window would otherwise leave the IBus menu checked on
+                // the old method until the field is refocused.
+                if let Err(e) =
+                    Self::register_properties(ctx, ibus_props::method_prop_list(&method)).await
+                {
+                    tracing::warn!("sync_method: RegisterProperties re-emit failed: {e}");
+                }
                 tracing::info!("Engine switched to method {method}");
             }
-            // Build failed (already logged): keep the current keyboard
-            // rather than crash. seen_generation is advanced so we don't
-            // retry the same broken method every keystroke.
+            // Build failed (already logged): keep the current keyboard rather
+            // than crash. Do NOT re-emit properties here — the method did not
+            // actually change, so the radio should keep reflecting the current
+            // one. seen_generation is advanced so we don't retry the same
+            // broken method every keystroke.
             None => tracing::warn!("Method switch to {method} failed; keeping current"),
         }
     }

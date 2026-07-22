@@ -67,6 +67,16 @@ fn read_method_from(path: &Path) -> String {
     "telex".to_string()
 }
 
+/// Read the current method id from the shared file (telex fallback).
+///
+/// Public so the tray's Store-B watcher can converge on engine-side writes
+/// (an IBus-panel switch lands here); mirrors [`MethodState::load`]'s read.
+pub fn read_method() -> String {
+    method_file_path()
+        .map(|p| read_method_from(&p))
+        .unwrap_or_else(|| "telex".to_string())
+}
+
 /// Current method + change generation, shared between the watcher thread,
 /// the factory (new engines), and live engine objects (lazy rebuild).
 pub struct MethodState {
