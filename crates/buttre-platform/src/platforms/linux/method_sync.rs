@@ -18,6 +18,7 @@ use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 /// Method ids the engine knows how to build. Anything else falls back to
 /// telex on read and is skipped on write (a custom-TOML method silently
@@ -77,11 +78,51 @@ pub fn read_method() -> String {
         .unwrap_or_else(|| "telex".to_string())
 }
 
+/// `~/.config/buttre/enabled` — the engine's active/disabled state ("1"/"0").
+///
+/// Separate from the `method` file so enable/disable never pollutes the method
+/// ids (`KNOWN_METHODS`): the engine is the SOLE writer (on `Enable`/`Disable`
+/// from the daemon when buttre becomes / stops being the global engine), and
+/// the tray is the sole reader — so the tray can mirror an OS input-source
+/// switch (buttre ⇄ English) that never touches Store B.
+pub fn enabled_file_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join("buttre/enabled"))
+}
+
+/// Atomically persist the engine's enabled state (temp file + rename).
+pub fn write_enabled(enabled: bool) -> Result<()> {
+    let path = enabled_file_path().ok_or_else(|| anyhow!("no XDG config directory"))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("enabled path has no parent"))?;
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(".enabled.tmp");
+    std::fs::write(&tmp, if enabled { "1" } else { "0" })?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Read the engine's enabled state. Absent/unreadable ⇒ `true` (enabled): the
+/// tray only ACTS on this from a watcher event (never at startup), so a missing
+/// file must not spuriously disable — it means "no disable has happened".
+pub fn read_enabled() -> bool {
+    enabled_file_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() != "0")
+        .unwrap_or(true)
+}
+
 /// Current method + change generation, shared between the watcher thread,
 /// the factory (new engines), and live engine objects (lazy rebuild).
 pub struct MethodState {
     method: Mutex<String>,
     generation: AtomicU64,
+    /// Woken on every genuine method change so an async consumer (the engine's
+    /// property-refresh task) can react immediately instead of waiting for the
+    /// next keystroke. `None` for backends that don't need the push (Wayland
+    /// has no IBus panel to re-publish). Interior-mutable because `load` hands
+    /// back an `Arc` before the consumer's `Notify` exists.
+    change_notify: Mutex<Option<Arc<Notify>>>,
 }
 
 impl MethodState {
@@ -94,6 +135,7 @@ impl MethodState {
         Arc::new(Self {
             method: Mutex::new(method),
             generation: AtomicU64::new(0),
+            change_notify: Mutex::new(None),
         })
     }
 
@@ -106,12 +148,25 @@ impl MethodState {
         self.generation.load(Ordering::Acquire)
     }
 
+    /// Register the [`Notify`] woken on each change (see the field doc). Set
+    /// once by the IBus engine before its watcher starts; a later `set` that
+    /// actually changes the method wakes it.
+    pub fn set_change_notify(&self, notify: Arc<Notify>) {
+        *self.change_notify.lock().unwrap() = Some(notify);
+    }
+
     fn set(&self, method: String) {
         let mut current = self.method.lock().unwrap();
         if *current != method {
             tracing::info!("method_sync: method changed {} -> {}", *current, method);
             *current = method;
             self.generation.fetch_add(1, Ordering::Release);
+            // Drop the method lock before waking so the consumer can read
+            // `method()` without contending on it.
+            drop(current);
+            if let Some(notify) = &*self.change_notify.lock().unwrap() {
+                notify.notify_one();
+            }
         }
     }
 }
@@ -206,6 +261,7 @@ mod tests {
         let state = MethodState {
             method: Mutex::new("telex".into()),
             generation: AtomicU64::new(0),
+            change_notify: Mutex::new(None),
         };
         state.set("telex".into());
         assert_eq!(state.generation(), 0);

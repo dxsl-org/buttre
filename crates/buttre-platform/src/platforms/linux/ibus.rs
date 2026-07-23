@@ -90,6 +90,15 @@ pub struct ButtreEngine {
     /// keystroke against the desired state so a setting/capability change flips
     /// the model exactly once. `false` = preedit (the safe startup default).
     applied_no_preedit: bool,
+    /// This engine object's D-Bus path (assigned by the factory). `None` in
+    /// standalone construction (tests). Published into [`Self::focused`] on
+    /// `focus_in` so the async property-refresh task knows where to emit.
+    path: Option<zvariant::OwnedObjectPath>,
+    /// Shared "currently focused engine path" — the async property-refresh
+    /// task (see `ibus_bus::run_engine`) emits `RegisterProperties` here when
+    /// the method changes externally (tray/config), so the panel radio follows
+    /// immediately instead of only on the next keystroke. `None` in tests.
+    focused: Option<Arc<Mutex<Option<zvariant::OwnedObjectPath>>>>,
 }
 
 impl ButtreEngine {
@@ -105,6 +114,8 @@ impl ButtreEngine {
             use_preedit: None,
             caps: 0,
             applied_no_preedit: false,
+            path: None,
+            focused: None,
         }
     }
 
@@ -122,11 +133,14 @@ impl ButtreEngine {
     /// strict-spelling mirror, injected into the bridge at construction so
     /// they survive every later method-switch `rebuild`
     /// (`EngineBridge::rebuild` re-applies both).
+    #[allow(clippy::too_many_arguments)] // reason: factory wires every shared handle in one call
     pub fn new_with_state_and_macros(
         state: Arc<MethodState>,
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
         use_preedit: Arc<std::sync::atomic::AtomicBool>,
+        path: zvariant::OwnedObjectPath,
+        focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>>,
     ) -> Self {
         let mut bridge = EngineBridge::new_with_macros(&state.method(), macros);
         bridge.set_strict_flag(strict);
@@ -137,6 +151,8 @@ impl ButtreEngine {
             use_preedit: Some(use_preedit),
             caps: 0,
             applied_no_preedit: false,
+            path: Some(path),
+            focused: Some(focused),
         }
     }
 
@@ -211,7 +227,7 @@ impl ButtreEngine {
     /// is an `IBusPropList` variant built in [`ibus_props`]; the daemon
     /// subscribes by signature, so its wire shape must match libibus exactly.
     #[dbus_interface(signal)]
-    async fn register_properties(
+    pub(crate) async fn register_properties(
         ctx: &SignalContext<'_>,
         props: zvariant::Value<'_>,
     ) -> zbus::Result<()>;
@@ -346,6 +362,12 @@ impl ButtreEngine {
     /// tracks properties against the focused engine, not the component.
     async fn focus_in(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
         tracing::info!("FocusIn");
+        // Mark this engine as the focused one so the async property-refresh
+        // task (ibus_bus) knows which path to re-publish on an external method
+        // change. Cleared on focus_out.
+        if let (Some(focused), Some(path)) = (&self.focused, &self.path) {
+            *focused.lock().unwrap() = Some(path.clone());
+        }
         let current = self
             .method_state
             .as_ref()
@@ -402,6 +424,16 @@ impl ButtreEngine {
     /// over the newly focused field (some panels don't auto-hide it).
     async fn focus_out(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
         tracing::info!("FocusOut");
+        // Relinquish focused-engine ownership so the refresh task doesn't emit
+        // to an unfocused path. Guard on identity: a focus_in on the NEXT
+        // engine may already have overwritten the slot, and clearing it then
+        // would drop that live target.
+        if let (Some(focused), Some(path)) = (&self.focused, &self.path) {
+            let mut slot = focused.lock().unwrap();
+            if slot.as_ref() == Some(path) {
+                *slot = None;
+            }
+        }
         let had_candidates = {
             let mut bridge = self.bridge.lock().unwrap();
             let had = bridge.candidate_count() > 0;
@@ -415,12 +447,24 @@ impl ButtreEngine {
 
     fn enable(&mut self) {
         tracing::info!("Enable");
+        // Mirror the active state to the tray: buttre just became the global
+        // engine (OS input-source switch or startup). The tray reflects the
+        // real Vietnamese method again. Best-effort — a failed write only means
+        // the tray's English/Vietnamese indicator lags, never a typing fault.
+        if let Err(e) = method_sync::write_enabled(true) {
+            tracing::warn!("Enable: write_enabled(true) failed: {e}");
+        }
     }
 
     /// Same contract as [`Self::focus_out`] for the candidate popup: hide it
     /// when the engine is disabled while a Nôm list is showing.
     async fn disable(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
         tracing::info!("Disable");
+        // buttre stopped being the global engine (OS switched to English/another
+        // source). Tell the tray so it can show the disabled/English state.
+        if let Err(e) = method_sync::write_enabled(false) {
+            tracing::warn!("Disable: write_enabled(false) failed: {e}");
+        }
         let had_candidates = {
             let mut bridge = self.bridge.lock().unwrap();
             let had = bridge.candidate_count() > 0;

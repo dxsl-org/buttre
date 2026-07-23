@@ -4,6 +4,9 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- linux: đổi kiểu gõ trên tray/cửa sổ Cấu hình giờ chuyển dấu chấm radio trên menu IBus (GNOME) NGAY LẬP TỨC, không cần gõ phím hay refocus — engine chạy một task nền phát lại `RegisterProperties` trên engine đang focus khi file `method` đổi (trước đây chỉ re-emit trong `sync_method` theo từng keystroke nên radio bị trơ)
+- linux: tray phản ánh trạng thái bật/tắt của bộ gõ theo bộ chuyển input source của HĐH — engine ghi `~/.config/buttre/enabled` khi nhận `Enable`/`Disable`; tray watch file này để hiện English/disabled khi chuyển sang bàn phím English và khôi phục kiểu gõ tiếng Việt (từ Store B) khi bật lại. Enable/disable vẫn do bộ chuyển của HĐH sở hữu; tray chỉ soi gương
+
 ## [0.7.10-beta] — 2026-07-21
 
 - linux: sửa tray app crash ngay khi mở (`GTK has not been initialized. Call gtk::init first.`) — `main` dựng menu tray qua GTK (tray-icon/muda) nhưng chưa gọi `gtk::init()`; giờ init GTK trên thread sở hữu tray trước khi dựng menu và bơm GTK main loop trong vòng lặp winit (`AboutToWait`) để icon khay hiện và menu nhận được click. Đây là lỗi chặn toàn bộ việc chọn kiểu gõ/cấu hình trên Linux

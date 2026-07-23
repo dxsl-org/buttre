@@ -295,6 +295,46 @@ fn watch_method_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher>
     Some(watcher)
 }
 
+/// Watch the `enabled` file the IBus engine writes on `Enable`/`Disable`
+/// (`~/.config/buttre/enabled`) so the tray mirrors an OS input-source switch
+/// between buttre and English. Same shape as [`watch_method_file`] — a separate
+/// inotify watch on the same config dir, filtered to the `enabled` filename.
+#[cfg(platform_linux)]
+fn watch_enabled_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    use buttre_platform::platforms::linux::method_sync;
+    use notify::{RecursiveMode, Watcher};
+    let path = method_sync::enabled_file_path()?;
+    let dir = path.parent()?.to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("cannot create {dir:?}, IBus enable/disable sync disabled: {e:?}");
+        return None;
+    }
+    let file_name = path.file_name()?.to_os_string();
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
+                {
+                    let _ = tx.send(());
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("enabled-file watcher failed, IBus enable/disable sync disabled: {e:?}");
+                return None;
+            }
+        };
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+        warn!("enabled-file watch failed, IBus enable/disable sync disabled: {e:?}");
+        return None;
+    }
+    Some(watcher)
+}
+
 fn main() -> Result<()> {
     // Initialize tracing (handles both log crate and tracing crate)
     tracing_subscriber::fmt()
@@ -668,6 +708,13 @@ fn main() -> Result<()> {
     #[cfg(platform_linux)]
     let _method_watcher = watch_method_file(method_file_tx);
 
+    // Watch the engine's `enabled` file so an OS input-source switch between
+    // buttre and English reflects in the tray (icon/menu). Linux-only.
+    #[cfg(platform_linux)]
+    let (enabled_file_tx, enabled_file_rx) = mpsc::channel::<()>();
+    #[cfg(platform_linux)]
+    let _enabled_watcher = watch_enabled_file(enabled_file_tx);
+
     // --- Event Loop ---
     let menu_channel = muda::MenuEvent::receiver();
 
@@ -913,6 +960,32 @@ fn main() -> Result<()> {
                         info!("method file changed externally — applying {disk}");
                         if let Err(e) = app_state.lock().unwrap().set_method(&disk) {
                             error!("Failed to apply external method change: {e:?}");
+                        }
+                    }
+                }
+
+                // The engine writes `enabled` on IBus Enable/Disable — an OS
+                // input-source switch between buttre and English. Mirror it in
+                // the tray: disabled ⇒ show English; re-enabled ⇒ restore the
+                // real Vietnamese method from Store B (`method`). Own-write
+                // suppression is inherent: only the ENGINE writes this file, and
+                // `set_method("english")` writes no method id to Store B, so
+                // neither path refires this watcher.
+                #[cfg(platform_linux)]
+                if enabled_file_rx.try_iter().count() > 0 {
+                    use buttre_platform::platforms::linux::method_sync;
+                    let enabled = method_sync::read_enabled();
+                    let known_method = app_state.lock().unwrap().settings().input_method.clone();
+                    let known_enabled = known_method != "english";
+                    if enabled != known_enabled {
+                        let target = if enabled {
+                            method_sync::read_method()
+                        } else {
+                            "english".to_string()
+                        };
+                        info!("engine enabled={enabled} — tray applying method {target}");
+                        if let Err(e) = app_state.lock().unwrap().set_method(&target) {
+                            error!("Failed to apply engine enable/disable: {e:?}");
                         }
                     }
                 }
