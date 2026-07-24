@@ -22,8 +22,8 @@ use tokio::sync::Notify;
 use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer, SignalContext};
 
 use super::ibus::ButtreEngine;
+use super::macro_sync;
 use super::method_sync::{self, MethodState};
-use super::{ibus_props, macro_sync};
 use buttre_core::state::macros::MacroStore;
 
 // ============================================================================
@@ -278,16 +278,7 @@ pub async fn run_engine() -> Result<()> {
             let target = focused.lock().unwrap().clone();
             let Some(path) = target else { continue };
             match SignalContext::new(&connection, &path) {
-                Ok(ctx) => {
-                    if let Err(e) = ButtreEngine::register_properties(
-                        &ctx,
-                        ibus_props::method_prop_list(&method),
-                    )
-                    .await
-                    {
-                        tracing::warn!("property-refresh: RegisterProperties failed: {e}");
-                    }
-                }
+                Ok(ctx) => ButtreEngine::publish_method_props(&ctx, &method).await,
                 Err(e) => tracing::warn!("property-refresh: bad signal context: {e}"),
             }
         }

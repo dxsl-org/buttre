@@ -160,6 +160,25 @@ impl ButtreEngine {
     pub fn preedit_text(&self) -> String {
         self.bridge.lock().unwrap().preedit().to_string()
     }
+
+    /// Push the current method's radio states to the panel: a full
+    /// `RegisterProperties` (refreshes the daemon's property cache and panels
+    /// that honor re-registration), then one `UpdateProperty` per radio — the
+    /// only signal GNOME Shell applies after an engine's first registration
+    /// (see [`Self::update_property`]). Best-effort: a failed emit only stales
+    /// the panel radio, never typing.
+    pub(crate) async fn publish_method_props(ctx: &SignalContext<'_>, method: &str) {
+        if let Err(e) =
+            Self::register_properties(ctx, ibus_props::method_prop_list(method)).await
+        {
+            tracing::warn!("publish_method_props: RegisterProperties failed: {e}");
+        }
+        for prop in ibus_props::method_prop_updates(method) {
+            if let Err(e) = Self::update_property(ctx, prop).await {
+                tracing::warn!("publish_method_props: UpdateProperty failed: {e}");
+            }
+        }
+    }
 }
 
 impl Default for ButtreEngine {
@@ -230,6 +249,18 @@ impl ButtreEngine {
     pub(crate) async fn register_properties(
         ctx: &SignalContext<'_>,
         props: zvariant::Value<'_>,
+    ) -> zbus::Result<()>;
+
+    /// Update ONE property in-place on the panel. `prop` is an `IBusProperty`
+    /// variant ([`ibus_props::method_prop_updates`]). This is the ONLY channel
+    /// GNOME Shell keeps open for radio-state changes after an engine's first
+    /// registration — its `register-properties` handler is one-shot — so every
+    /// method switch must be pushed through here or the top-bar radio never
+    /// repaints (the root cause of "tray switch not reflected in IBus menu").
+    #[dbus_interface(signal)]
+    pub(crate) async fn update_property(
+        ctx: &SignalContext<'_>,
+        prop: zvariant::Value<'_>,
     ) -> zbus::Result<()>;
 
     /// Replace the candidate popup the panel renders. `table` is an
@@ -373,11 +404,10 @@ impl ButtreEngine {
             .as_ref()
             .map(|s| s.method())
             .unwrap_or_else(|| "telex".to_string());
-        if let Err(e) =
-            Self::register_properties(&ctx, ibus_props::method_prop_list(&current)).await
-        {
-            tracing::warn!("RegisterProperties emit failed: {e}");
-        }
+        // Register (consumed by GNOME Shell's one-shot handler after an engine
+        // switch) AND per-radio updates (repaint when already registered) — a
+        // method switched while this engine was unfocused lands either way.
+        Self::publish_method_props(&ctx, &current).await;
     }
 
     /// IBus panel → engine: the user clicked a property (a method radio). Route
@@ -410,11 +440,7 @@ impl ButtreEngine {
         if let Err(e) = method_sync::write_method(method) {
             tracing::warn!("PropertyActivate: write_method({method}) failed: {e}");
         }
-        if let Err(e) =
-            Self::register_properties(&ctx, ibus_props::method_prop_list(method)).await
-        {
-            tracing::warn!("RegisterProperties re-emit failed: {e}");
-        }
+        Self::publish_method_props(&ctx, method).await;
     }
 
     /// Focus loss: the CLIENT commits the visible preedit itself (we send
@@ -649,11 +675,7 @@ impl ButtreEngine {
                 // for the next focus_in — a switch made from the tray or the
                 // config window would otherwise leave the IBus menu checked on
                 // the old method until the field is refocused.
-                if let Err(e) =
-                    Self::register_properties(ctx, ibus_props::method_prop_list(&method)).await
-                {
-                    tracing::warn!("sync_method: RegisterProperties re-emit failed: {e}");
-                }
+                Self::publish_method_props(ctx, &method).await;
                 tracing::info!("Engine switched to method {method}");
             }
             // Build failed (already logged): keep the current keyboard rather

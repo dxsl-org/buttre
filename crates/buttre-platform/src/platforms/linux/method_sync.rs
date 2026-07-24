@@ -13,6 +13,11 @@
 //! Enable/disable ("english") is deliberately NOT synced: IBus users toggle
 //! via the OS input-source switcher, which is the native pattern — the tray
 //! writes only real method ids (telex/vni/nom).
+//!
+//! The LAST hop (engine → GNOME top-bar radio repaint) has its own contract —
+//! `RegisterProperties` alone is ignored by GNOME Shell after the first
+//! registration; see `ibus_props.rs` module docs ("Panel repaint contract")
+//! before touching any property emission.
 
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};

@@ -4,6 +4,7 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- linux: radio trên menu IBus của GNOME Shell giờ THỰC SỰ nhảy theo khi đổi kiểu gõ — GNOME Shell chỉ nghe `RegisterProperties` đúng MỘT LẦN cho mỗi lần kích hoạt engine (`ibusManager.js` disconnect handler ngay sau danh sách đầu tiên), nên mọi re-register về sau đều bị bỏ qua; engine nay phát thêm `UpdateProperty` cho từng radio (kênh GNOME Shell giữ mở vĩnh viễn) ở cả ba đường: switch từ tray/config (task nền), theo keystroke (`sync_method`), và click trên chính panel (`PropertyActivate` — trước đây dấu chấm cũng không nhảy khi click panel). Xác minh trên GNOME Shell 50.1 bằng dbus-monitor: signal cũ đến đủ, checked-state đúng, nhưng Shell không vẽ lại
 - linux: đổi kiểu gõ trên tray/cửa sổ Cấu hình giờ chuyển dấu chấm radio trên menu IBus (GNOME) NGAY LẬP TỨC, không cần gõ phím hay refocus — engine chạy một task nền phát lại `RegisterProperties` trên engine đang focus khi file `method` đổi (trước đây chỉ re-emit trong `sync_method` theo từng keystroke nên radio bị trơ)
 - linux: tray phản ánh trạng thái bật/tắt của bộ gõ theo bộ chuyển input source của HĐH — engine ghi `~/.config/buttre/enabled` khi nhận `Enable`/`Disable`; tray watch file này để hiện English/disabled khi chuyển sang bàn phím English và khôi phục kiểu gõ tiếng Việt (từ Store B) khi bật lại. Enable/disable vẫn do bộ chuyển của HĐH sở hữu; tray chỉ soi gương
 

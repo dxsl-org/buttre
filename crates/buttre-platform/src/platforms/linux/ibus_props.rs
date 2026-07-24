@@ -17,6 +17,27 @@
 //! subscribes by signature and silently drops a mismatch, so the field ORDER
 //! and types below must match libibus's `ibus_property_serialize` /
 //! `ibus_prop_list_serialize` byte for byte.
+//!
+//! ## Panel repaint contract (GNOME Shell) — DO NOT BREAK THIS FLOW
+//!
+//! GNOME Shell consumes an engine's `RegisterProperties` exactly ONCE per
+//! global-engine activation: `ibusManager.js` (`_engineChanged`) installs a
+//! one-shot `register-properties` handler and DISCONNECTS it after the first
+//! non-empty list. Every wholesale re-register after that is delivered by the
+//! daemon but silently ignored by the Shell — the top-bar radio never
+//! repaints. Radio-state changes only reach the menu through per-property
+//! `UpdateProperty` signals (`keyboard.js::_ibusPropertyUpdated` matches
+//! key + prop type, then rebuilds the section). Verified on GNOME Shell 50.1
+//! (Ubuntu 26.04) with dbus-monitor: the old register-only approach arrived
+//! on the bus with correct checked-states and still never repainted.
+//!
+//! Therefore EVERY method switch must go through
+//! `ButtreEngine::publish_method_props` (full register for the daemon's
+//! cache + one [`method_prop_updates`] `UpdateProperty` per radio), from all
+//! three trigger paths: the external-change refresh task (`ibus_bus`), the
+//! per-keystroke `sync_method`, and `PropertyActivate`. Do not "simplify"
+//! any of them back to a bare `RegisterProperties` — it will look correct in
+//! a bus trace and still leave the GNOME menu stale.
 
 use super::ibus::build_ibus_text;
 use std::collections::HashMap;
@@ -90,17 +111,7 @@ fn prop_list(props: Vec<Value<'static>>) -> Value<'static> {
 /// `current` is a method id (`"telex"`/`"vni"`/`"nom"`); an unknown value simply
 /// leaves every radio unchecked rather than failing.
 pub(crate) fn method_prop_list(current: &str) -> Value<'static> {
-    let mut props: Vec<Value<'static>> = METHOD_ITEMS
-        .iter()
-        .map(|(key, label)| {
-            let state = if *key == current {
-                PROP_STATE_CHECKED
-            } else {
-                PROP_STATE_UNCHECKED
-            };
-            build_property(key, PROP_TYPE_RADIO, label, state)
-        })
-        .collect();
+    let mut props = method_prop_updates(current);
     // Divider, then the settings launcher. The launcher is a NORMAL item, not
     // part of the radio group, so its click is routed by key (not check-state).
     props.push(build_property("-", PROP_TYPE_SEPARATOR, "", PROP_STATE_UNCHECKED));
@@ -111,6 +122,32 @@ pub(crate) fn method_prop_list(current: &str) -> Value<'static> {
         PROP_STATE_UNCHECKED,
     ));
     prop_list(props)
+}
+
+/// One `UpdateProperty` payload per method radio, with `current` checked.
+///
+/// Why per-property updates exist alongside [`method_prop_list`]: GNOME Shell
+/// consumes an engine's `RegisterProperties` ONCE per global-engine change —
+/// `ibusManager.js` disconnects its `register-properties` handler after the
+/// first non-empty list — so a later wholesale re-register never repaints the
+/// top-bar radio. Per-property `UpdateProperty` signals are the channel the
+/// Shell keeps open permanently (`_ibusPropertyUpdated` matches key + type and
+/// repaints). Verified against GNOME Shell 50.1 sources on Ubuntu.
+///
+/// The whole radio group is emitted (checked AND unchecked) so the panel never
+/// shows two checked radios, whatever state it held before.
+pub(crate) fn method_prop_updates(current: &str) -> Vec<Value<'static>> {
+    METHOD_ITEMS
+        .iter()
+        .map(|(key, label)| {
+            let state = if *key == current {
+                PROP_STATE_CHECKED
+            } else {
+                PROP_STATE_UNCHECKED
+            };
+            build_property(key, PROP_TYPE_RADIO, label, state)
+        })
+        .collect()
 }
 
 /// Resolve a `PropertyActivate(name, state)` from the panel to the method the
@@ -197,6 +234,44 @@ mod tests {
             method_prop_list("telex").value_signature().to_string(),
             "(sa{sv}av)"
         );
+    }
+
+    /// `UpdateProperty` carries ONE `IBusProperty` — same 12-field shape as the
+    /// list elements. The daemon subscribes by signature and silently drops a
+    /// mismatch, so drift must fail loudly here. `(sa{sv}suvsvbbuvv)`.
+    #[test]
+    fn method_prop_updates_have_ibus_property_signature() {
+        let updates = method_prop_updates("vni");
+        assert_eq!(updates.len(), 3, "one update per method radio");
+        for prop in &updates {
+            assert_eq!(prop.value_signature().to_string(), "(sa{sv}suvsvbbuvv)");
+        }
+    }
+
+    /// Exactly the `current` radio is checked; the rest are explicitly
+    /// unchecked so the panel can never end up with two checked radios.
+    #[test]
+    fn method_prop_updates_check_only_current() {
+        for (current, expect_idx) in [("telex", 0usize), ("vni", 1), ("nom", 2)] {
+            let updates = method_prop_updates(current);
+            for (i, prop) in updates.iter().enumerate() {
+                let Value::Structure(s) = prop else {
+                    panic!("IBusProperty must be a structure")
+                };
+                let state = state_field(s);
+                let expected = if i == expect_idx { PROP_STATE_CHECKED } else { PROP_STATE_UNCHECKED };
+                assert_eq!(state, expected, "radio {i} state for current={current}");
+            }
+        }
+    }
+
+    /// Field 9 of the 12-field IBusProperty struct is `state` (see
+    /// `build_property`'s field order).
+    fn state_field(s: &zbus::zvariant::Structure<'_>) -> u32 {
+        match s.fields()[9] {
+            Value::U32(state) => state,
+            ref other => panic!("state field must be u32, got {other:?}"),
+        }
     }
 
     /// The lookup table has its own libibus signature that must not drift, or
