@@ -3,64 +3,35 @@
 //! This module contains helper functions for updating menu and tray icons
 //! to avoid code duplication in the main event loop.
 
-use crate::shared::ui::{load_icon_from_bytes, load_menu_icon, CHECK_ICON_BYTES};
+use crate::shared::ui::menu::{set_method_checked, MethodMenuItem};
+use crate::shared::ui::load_icon_from_bytes;
 use buttre_core::vietnamese::config_loader::MethodMetadata;
 use buttre_core::vietnamese::get_custom_dir;
-use muda::{IconMenuItem, Submenu};
+use muda::Submenu;
 use std::fs;
 use tray_icon::{Icon as TrayIcon, TrayIcon as TrayIconType};
 
-/// Update menu checkmarks for the given method
+/// Reflect the active method on every menu row — exactly one row ends up
+/// checked. Each row's state is SET (not just the active one), so a stale
+/// check can never survive a switch whatever state the menu host held.
 ///
-/// # Algorithm
-/// 1. Clear all existing checkmarks
-/// 2. Set checkmark on the active method
+/// NOTE: muda's `Submenu` has no check state, so the "Chữ Việt" parent stays
+/// unmarked (text-prefix hacks were explicitly rejected).
 pub fn update_menu_checkmarks(
     method: &str,
-    english_item: &IconMenuItem,
+    english_item: &MethodMenuItem,
     _chu_viet_menu: &Submenu,
-    telex_item: &IconMenuItem,
-    vni_item: &IconMenuItem,
-    nom_item: &IconMenuItem,
-    custom_items: &[(MethodMetadata, IconMenuItem)],
+    telex_item: &MethodMenuItem,
+    vni_item: &MethodMenuItem,
+    nom_item: &MethodMenuItem,
+    custom_items: &[(MethodMetadata, MethodMenuItem)],
 ) {
-    // Clear all checkmarks
-    english_item.set_icon(None);
-    telex_item.set_icon(None);
-    vni_item.set_icon(None);
-    nom_item.set_icon(None);
-    for (_, item) in custom_items {
-        item.set_icon(None);
-    }
-
-    // NOTE: Submenu provided by muda crate does not support set_icon.
-    // User requested not to use text prefix hack ("✓"), so we leave parent menu unchecked for now.
-
-    // Set checkmark on active method
-    if let Some(check_icon) = load_menu_icon(CHECK_ICON_BYTES) {
-        match method {
-            "english" => {
-                english_item.set_icon(Some(check_icon));
-            }
-            "telex" => {
-                telex_item.set_icon(Some(check_icon));
-            }
-            "vni" => {
-                vni_item.set_icon(Some(check_icon));
-            }
-            "nom" => {
-                nom_item.set_icon(Some(check_icon));
-            }
-            _ => {
-                // Search in custom methods
-                for (data, item) in custom_items {
-                    if data.id == method {
-                        item.set_icon(Some(check_icon.clone()));
-                        break;
-                    }
-                }
-            }
-        }
+    set_method_checked(english_item, method == "english");
+    set_method_checked(telex_item, method == "telex");
+    set_method_checked(vni_item, method == "vni");
+    set_method_checked(nom_item, method == "nom");
+    for (data, item) in custom_items {
+        set_method_checked(item, data.id == method);
     }
 }
 
@@ -84,7 +55,7 @@ pub fn update_tray_icon(
     english_icon: &TrayIcon,
     nom_icon: &TrayIcon,
     custom_icon: &TrayIcon,
-    custom_items: &[(MethodMetadata, IconMenuItem)],
+    custom_items: &[(MethodMetadata, MethodMenuItem)],
 ) {
     if !enabled {
         let _ = tray_icon.set_icon(Some(english_icon.clone()));
