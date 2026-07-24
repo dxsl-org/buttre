@@ -3,10 +3,12 @@
 //! window (`buttre-config`'s General tab) so both apply the exact same
 //! per-OS registration logic — a bug fixed once fixes it everywhere.
 //!
-//! Registration is re-applied on every tray launch while the setting is on
-//! (see `buttre-platform/src/main.rs`), so a moved/updated executable heals
-//! its own registration — the registry/desktop entry always points at the
-//! exe that last ran.
+//! Registration is reconciled on every tray launch in BOTH directions (see
+//! `buttre-platform/src/main.rs`): while the setting is on, a moved/updated
+//! executable heals its own registration — the registry/desktop entry always
+//! points at the exe that last ran; while it is off, a stale enabled entry
+//! (e.g. left behind by an older build) is re-masked so it cannot keep
+//! relaunching the tray at login.
 
 /// Register or unregister launching buttre at login for the CURRENT user.
 /// Never requires elevation on any platform.

@@ -520,13 +520,19 @@ fn main() -> Result<()> {
         ..
     } = menu_items;
 
-    // Re-apply autostart registration while the setting is on: the exe path
-    // may have changed since it was registered (update/move), and re-writing
-    // the same entry is idempotent. Failure is a warning, never fatal.
-    if settings.startup {
-        if let Err(e) = buttre_autostart::set_enabled(true) {
-            warn!("autostart re-registration failed: {e:?}");
-        }
+    // Reconcile autostart registration with the saved setting, both ways.
+    // ON: the exe path may have changed since registration (update/move).
+    // OFF: a stale enabled entry may still exist — e.g. written by an older
+    // build whose config window didn't unregister, or by a packaged
+    // /etc/xdg/autostart entry — and without re-masking here that entry
+    // relaunches the tray at every login forever, making the "Tự động khởi
+    // động" toggle look dead. Re-writing either state is idempotent.
+    // Failure is a warning, never fatal.
+    if let Err(e) = buttre_autostart::set_enabled(settings.startup) {
+        warn!(
+            "autostart reconciliation (set_enabled({})) failed: {e:?}",
+            settings.startup
+        );
     }
 
     // --- Tray Setup ---
