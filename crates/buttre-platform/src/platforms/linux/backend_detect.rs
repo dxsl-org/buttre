@@ -87,6 +87,21 @@ pub fn detect() -> Option<ImeBackend> {
     pick(probe())
 }
 
+/// True when the fcitx5-buttre addon is installed (its addon manifest is
+/// visible in a standard fcitx5 data dir). Distinguishes "fcitx5 running,
+/// buttre integrated" (fine) from "fcitx5 running, no addon" (conflict —
+/// buttre would be serving typing through a competing daemon).
+pub fn fcitx5_addon_installed() -> bool {
+    let mut dirs: Vec<std::path::PathBuf> = vec![
+        "/usr/share/fcitx5/addon".into(),
+        "/usr/local/share/fcitx5/addon".into(),
+    ];
+    if let Some(data) = dirs::data_dir() {
+        dirs.push(data.join("fcitx5/addon"));
+    }
+    dirs.iter().any(|d| d.join("buttre.conf").is_file())
+}
+
 /// True when an `unix:path=…` IBus address points at a socket that accepts
 /// a connection RIGHT NOW. Non-unix address forms (abstract sockets, TCP)
 /// are rare for IBus; treat them as alive rather than claim the daemon is

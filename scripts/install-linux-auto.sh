@@ -37,11 +37,22 @@ fi
 echo "🔎 probes: fcitx5=$FCITX5 ibus=$IBUS wayland=$WAYLAND"
 
 if [ "$FCITX5" = yes ]; then
+    if [ -f /usr/share/fcitx5/addon/buttre.conf ] ||
+        [ -f /usr/local/share/fcitx5/addon/buttre.conf ]; then
+        echo "✅ fcitx5 đang chạy và addon fcitx5-buttre đã cài."
+        echo "   Thêm \"Buttre\" trong fcitx5-configtool nếu chưa có, xong."
+        exit 0
+    fi
     cat <<'EOF'
-⚠️  fcitx5 đang chạy. buttre CHƯA có addon fcitx5 (đang trong kế hoạch —
-    xem plan-fcitx-backend-auto-priority.md). Hai lựa chọn:
-      1. Tắt fcitx5 rồi chạy lại script này (sẽ dùng ibus hoặc wayland), hoặc
-      2. Giữ fcitx5 và KHÔNG cài buttre song song (tránh tranh nguồn gõ).
+⚠️  fcitx5 đang chạy nhưng addon fcitx5-buttre CHƯA cài. Ba lựa chọn:
+      1. Build + cài addon (khuyến nghị — cần cmake, ECM, libfcitx5core-dev):
+           cargo build --release -p buttre-ffi
+           cmake -S addons/fcitx5-buttre -B build-fcitx5 \
+                 -DCMAKE_INSTALL_PREFIX=/usr \
+                 -DBUTTRE_FFI_LIB=$PWD/target/release/libbuttre_ffi.so
+           cmake --build build-fcitx5 && sudo cmake --install build-fcitx5
+      2. Tắt fcitx5 rồi chạy lại script này (sẽ dùng ibus hoặc wayland), hoặc
+      3. Giữ fcitx5 và KHÔNG cài buttre song song (tránh tranh nguồn gõ).
 EOF
     exit 1
 fi

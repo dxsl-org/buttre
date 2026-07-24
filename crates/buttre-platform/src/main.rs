@@ -253,10 +253,16 @@ fn run_doctor() {
         probes.fcitx5, probes.ibus, probes.wayland
     );
     match backend_detect::pick(probes) {
-        Some(backend_detect::ImeBackend::Fcitx5) => println!(
-            "backend:  fcitx5 (đang chạy) — LƯU Ý: addon fcitx5 của buttre chưa có;\n\
-             \x20         gõ tiếng Việt hiện đi qua ibus/wayland, có thể tranh nguồn gõ với fcitx5"
-        ),
+        Some(backend_detect::ImeBackend::Fcitx5) => {
+            if backend_detect::fcitx5_addon_installed() {
+                println!("backend:  fcitx5 (addon fcitx5-buttre đã cài — chọn \"Buttre\" trong fcitx5)");
+            } else {
+                println!(
+                    "backend:  fcitx5 (đang chạy) — LƯU Ý: addon fcitx5-buttre CHƯA cài;\n\
+                     \x20         gõ tiếng Việt hiện đi qua ibus/wayland, có thể tranh nguồn gõ với fcitx5"
+                );
+            }
+        }
         Some(backend_detect::ImeBackend::IBus) => println!("backend:  ibus (engine: buttre --ibus)"),
         Some(backend_detect::ImeBackend::WaylandIme) => {
             println!("backend:  wayland (compositor-managed: buttre --ime)");
@@ -673,10 +679,10 @@ fn main() -> Result<()> {
         use buttre_platform::platforms::linux::backend_detect;
         let probes = backend_detect::probe();
         info!("IME backend probes: {probes:?} -> {:?}", backend_detect::pick(probes));
-        if probes.fcitx5 {
+        if probes.fcitx5 && !backend_detect::fcitx5_addon_installed() {
             warn!(
-                "fcitx5 đang chạy nhưng buttre chưa có addon fcitx5 — nguồn gõ có thể \
-                 xung đột; chạy `buttre --doctor` để xem chi tiết"
+                "fcitx5 đang chạy nhưng addon fcitx5-buttre chưa được cài — nguồn gõ \
+                 có thể xung đột; chạy `buttre --doctor` để xem chi tiết"
             );
         }
     }
