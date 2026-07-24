@@ -235,6 +235,54 @@ fn init_tracing(args: &[String]) {
     builder.init();
 }
 
+/// `buttre --doctor`: one-screen diagnosis of which IME path this machine
+/// should use (priority fcitx5 → IBus → Wayland `--ime`) and where the
+/// tri-surface sync state lives. Read-only; safe to run anytime.
+#[cfg(platform_linux)]
+fn run_doctor() {
+    use buttre_platform::platforms::linux::{backend_detect, kwin_ime, method_sync};
+    let probes = backend_detect::probe();
+    println!("buttre {} — doctor\n", env!("CARGO_PKG_VERSION"));
+    println!(
+        "session:  XDG_SESSION_TYPE={} XDG_CURRENT_DESKTOP={}",
+        std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "?".into()),
+        std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "?".into()),
+    );
+    println!(
+        "probes:   fcitx5={} ibus={} wayland={}",
+        probes.fcitx5, probes.ibus, probes.wayland
+    );
+    match backend_detect::pick(probes) {
+        Some(backend_detect::ImeBackend::Fcitx5) => println!(
+            "backend:  fcitx5 (đang chạy) — LƯU Ý: addon fcitx5 của buttre chưa có;\n\
+             \x20         gõ tiếng Việt hiện đi qua ibus/wayland, có thể tranh nguồn gõ với fcitx5"
+        ),
+        Some(backend_detect::ImeBackend::IBus) => println!("backend:  ibus (engine: buttre --ibus)"),
+        Some(backend_detect::ImeBackend::WaylandIme) => {
+            println!("backend:  wayland (compositor-managed: buttre --ime)");
+        }
+        None => println!("backend:  không phát hiện được đường IME nào (X11 không daemon?)"),
+    }
+    println!(
+        "kwinrc:   [Wayland] InputMethod = {}",
+        kwin_ime::kwinrc_input_method().unwrap_or_else(|| "(không đặt)".into())
+    );
+    println!(
+        "state:    method={:?} enabled={} (files trong ~/.config/buttre/)",
+        method_sync::read_method(),
+        method_sync::read_enabled(),
+    );
+    match Settings::get_path() {
+        Ok(p) => println!("settings: {}", p.display()),
+        Err(e) => println!("settings: không resolve được đường dẫn: {e}"),
+    }
+}
+
+#[cfg(not(platform_linux))]
+fn run_doctor() {
+    println!("buttre --doctor hiện chỉ hỗ trợ Linux.");
+}
+
 fn main() -> Result<()> {
     // Informational flags are handled before ANY backend or UI setup: they
     // need no display, and letting them fall through to the tray path below
@@ -256,10 +304,15 @@ fn main() -> Result<()> {
              --ibus      Run as the IBus engine (spawned by ibus-daemon, not by hand)\n  \
              --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
              --config    Open the settings window\n  \
+             --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \
              --version   Print version and exit\n  \
              --help      Print this help and exit",
             ver = env!("CARGO_PKG_VERSION")
         );
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--doctor") {
+        run_doctor();
         return Ok(());
     }
 
@@ -611,6 +664,22 @@ fn main() -> Result<()> {
     // on Plasma Wayland. No-op everywhere else.
     #[cfg(platform_linux)]
     buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(true);
+
+    // Log which IME path this machine should be on (fcitx5 → ibus →
+    // wayland) and flag the one conflict we can detect: fcitx5 running
+    // while buttre serves typing through another daemon.
+    #[cfg(platform_linux)]
+    {
+        use buttre_platform::platforms::linux::backend_detect;
+        let probes = backend_detect::probe();
+        info!("IME backend probes: {probes:?} -> {:?}", backend_detect::pick(probes));
+        if probes.fcitx5 {
+            warn!(
+                "fcitx5 đang chạy nhưng buttre chưa có addon fcitx5 — nguồn gõ có thể \
+                 xung đột; chạy `buttre --doctor` để xem chi tiết"
+            );
+        }
+    }
 
     let (settings_file_tx, settings_file_rx) = mpsc::channel::<()>();
     watch_settings_file(settings_file_tx);

@@ -21,11 +21,11 @@ fn kwinrc_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("kwinrc"))
 }
 
-/// True when kwinrc's `[Wayland] InputMethod=` names buttre. Manual INI
-/// scan — kwinrc is KDE's own config, only ever read here, and pulling an
-/// INI crate for one key is not worth it. The section check matters:
+/// Extract the `[Wayland] InputMethod=` value from kwinrc content. Manual
+/// INI scan — kwinrc is KDE's own config, only ever read here, and pulling
+/// an INI crate for one key is not worth it. The section check matters:
 /// `InputMethod` could legitimately appear under other groups.
-fn kwinrc_points_at_buttre(content: &str) -> bool {
+fn kwinrc_value(content: &str) -> Option<String> {
     let mut in_wayland = false;
     for line in content.lines() {
         let line = line.trim();
@@ -37,12 +37,26 @@ fn kwinrc_points_at_buttre(content: &str) -> bool {
             if let Some(value) = line.strip_prefix("InputMethod") {
                 // Tolerate KDE's locale/flag markers: `InputMethod[$e]=...`.
                 if let Some(eq) = value.find('=') {
-                    return value[eq + 1..].contains("buttre");
+                    return Some(value[eq + 1..].trim().to_string());
                 }
             }
         }
     }
-    false
+    None
+}
+
+/// The configured `[Wayland] InputMethod=` value, if any — what
+/// `buttre --doctor` reports.
+pub fn kwinrc_input_method() -> Option<String> {
+    kwinrc_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .as_deref()
+        .and_then(kwinrc_value)
+}
+
+/// True when kwinrc's `[Wayland] InputMethod=` names buttre.
+fn kwinrc_points_at_buttre(content: &str) -> bool {
+    kwinrc_value(content).is_some_and(|v| v.contains("buttre"))
 }
 
 /// True when this session can and should drive KWin's IME switch: a

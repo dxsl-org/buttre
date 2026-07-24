@@ -4,6 +4,7 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod backend_detect;
 pub mod ibus;
 pub mod ibus_bus;
 pub mod kwin_ime;
