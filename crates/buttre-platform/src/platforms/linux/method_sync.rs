@@ -232,9 +232,10 @@ impl MethodState {
 }
 
 /// Watch the config dir and refresh `state` when the method file changes.
-/// Runs in a plain thread (notify's callbacks are sync); lives for the
-/// process lifetime — the daemon owns the engine process, so there is no
-/// teardown path to plumb.
+/// Built on [`crate::fs_watch`], so the watch survives the config dir being
+/// deleted and re-created (a plain inode watch would die silently there);
+/// lives for the process lifetime — the daemon owns the engine process, so
+/// there is no teardown path to plumb.
 pub fn spawn_watcher(state: Arc<MethodState>) {
     let Some(path) = method_file_path() else {
         tracing::warn!("method_sync: no config dir, watcher not started");
@@ -243,43 +244,12 @@ pub fn spawn_watcher(state: Arc<MethodState>) {
     let Some(dir) = path.parent().map(Path::to_path_buf) else {
         return;
     };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("method_sync: cannot create {dir:?}: {e}, watcher not started");
-        return;
-    }
-
-    std::thread::Builder::new()
-        .name("buttre-method-watch".into())
-        .spawn(move || {
-            use notify::{RecursiveMode, Watcher};
-            let state_cb = state.clone();
-            let file = path.clone();
-            let mut watcher =
-                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    // Any event in the dir is a cue to re-read; the atomic
-                    // rename in write_method guarantees a consistent read.
-                    if res.is_ok() {
-                        state_cb.set(read_method_from(&file));
-                    }
-                }) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!("method_sync: watcher init failed: {e}");
-                        return;
-                    }
-                };
-            if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-                tracing::warn!("method_sync: watch {dir:?} failed: {e}");
-                return;
-            }
-            tracing::info!("method_sync: watching {dir:?}");
-            // Park forever — the watcher lives as long as the thread does.
-            loop {
-                std::thread::park();
-            }
-        })
-        .map(|_| ())
-        .unwrap_or_else(|e| tracing::warn!("method_sync: watcher thread spawn failed: {e}"));
+    // Any cue is a re-read cue: the atomic rename in write_method guarantees
+    // a consistent read, `set` dedups no-op changes, and a `Rearmed` cue
+    // must re-read anyway (the file may have changed while unwatched).
+    crate::fs_watch::spawn_dir_watch("method_sync", dir, move |_cue| {
+        state.set(read_method_from(&path));
+    });
 }
 
 #[cfg(test)]

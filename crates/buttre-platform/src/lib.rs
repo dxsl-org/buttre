@@ -82,6 +82,7 @@ pub trait PlatformBackend {
 // ============================================================================
 
 /// Platform-specific backend implementations
+pub mod fs_watch;
 pub mod platforms;
 
 /// Shared cross-platform code

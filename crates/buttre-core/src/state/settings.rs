@@ -114,10 +114,11 @@ impl Default for Settings {
 impl Settings {
     /// Get the settings file path
     ///
-    /// Platform-specific paths:
+    /// Resolved under `dirs::data_dir()` — NOT the config dir. This is a
+    /// separate store from `~/.config/buttre/` (the tray↔engine sync files):
     /// - Windows: %APPDATA%\buttre\settings.toml
     /// - macOS: ~/Library/Application Support/buttre/settings.toml
-    /// - Linux: ~/.config/buttre/settings.toml
+    /// - Linux: ~/.local/share/buttre/settings.toml
     pub fn get_path() -> Result<PathBuf> {
         let data_dir =
             dirs::data_dir().ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;

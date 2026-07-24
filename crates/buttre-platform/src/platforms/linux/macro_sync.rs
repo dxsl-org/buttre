@@ -102,10 +102,11 @@ fn push_parent(dirs: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 /// Watch `macros.toml`'s and `settings.toml`'s directories, reloading
-/// `store` in place whenever either changes. Runs in a plain thread
-/// (notify's callbacks are sync); lives for the process lifetime — the
-/// daemon/compositor owns the engine process, so there is no teardown path
-/// to plumb (mirrors `method_sync::spawn_watcher`).
+/// `store` in place whenever either changes. Built on [`crate::fs_watch`]
+/// (one re-arming watch per deduplicated directory), so the watch survives
+/// the data dir being deleted and re-created; lives for the process lifetime
+/// — the daemon/compositor owns the engine process, so there is no teardown
+/// path to plumb (mirrors `method_sync::spawn_watcher`).
 pub fn spawn_watcher(
     store: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
@@ -117,51 +118,31 @@ pub fn spawn_watcher(
         return;
     }
 
-    std::thread::Builder::new()
-        .name("buttre-macro-watch".into())
-        .spawn(move || {
-            use notify::{RecursiveMode, Watcher};
-            let store_cb = store.clone();
-            let strict_cb = strict.clone();
-            let use_preedit_cb = use_preedit.clone();
-            let mut watcher =
-                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    // The watched dirs also hold unrelated state (method
-                    // file, learning.toml), so filter to the two files that
-                    // feed the store — an unfiltered reload would re-read
-                    // both files on every neighbor write.
-                    let Ok(event) = res else {
-                        return;
-                    };
-                    let relevant = event.paths.iter().any(|p| {
-                        matches!(
-                            p.file_name().and_then(|n| n.to_str()),
-                            Some("macros.toml") | Some("settings.toml")
-                        )
-                    });
-                    if relevant {
-                        reload(&store_cb, &strict_cb, &use_preedit_cb);
-                    }
-                }) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!("macro_sync: watcher init failed: {e}");
-                        return;
-                    }
-                };
-            for dir in &dirs {
-                if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
-                    tracing::warn!("macro_sync: watch {dir:?} failed: {e}");
-                }
+    for dir in dirs {
+        let store = store.clone();
+        let strict = strict.clone();
+        let use_preedit = use_preedit.clone();
+        crate::fs_watch::spawn_dir_watch("macro_sync", dir, move |cue| {
+            // The watched dirs also hold unrelated state (method file,
+            // learning.toml), so filter to the two files that feed the
+            // store — an unfiltered reload would re-read both files on
+            // every neighbor write. A re-armed watch reloads
+            // unconditionally: either file may have changed while the
+            // directory was unwatched.
+            let relevant = match cue {
+                crate::fs_watch::WatchCue::Rearmed => true,
+                crate::fs_watch::WatchCue::Event(event) => event.paths.iter().any(|p| {
+                    matches!(
+                        p.file_name().and_then(|n| n.to_str()),
+                        Some("macros.toml") | Some("settings.toml")
+                    )
+                }),
+            };
+            if relevant {
+                reload(&store, &strict, &use_preedit);
             }
-            tracing::info!("macro_sync: watching {dirs:?}");
-            // Park forever — the watcher lives as long as the thread does.
-            loop {
-                std::thread::park();
-            }
-        })
-        .map(|_| ())
-        .unwrap_or_else(|e| tracing::warn!("macro_sync: watcher thread spawn failed: {e}"));
+        });
+    }
 }
 
 #[cfg(test)]

@@ -112,241 +112,137 @@ fn drain_latest_learning_save(rx: &mpsc::Receiver<LearningFile>) -> Option<Learn
     latest
 }
 
-/// Watch learning.toml's directory for on-disk changes to the file (tray →
-/// "Từ đã học" → user edits and saves). Returns the watcher handle — dropping
-/// it stops the watch, so the caller must keep it alive for the app's
-/// lifetime. `None` (with a log) when the path can't be resolved or the
-/// watch can't be established: hand-edits then simply require a restart,
-/// never an error.
-fn watch_learning_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
-    use notify::{RecursiveMode, Watcher};
-    let path = match LearningStore::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("learning.toml path unresolved, hand-edit reload disabled: {e:?}");
-            return None;
-        }
+/// Bridge a re-arming directory watch (`fs_watch`) to a `()` channel,
+/// filtered to one file name. The DIRECTORY is watched, not the file:
+/// `write_atomic`'s rename replaces the file node, which breaks per-file
+/// watches on some backends — and `fs_watch` additionally survives the
+/// directory itself being deleted and re-created (`Rearmed` counts as a
+/// change: the file may have been rewritten while unwatched). Fire-and-
+/// forget: the watch lives for the process lifetime; on failure it logs
+/// and the feature degrades to requiring a restart, never an error.
+fn watch_single_file(label: &'static str, path: std::path::PathBuf, tx: mpsc::Sender<()>) {
+    use buttre_platform::fs_watch::{spawn_dir_watch, WatchCue};
+    let Some(dir) = path.parent().map(std::path::Path::to_path_buf) else {
+        warn!("{label}: {path:?} has no parent directory, watch disabled");
+        return;
     };
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
-        return None;
-    }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("learning.toml watcher failed, hand-edit reload disabled: {e:?}");
-                return None;
-            }
+    let Some(file_name) = path.file_name().map(std::ffi::OsStr::to_os_string) else {
+        warn!("{label}: {path:?} has no file name, watch disabled");
+        return;
+    };
+    spawn_dir_watch(label, dir, move |cue| {
+        let changed = match cue {
+            WatchCue::Rearmed => true,
+            WatchCue::Event(event) => event
+                .paths
+                .iter()
+                .any(|p| p.file_name() == Some(file_name.as_os_str())),
         };
-    // Watch the DIRECTORY, not the file: `write_atomic`'s rename replaces
-    // the file node, which breaks per-file watches on some backends.
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("learning.toml watch failed, hand-edit reload disabled: {e:?}");
-        return None;
-    }
-    Some(watcher)
+        if changed {
+            let _ = tx.send(());
+        }
+    });
 }
 
-/// Watch macros.toml's directory for on-disk changes (config window / hand
-/// edit) — mirrors `watch_learning_file` exactly, same directory, different
-/// filename. Simpler than the learning watcher: nothing at the TYPING layer
-/// ever writes `macros.toml` (see `buttre_core::state::macros`'s module
-/// doc), so there is no own-write suppression concern for THAT writer.
-/// The config window's "Mở tệp gốc" (`buttre_config::open_in_editor`,
-/// seed-if-missing) is the sole
-/// exception — it fires this same watcher, but reloading an unchanged
-/// (still-empty) file is an idempotent no-op, so no suppression is needed
-/// there either.
-fn watch_macros_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
-    use notify::{RecursiveMode, Watcher};
-    let path = match MacroStore::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("macros.toml path unresolved, hand-edit reload disabled: {e:?}");
-            return None;
-        }
-    };
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
-        return None;
+/// Watch learning.toml for on-disk changes (tray → "Từ đã học" → user edits
+/// and saves): hand-edits apply live instead of requiring a restart.
+fn watch_learning_file(tx: mpsc::Sender<()>) {
+    match LearningStore::get_path() {
+        Ok(path) => watch_single_file("learning-watch", path, tx),
+        Err(e) => warn!("learning.toml path unresolved, hand-edit reload disabled: {e:?}"),
     }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("macros.toml watcher failed, hand-edit reload disabled: {e:?}");
-                return None;
-            }
-        };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("macros.toml watch failed, hand-edit reload disabled: {e:?}");
-        return None;
-    }
-    Some(watcher)
 }
 
-/// Watch settings.toml's directory for on-disk changes (the config window's
-/// "Lưu", or a hand-edit) — same shape as `watch_learning_file`/
-/// `watch_macros_file`. See the call site's comment for how the reader
-/// tells its own writes apart from a genuine external change.
-fn watch_settings_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
-    use notify::{RecursiveMode, Watcher};
-    let path = match Settings::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("settings.toml path unresolved, hand-edit reload disabled: {e:?}");
-            return None;
-        }
-    };
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
-        return None;
+/// Watch macros.toml for on-disk changes (config window / hand edit).
+/// Nothing at the TYPING layer ever writes `macros.toml` (see
+/// `buttre_core::state::macros`'s module doc), so there is no own-write
+/// suppression concern for THAT writer. The config window's "Mở tệp gốc"
+/// (`buttre_config::open_in_editor`, seed-if-missing) is the sole exception
+/// — it fires this same watcher, but reloading an unchanged (still-empty)
+/// file is an idempotent no-op, so no suppression is needed there either.
+fn watch_macros_file(tx: mpsc::Sender<()>) {
+    match MacroStore::get_path() {
+        Ok(path) => watch_single_file("macros-watch", path, tx),
+        Err(e) => warn!("macros.toml path unresolved, hand-edit reload disabled: {e:?}"),
     }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("settings.toml watcher failed, hand-edit reload disabled: {e:?}");
-                return None;
-            }
-        };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("settings.toml watch failed, hand-edit reload disabled: {e:?}");
-        return None;
+}
+
+/// Watch settings.toml for on-disk changes (the config window's "Lưu", or a
+/// hand-edit). See the call site's comment for how the reader tells its own
+/// writes apart from a genuine external change.
+fn watch_settings_file(tx: mpsc::Sender<()>) {
+    match Settings::get_path() {
+        Ok(path) => watch_single_file("settings-watch", path, tx),
+        Err(e) => warn!("settings.toml path unresolved, hand-edit reload disabled: {e:?}"),
     }
-    Some(watcher)
 }
 
 /// Watch the shared method file (`~/.config/buttre/method`) so a switch made
 /// from the IBus panel — which the engine persists there and the tray does not
-/// otherwise observe — reflects in the tray menu and icon. Same shape as
-/// `watch_settings_file`; the call site diffs the file against `AppState` to
-/// tell the tray's own writes from a genuine external change.
+/// otherwise observe — reflects in the tray menu and icon. The call site diffs
+/// the file against `AppState` to tell the tray's own writes from a genuine
+/// external change.
 #[cfg(platform_linux)]
-fn watch_method_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+fn watch_method_file(tx: mpsc::Sender<()>) {
     use buttre_platform::platforms::linux::method_sync;
-    use notify::{RecursiveMode, Watcher};
-    let path = method_sync::method_file_path()?;
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, IBus-panel method sync disabled: {e:?}");
-        return None;
+    match method_sync::method_file_path() {
+        Some(path) => watch_single_file("method-watch", path, tx),
+        None => warn!("no XDG config directory, IBus-panel method sync disabled"),
     }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("method-file watcher failed, IBus-panel method sync disabled: {e:?}");
-                return None;
-            }
-        };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("method-file watch failed, IBus-panel method sync disabled: {e:?}");
-        return None;
-    }
-    Some(watcher)
 }
 
 /// Watch the `enabled` file the IBus engine writes on `Enable`/`Disable`
 /// (`~/.config/buttre/enabled`) so the tray mirrors an OS input-source switch
 /// between buttre and English. Same shape as [`watch_method_file`] — a separate
-/// inotify watch on the same config dir, filtered to the `enabled` filename.
+/// watch on the same config dir, filtered to the `enabled` filename.
 #[cfg(platform_linux)]
-fn watch_enabled_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+fn watch_enabled_file(tx: mpsc::Sender<()>) {
     use buttre_platform::platforms::linux::method_sync;
-    use notify::{RecursiveMode, Watcher};
-    let path = method_sync::enabled_file_path()?;
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, IBus enable/disable sync disabled: {e:?}");
-        return None;
+    match method_sync::enabled_file_path() {
+        Some(path) => watch_single_file("enabled-watch", path, tx),
+        None => warn!("no XDG config directory, IBus enable/disable sync disabled"),
     }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("enabled-file watcher failed, IBus enable/disable sync disabled: {e:?}");
-                return None;
-            }
-        };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("enabled-file watch failed, IBus enable/disable sync disabled: {e:?}");
-        return None;
+}
+
+/// Open the engine's log file (truncated per session so it can't grow
+/// unbounded). ibus-daemon spawns `buttre --ibus` with stdout/stderr on
+/// /dev/null, so without a file sink every engine log line is lost — which
+/// is exactly how a dead file watcher went unnoticed (method-sync debug).
+fn engine_log_file() -> Option<std::fs::File> {
+    let dir = dirs::cache_dir()?.join("buttre");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::File::create(dir.join("engine.log")).ok()
+}
+
+/// Initialize tracing (handles both log crate and tracing crate). Defaults
+/// to INFO when `RUST_LOG` is unset — the previous default (ERROR-only)
+/// made watcher/sync diagnostics invisible in normal runs. The `--ibus`
+/// engine logs to `~/.cache/buttre/engine.log` (its stderr is /dev/null,
+/// see [`engine_log_file`]); everything else keeps stderr.
+fn init_tracing(args: &[String]) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if args.iter().any(|a| a == "--ibus") {
+        if let Some(file) = engine_log_file() {
+            builder
+                .with_writer(Mutex::new(file))
+                .with_ansi(false)
+                .init();
+            return;
+        }
     }
-    Some(watcher)
+    builder.init();
 }
 
 fn main() -> Result<()> {
-    // Initialize tracing (handles both log crate and tracing crate)
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     // Informational flags are handled before ANY backend or UI setup: they
     // need no display, and letting them fall through to the tray path below
     // panics on Linux (the tray builds a GTK menu). Unknown flags still start
     // the tray, matching prior behaviour; `--ibus`/`--ime`/`--config` are
     // matched further down.
     let args: Vec<String> = std::env::args().collect();
+    init_tracing(&args);
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("buttre {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -574,7 +470,7 @@ fn main() -> Result<()> {
     // `learning_reload_pending` carries a suppressed-but-real external edit
     // over to a later iteration instead of dropping it.
     let (learning_file_tx, learning_file_rx) = mpsc::channel::<()>();
-    let _learning_watcher = watch_learning_file(learning_file_tx);
+    watch_learning_file(learning_file_tx);
     let mut last_own_save = std::time::Instant::now();
     let mut learning_reload_pending = false;
 
@@ -593,7 +489,7 @@ fn main() -> Result<()> {
         keyboard_manager.set_macros(macros_store.clone());
     }
     let (macros_file_tx, macros_file_rx) = mpsc::channel::<()>();
-    let _macros_watcher = watch_macros_file(macros_file_tx);
+    watch_macros_file(macros_file_tx);
 
     // Strict-spelling control ("Kiểm soát gắt gao chính tả tiếng Việt") —
     // remembered by the manager and re-applied on every method switch, so
@@ -710,21 +606,21 @@ fn main() -> Result<()> {
     // This avoids the "external edit racing our own autosave gets silently
     // dropped" gap a fixed suppression window would have.
     let (settings_file_tx, settings_file_rx) = mpsc::channel::<()>();
-    let _settings_watcher = watch_settings_file(settings_file_tx);
+    watch_settings_file(settings_file_tx);
 
     // Watch the IBus-shared method file so a panel-side switch (persisted there
     // by the engine, never in settings.toml) reflects in the tray. Linux-only.
     #[cfg(platform_linux)]
     let (method_file_tx, method_file_rx) = mpsc::channel::<()>();
     #[cfg(platform_linux)]
-    let _method_watcher = watch_method_file(method_file_tx);
+    watch_method_file(method_file_tx);
 
     // Watch the engine's `enabled` file so an OS input-source switch between
     // buttre and English reflects in the tray (icon/menu). Linux-only.
     #[cfg(platform_linux)]
     let (enabled_file_tx, enabled_file_rx) = mpsc::channel::<()>();
     #[cfg(platform_linux)]
-    let _enabled_watcher = watch_enabled_file(enabled_file_tx);
+    watch_enabled_file(enabled_file_tx);
 
     // Method stashed by the enabled-file mirror when IT flips the tray to
     // English on an OS input-source switch away from buttre. "english" is a
