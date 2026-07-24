@@ -31,11 +31,53 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// Method ids the engine knows how to build ("english" = passthrough, no
-/// keyboard — see module docs). Anything else falls back to telex on read and
-/// is skipped on write (a custom-TOML method silently degrading to telex
-/// would be more surprising than the tray switch not applying to IBus).
+/// Built-in method ids ("english" = passthrough, no keyboard — see module
+/// docs). NOT the full vocabulary of the sync channel: custom ids whose
+/// `{id}.toml` exists in the custom keyboards dir are also admitted (see
+/// [`is_engine_method`]). Anything else falls back to telex on read and is
+/// skipped on write (a bogus id silently degrading to telex would be more
+/// surprising than the switch not applying to IBus).
 pub const KNOWN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
+
+/// True when `id` names a method the engine can build: a built-in, or a
+/// custom keyboard whose TOML exists in `get_custom_dir()` right now.
+///
+/// Mirrors the engine's own load rule (`EngineBridge::build_keyboard` on
+/// Linux, `KeyboardManager::set_method` on Windows/macOS — both try
+/// `keyboards/{id}.toml` for any non-builtin id), so an id admitted here is
+/// exactly one the engine will resolve — a deleted-while-active custom TOML
+/// degrades to telex on the next read instead of leaving a dangling id.
+fn is_engine_method(id: &str) -> bool {
+    is_engine_method_in(id, &buttre_core::vietnamese::get_custom_dir())
+}
+
+/// [`is_engine_method`] against an explicit custom dir — the testable core
+/// (`get_custom_dir()` is ambient: exe dir / cwd / XDG data dir).
+///
+/// `pub(crate)` so the IBus panel (`ibus_props::method_for_activation`)
+/// validates `PropertyActivate` names with the same rule the sync channel
+/// enforces.
+pub(crate) fn is_engine_method_in(id: &str, custom_dir: &Path) -> bool {
+    KNOWN_METHODS.contains(&id) || is_valid_custom_id_in(id, custom_dir)
+}
+
+/// True when `{id}.toml` exists in `custom_dir` AND `id` is a safe filename
+/// stem. The method file and `PropertyActivate` names are attacker-writable
+/// inputs interpolated into a path, so ids containing a path separator or
+/// `..` are rejected BEFORE the join — never probe outside the keyboards dir.
+///
+/// Lowercase-only: `read_method_from` lowercases whatever it reads, so an id
+/// with an uppercase letter could be written but never read back on a
+/// case-sensitive filesystem. Rejecting it here keeps every surface
+/// consistent (not offered, not written, telex on read) instead of leaving a
+/// menu entry that half-works — custom keyboard FILENAMES must be lowercase.
+fn is_valid_custom_id_in(id: &str, custom_dir: &Path) -> bool {
+    !id.is_empty()
+        && !id.contains(['/', '\\'])
+        && !id.contains("..")
+        && id == id.to_lowercase()
+        && custom_dir.join(format!("{id}.toml")).is_file()
+}
 
 /// `~/.config/buttre/method`
 pub fn method_file_path() -> Option<PathBuf> {
@@ -43,9 +85,10 @@ pub fn method_file_path() -> Option<PathBuf> {
 }
 
 /// Atomically write the method id (temp file + rename in the same dir).
-/// Unknown ids are skipped — see [`KNOWN_METHODS`].
+/// Ids that are neither built-in nor a present custom TOML are skipped —
+/// see [`is_engine_method`].
 pub fn write_method(method: &str) -> Result<()> {
-    if !KNOWN_METHODS.contains(&method) {
+    if !is_engine_method(method) {
         tracing::debug!("method_sync: skipping non-engine method {method:?}");
         return Ok(());
     }
@@ -64,12 +107,18 @@ fn write_method_to(path: &Path, method: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read the method id from a file, normalizing to a known id (fallback:
-/// telex — matching the engine's historical default).
+/// Read the method id from a file, normalizing to an admitted id (fallback:
+/// telex — matching the engine's historical default). Custom ids are matched
+/// lowercase, so custom TOML filenames must be lowercase to round-trip.
 fn read_method_from(path: &Path) -> String {
+    read_method_from_in(path, &buttre_core::vietnamese::get_custom_dir())
+}
+
+/// [`read_method_from`] against an explicit custom dir (testable core).
+fn read_method_from_in(path: &Path, custom_dir: &Path) -> String {
     if let Ok(content) = std::fs::read_to_string(path) {
         let method = content.trim().to_lowercase();
-        if KNOWN_METHODS.contains(&method.as_str()) {
+        if is_engine_method_in(&method, custom_dir) {
             return method;
         }
         if !method.is_empty() {
@@ -265,6 +314,64 @@ mod tests {
         let path = tmp_method_path("normalize");
         std::fs::write(&path, "  VNI \n").unwrap();
         assert_eq!(read_method_from(&path), "vni");
+    }
+
+    /// A throwaway custom-keyboards dir holding `{ids}.toml` stubs — the
+    /// guard only stats the file, so empty stubs suffice.
+    fn tmp_custom_dir(tag: &str, ids: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("buttre-method-sync-custom-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for id in ids {
+            std::fs::write(dir.join(format!("{id}.toml")), "").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn custom_id_round_trips_when_toml_exists() {
+        let custom = tmp_custom_dir("roundtrip", &["cham"]);
+        let path = tmp_method_path("custom-roundtrip");
+        write_method_to(&path, "cham").unwrap();
+        assert_eq!(read_method_from_in(&path, &custom), "cham");
+    }
+
+    #[test]
+    fn custom_id_without_toml_falls_back_to_telex() {
+        let custom = tmp_custom_dir("absent", &[]);
+        let path = tmp_method_path("custom-absent");
+        std::fs::write(&path, "cham").unwrap();
+        assert_eq!(read_method_from_in(&path, &custom), "telex");
+    }
+
+    #[test]
+    fn traversal_ids_are_rejected_even_if_target_exists() {
+        let custom = tmp_custom_dir("traversal", &["ok"]);
+        // A sibling file reachable only by escaping the custom dir.
+        std::fs::write(custom.parent().unwrap().join("evil.toml"), "").unwrap();
+        assert!(!is_valid_custom_id_in("../evil", &custom));
+        assert!(!is_valid_custom_id_in("a/b", &custom));
+        assert!(!is_valid_custom_id_in("a\\b", &custom));
+        assert!(!is_valid_custom_id_in("", &custom));
+        assert!(is_valid_custom_id_in("ok", &custom));
+    }
+
+    #[test]
+    fn uppercase_ids_are_rejected_even_if_file_exists() {
+        // Read lowercases the id, so an uppercase id could be written but
+        // never read back — reject at admission for surface consistency.
+        let custom = tmp_custom_dir("case", &[]);
+        std::fs::write(custom.join("Cham.toml"), "").unwrap();
+        assert!(!is_valid_custom_id_in("Cham", &custom));
+    }
+
+    #[test]
+    fn builtins_are_engine_methods_regardless_of_custom_dir() {
+        let custom = tmp_custom_dir("builtins", &[]);
+        for id in KNOWN_METHODS {
+            assert!(is_engine_method_in(id, &custom));
+        }
+        assert!(!is_engine_method_in("cham", &custom));
     }
 
     #[test]

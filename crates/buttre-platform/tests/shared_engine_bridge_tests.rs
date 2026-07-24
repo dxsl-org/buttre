@@ -348,3 +348,72 @@ fn rebuild_from_english_back_to_telex_composes_again() {
     let ops = type_chars(&mut bridge, "vieejt");
     assert_eq!(ops.last(), Some(&ImeOp::Preedit("việt".into())));
 }
+
+/// A minimal custom keyboard with NO transformations/tones: under it "aa"
+/// stays "aa", while the telex fallback would compose "â" — so the assertion
+/// distinguishes "custom TOML actually loaded" from "silently fell back".
+const E2E_CUSTOM_TOML: &str = "\
+[metadata]
+id = \"bridge-e2e-custom\"
+name = \"Bridge E2E Custom\"
+language = \"xx\"
+
+[transformations]
+
+[tones]
+
+[rules]
+";
+
+/// `keyboards/bridge-e2e-custom.toml` next to the TEST EXECUTABLE —
+/// `get_custom_dir()`'s highest-priority location, so the ambient lookup in
+/// `build_keyboard` resolves here deterministically, whatever the machine's
+/// XDG data dir contains.
+fn e2e_keyboard_path() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("test exe path");
+    exe.parent()
+        .expect("test exe has a parent dir")
+        .join("keyboards/bridge-e2e-custom.toml")
+}
+
+fn install_e2e_keyboard() {
+    let path = e2e_keyboard_path();
+    std::fs::create_dir_all(path.parent().unwrap()).expect("create exe-side keyboards dir");
+    std::fs::write(path, E2E_CUSTOM_TOML).expect("write e2e custom keyboard");
+}
+
+/// End-to-end guard for the custom-method path: switching the bridge to a
+/// custom id must LOAD that TOML, not silently fall back to telex (the bug
+/// that once let every custom radio type telex while showing checked).
+#[test]
+fn rebuild_to_custom_keyboard_loads_its_toml() {
+    install_e2e_keyboard();
+    let mut bridge = EngineBridge::new("telex");
+    bridge
+        .rebuild("bridge-e2e-custom")
+        .expect("present custom TOML must build");
+    let space = {
+        type_chars(&mut bridge, "aa");
+        bridge.process_char(' ')
+    };
+    // Remove the fixture before asserting so a failure doesn't leave it
+    // behind to shadow later ambient-dir lookups in other test binaries.
+    let _ = std::fs::remove_file(e2e_keyboard_path());
+    assert_eq!(
+        commits(&space.ops),
+        vec!["aa"],
+        "custom keyboard must be in effect (telex fallback would commit \"â\")"
+    );
+}
+
+/// A custom id whose TOML is missing degrades to telex — same fallback the
+/// sync channel's read path uses — instead of failing or going silent.
+#[test]
+fn rebuild_to_missing_custom_falls_back_to_telex() {
+    let mut bridge = EngineBridge::new("no-such-custom-keyboard");
+    let space = {
+        type_chars(&mut bridge, "aa");
+        bridge.process_char(' ')
+    };
+    assert_eq!(commits(&space.ops), vec!["â"], "missing custom must behave as telex");
+}

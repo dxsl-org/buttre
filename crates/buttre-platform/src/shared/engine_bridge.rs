@@ -78,19 +78,50 @@ pub struct KeyOutcome {
 /// `use_composition` selects the preedit (underline) model vs the no-preedit
 /// diff model (`Replace`/`Commit`). Nôm ALWAYS composes regardless — its
 /// candidate popup needs a preedit anchor — so the flag only affects Telex/VNI.
+///
+/// A non-built-in `method` is a CUSTOM keyboard id: its config is loaded from
+/// `keyboards/{method}.toml` (the id was admitted into the sync channel by
+/// `method_sync::is_engine_method_in`, which stat'ed that exact file). A TOML
+/// deleted or broken between admission and this build degrades to Telex — the
+/// same fallback the sync channel's read path uses — rather than failing.
 fn build_keyboard(method: &str, use_composition: bool) -> Option<Keyboard> {
     let composition = method == "nom" || use_composition;
     let result = match method {
+        "telex" => KeyboardBuilder::telex_with_composition(composition),
         "vni" => KeyboardBuilder::vni_with_composition(composition),
         "nom" => KeyboardBuilder::nom_with_composition(
             buttre_core::vietnamese::get_nom_db_path(),
             composition,
         ),
-        _ => KeyboardBuilder::telex_with_composition(composition),
+        custom => match load_custom_config(custom) {
+            Some(config) => KeyboardBuilder::new()
+                .with_config(config)
+                .with_composition(composition)
+                .build(),
+            None => KeyboardBuilder::telex_with_composition(composition),
+        },
     };
     result
         .map_err(|e| tracing::warn!("build_keyboard({method}): {e}"))
         .ok()
+}
+
+/// Load a custom keyboard's `Config` from `keyboards/{id}.toml`, `None` (with
+/// a warning) when the file is missing or unparseable. Split from
+/// [`build_keyboard`] so the fallback decision stays readable there.
+fn load_custom_config(id: &str) -> Option<buttre_core::Config> {
+    let path = buttre_core::vietnamese::get_custom_dir().join(format!("{id}.toml"));
+    let Some(path_str) = path.to_str() else {
+        tracing::warn!("custom keyboard path {path:?} is not UTF-8, falling back to telex");
+        return None;
+    };
+    match buttre_core::Config::load(path_str) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::warn!("custom keyboard {id:?} failed to load ({e}), falling back to telex");
+            None
+        }
+    }
 }
 
 pub struct EngineBridge {

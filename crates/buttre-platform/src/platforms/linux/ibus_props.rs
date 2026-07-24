@@ -3,9 +3,10 @@
 //! The IBus panel renders an engine's properties as a menu; under GNOME the
 //! Shell IS that panel, so this is how buttre's method switcher reaches the
 //! top-bar input-source menu (the same mechanism ibus-bamboo / ibus-unikey
-//! use). This is the SPIKE surface: only the Telex/VNI radios, enough to
-//! confirm GNOME Shell renders the list and round-trips `PropertyActivate`
-//! before the full menu (Nôm, custom methods, toggles, "Cấu hình…") is built.
+//! use). The radio list is DYNAMIC: the four built-ins plus every custom
+//! keyboard TOML found in the custom dir at build time (see
+//! [`method_items`]) — mind the first-register freeze below when reasoning
+//! about customs added mid-session.
 //!
 //! ## Serialization contract
 //!
@@ -59,21 +60,81 @@ pub(crate) const PROP_STATE_CHECKED: u32 = 1;
 /// config window instead of switching method.
 pub(crate) const CONFIG_KEY: &str = "config";
 
-/// Input methods surfaced as radios, in display order. `key` doubles as the
-/// engine method id (see `method_sync::KNOWN_METHODS`) and the property name
-/// libibus echoes back in `PropertyActivate`, so a click maps straight to a
-/// method without a lookup table. Nôm switches the keyboard, but note its
-/// dictionary/candidate UI is not wired on Linux yet (see
-/// `shared::engine_bridge::build_keyboard`). "English" is the passthrough
-/// method (engine goes silent, OS input source untouched — the tray's
-/// "English" item and this radio are the same Store-B state); it sits FIRST
-/// to mirror the tray menu's order, so the two surfaces read identically.
-const METHOD_ITEMS: [(&str, &str); 4] = [
+/// Built-in methods surfaced as radios, in display order. `key` doubles as
+/// the engine method id (see `method_sync::KNOWN_METHODS`) and the property
+/// name libibus echoes back in `PropertyActivate`, so a click maps straight
+/// to a method without a lookup table. "English" is the passthrough method
+/// (engine goes silent, OS input source untouched — the tray's "English"
+/// item and this radio are the same Store-B state); it sits FIRST to mirror
+/// the tray menu's order, so the two surfaces read identically.
+const BUILTIN_METHOD_ITEMS: [(&str, &str); 4] = [
     ("english", "English"),
     ("telex", "Telex"),
     ("vni", "VNI"),
     ("nom", "Chữ Nôm"),
 ];
+
+/// The full `(key, label)` radio list: built-ins first, then every custom
+/// keyboard TOML in the custom dir, in directory scan order — the same order
+/// the tray's registry scan produces, so the two surfaces read identically.
+///
+/// The key is the TOML's FILENAME STEM, not `metadata.id`: the engine loads
+/// `keyboards/{key}.toml` by stem (`KeyboardManager::set_method`), so a stem
+/// key is the only one guaranteed to round-trip. Labels come from
+/// `metadata.name` (a TOML that fails to parse is excluded — its radio could
+/// only ever fall back to English).
+///
+/// Rebuilt on every publish, but note the GNOME first-register freeze
+/// (module docs): the panel renders the radio SET it saw on the engine's
+/// first `RegisterProperties`, so a custom TOML added mid-session appears
+/// only after an engine restart (`ibus restart`). Matches Windows, which has
+/// no keyboard hot-reload either.
+fn method_items() -> Vec<(String, String)> {
+    method_items_in(&buttre_core::vietnamese::get_custom_dir())
+}
+
+/// [`method_items`] against an explicit custom dir (testable core —
+/// `get_custom_dir()` is ambient: exe dir / cwd / XDG data dir).
+fn method_items_in(custom_dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut items: Vec<(String, String)> = BUILTIN_METHOD_ITEMS
+        .iter()
+        .map(|(key, label)| (key.to_string(), label.to_string()))
+        .collect();
+    let Ok(entries) = std::fs::read_dir(custom_dir) else {
+        return items; // no custom dir — built-ins only
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if BUILTIN_METHOD_ITEMS.iter().any(|(key, _)| *key == stem) {
+            continue; // built-in override TOMLs are not separate methods
+        }
+        if stem == CONFIG_KEY || stem == "-" {
+            // A radio named "config" would be swallowed by the settings
+            // launcher's PropertyActivate branch; "-" is the separator key.
+            tracing::warn!("ibus_props: keyboard filename {stem:?} collides with a menu key, skipping");
+            continue;
+        }
+        if stem != stem.to_lowercase() {
+            // method_sync lowercases on read — an uppercase stem could be
+            // rendered but never round-trip. Same rule as is_valid_custom_id.
+            tracing::warn!("ibus_props: keyboard filename {stem:?} must be lowercase, skipping");
+            continue;
+        }
+        match buttre_core::Config::load(path.to_str().unwrap_or_default()) {
+            Ok(config) => items.push((stem.to_string(), config.metadata.name.clone())),
+            Err(e) => {
+                tracing::debug!("ibus_props: skipping unloadable keyboard {path:?}: {e}");
+            }
+        }
+    }
+    items
+}
 
 /// One `IBusProperty`. Wire: `(sa{sv} s u v s v b b u v v)` = name, attachments,
 /// key, type, label, icon, tooltip, sensitive, visible, state, sub_props,
@@ -144,10 +205,15 @@ pub(crate) fn method_prop_list(current: &str) -> Value<'static> {
 /// The whole radio group is emitted (checked AND unchecked) so the panel never
 /// shows two checked radios, whatever state it held before.
 pub(crate) fn method_prop_updates(current: &str) -> Vec<Value<'static>> {
-    METHOD_ITEMS
+    method_prop_updates_with(current, &method_items())
+}
+
+/// [`method_prop_updates`] over an explicit item list (testable core).
+fn method_prop_updates_with(current: &str, items: &[(String, String)]) -> Vec<Value<'static>> {
+    items
         .iter()
         .map(|(key, label)| {
-            let state = if *key == current {
+            let state = if key == current {
                 PROP_STATE_CHECKED
             } else {
                 PROP_STATE_UNCHECKED
@@ -162,11 +228,24 @@ pub(crate) fn method_prop_updates(current: &str) -> Vec<Value<'static>> {
 ///
 /// A radio-group click arrives as MULTIPLE activations: the selected radio with
 /// `state == PROP_STATE_CHECKED`, plus every other radio with an UNCHECKED
-/// state. Only the checked one — and only if its key is a menu method — is a
+/// state. Only the checked one — and only if its key is a method the engine
+/// can build (built-in or present custom TOML, the same
+/// `method_sync::is_engine_method_in` rule the sync channel enforces) — is a
 /// real switch; acting on the unchecked de-selects would overwrite the user's
 /// actual choice with whichever notification arrives last.
 pub(crate) fn method_for_activation(name: &str, state: u32) -> Option<&str> {
-    if state == PROP_STATE_CHECKED && METHOD_ITEMS.iter().any(|(key, _)| *key == name) {
+    method_for_activation_in(name, state, &buttre_core::vietnamese::get_custom_dir())
+}
+
+/// [`method_for_activation`] against an explicit custom dir (testable core).
+/// The activation `name` is attacker-influenceable panel input interpolated
+/// into a path downstream — `is_engine_method_in` carries the traversal guard.
+fn method_for_activation_in<'a>(
+    name: &'a str,
+    state: u32,
+    custom_dir: &std::path::Path,
+) -> Option<&'a str> {
+    if state == PROP_STATE_CHECKED && super::method_sync::is_engine_method_in(name, custom_dir) {
         Some(name)
     } else {
         None
@@ -250,24 +329,41 @@ mod tests {
         );
     }
 
+    /// An owned item list: the four built-ins plus one custom entry — the
+    /// shape `method_items()` produces with one custom TOML present. Injected
+    /// so tests stay hermetic whatever the machine's real custom dir holds.
+    fn items_with_custom() -> Vec<(String, String)> {
+        let mut items: Vec<(String, String)> = BUILTIN_METHOD_ITEMS
+            .iter()
+            .map(|(k, l)| (k.to_string(), l.to_string()))
+            .collect();
+        items.push(("cham".to_string(), "Cham".to_string()));
+        items
+    }
+
     /// `UpdateProperty` carries ONE `IBusProperty` — same 12-field shape as the
     /// list elements. The daemon subscribes by signature and silently drops a
     /// mismatch, so drift must fail loudly here. `(sa{sv}suvsvbbuvv)`.
     #[test]
     fn method_prop_updates_have_ibus_property_signature() {
-        let updates = method_prop_updates("vni");
-        assert_eq!(updates.len(), 4, "one update per method radio");
+        let items = items_with_custom();
+        let updates = method_prop_updates_with("vni", &items);
+        assert_eq!(updates.len(), items.len(), "one update per method radio");
         for prop in &updates {
             assert_eq!(prop.value_signature().to_string(), "(sa{sv}suvsvbbuvv)");
         }
     }
 
-    /// Exactly the `current` radio is checked; the rest are explicitly
-    /// unchecked so the panel can never end up with two checked radios.
+    /// Exactly the `current` radio is checked — including a CUSTOM current —
+    /// the rest explicitly unchecked so the panel can never end up with two
+    /// checked radios.
     #[test]
     fn method_prop_updates_check_only_current() {
-        for (current, expect_idx) in [("english", 0usize), ("telex", 1), ("vni", 2), ("nom", 3)] {
-            let updates = method_prop_updates(current);
+        let items = items_with_custom();
+        for (current, expect_idx) in
+            [("english", 0usize), ("telex", 1), ("vni", 2), ("nom", 3), ("cham", 4)]
+        {
+            let updates = method_prop_updates_with(current, &items);
             for (i, prop) in updates.iter().enumerate() {
                 let Value::Structure(s) = prop else {
                     panic!("IBusProperty must be a structure")
@@ -277,6 +373,74 @@ mod tests {
                 assert_eq!(state, expected, "radio {i} state for current={current}");
             }
         }
+    }
+
+    /// A minimal keyboard TOML `Config::load` accepts (`[rules]` has no serde
+    /// default on the field, so the empty table must be present).
+    const MINIMAL_KEYBOARD_TOML: &str = "\
+[metadata]
+id = \"cham\"
+name = \"Cham Keyboard\"
+language = \"cja\"
+
+[transformations]
+
+[tones]
+
+[rules]
+";
+
+    /// A throwaway custom dir for the scan tests.
+    fn tmp_custom_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("buttre-ibus-props-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Customs append after the built-ins with the stem as key and
+    /// `metadata.name` as label; unparseable TOMLs and built-in-stem
+    /// overrides are excluded.
+    #[test]
+    fn method_items_appends_valid_customs_after_builtins() {
+        let dir = tmp_custom_dir("scan");
+        std::fs::write(dir.join("cham.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
+        std::fs::write(dir.join("broken.toml"), "not = valid = toml").unwrap();
+        std::fs::write(dir.join("telex.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        // Colliding / non-lowercase stems are excluded (see method_items_in).
+        std::fs::write(dir.join("config.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
+        std::fs::write(dir.join("Upper.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
+
+        let items = method_items_in(&dir);
+        let builtin_count = BUILTIN_METHOD_ITEMS.len();
+        assert_eq!(items.len(), builtin_count + 1, "exactly one custom admitted");
+        for (i, (key, _)) in BUILTIN_METHOD_ITEMS.iter().enumerate() {
+            assert_eq!(items[i].0, *key, "built-ins keep their order");
+        }
+        assert_eq!(items[builtin_count], ("cham".to_string(), "Cham Keyboard".to_string()));
+    }
+
+    /// Missing custom dir degrades to built-ins only — never an error.
+    #[test]
+    fn method_items_without_custom_dir_is_builtins_only() {
+        let items = method_items_in(std::path::Path::new("/nonexistent/keyboards"));
+        assert_eq!(items.len(), BUILTIN_METHOD_ITEMS.len());
+    }
+
+    /// A checked activation for a custom key switches only when its TOML
+    /// exists; traversal keys never resolve (panel names are untrusted).
+    #[test]
+    fn activation_admits_custom_ids_with_guard() {
+        let dir = tmp_custom_dir("activate");
+        std::fs::write(dir.join("cham.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
+        assert_eq!(
+            method_for_activation_in("cham", PROP_STATE_CHECKED, &dir),
+            Some("cham")
+        );
+        assert_eq!(method_for_activation_in("cham", PROP_STATE_UNCHECKED, &dir), None);
+        assert_eq!(method_for_activation_in("khmer", PROP_STATE_CHECKED, &dir), None);
+        assert_eq!(method_for_activation_in("../cham", PROP_STATE_CHECKED, &dir), None);
     }
 
     /// Field 9 of the 12-field IBusProperty struct is `state` (see
