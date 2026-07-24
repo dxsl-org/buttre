@@ -24,7 +24,6 @@
 #include <fcitx/inputmethodengine.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
-#include <fcitx/menu.h>
 #include <fcitx/statusarea.h>
 #include <fcitx/userinterfacemanager.h>
 
@@ -95,15 +94,6 @@ bool writeSharedMethod(const std::string &method) {
     return !ec;
 }
 
-std::string labelFor(const std::string &method) {
-    for (const auto &entry : kMethods) {
-        if (method == entry.id) {
-            return entry.label;
-        }
-    }
-    return method; /* custom keyboard id — show it verbatim */
-}
-
 } // namespace
 
 class ButtreEngine final : public fcitx::InputMethodEngineV2 {
@@ -137,10 +127,14 @@ public:
                   fcitx::InputContextEvent &event) override {
         auto *ic = event.inputContext();
         refreshMethodFromSharedFile(ic);
-        /* (Re)attach the panel menu for this input context — the status
-         * area is per-IC and cleared when the input method changes. */
+        /* (Re)attach the panel entries for this input context — the status
+         * area is per-IC and cleared when the input method changes. The
+         * method actions sit FLAT at the top level (checked = current),
+         * matching the IBus panel's radio layout. */
         auto &statusArea = ic->statusArea();
-        statusArea.addAction(fcitx::StatusGroup::InputMethod, &methodRootAction_);
+        for (auto &action : methodActions_) {
+            statusArea.addAction(fcitx::StatusGroup::InputMethod, action.get());
+        }
         statusArea.addAction(fcitx::StatusGroup::InputMethod, &configAction_);
     }
 
@@ -182,15 +176,12 @@ private:
         uint32_t index_;
     };
 
-    /* Build the status-area UI once: a "Kiểu gõ" root action carrying the
-     * method menu (one checkable action per built-in method — fcitx has no
-     * radio group primitive, checked state is maintained by hand in
+    /* Build the status-area UI once: one checkable action per built-in
+     * method, added FLAT to the status area on activate (fcitx has no radio
+     * group primitive — checked state is maintained by hand in
      * syncActionStates), plus a "Cấu hình…" launcher. */
     void setupActions() {
         auto &ui = instance_->userInterfaceManager();
-        methodRootAction_.setLongText("Kiểu gõ (buttre)");
-        ui.registerAction("buttre-method", &methodRootAction_);
-        methodRootAction_.setMenu(&methodMenu_);
         for (const auto &entry : kMethods) {
             auto action = std::make_unique<fcitx::SimpleAction>();
             action->setShortText(entry.label);
@@ -199,7 +190,6 @@ private:
             connections_.emplace_back(action->connect<fcitx::SimpleAction::Activated>(
                 [this, id](fcitx::InputContext *ic) { switchMethod(id, ic); }));
             ui.registerAction(std::string("buttre-method-") + entry.id, action.get());
-            methodMenu_.addAction(action.get());
             methodActions_.push_back(std::move(action));
         }
         configAction_.setShortText("Cấu hình…");
@@ -281,15 +271,13 @@ private:
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
     }
 
-    /* Push method_ into the menu UI: root shows the current method, exactly
-     * one item is checked. `ic` non-null → repaint that context's panel. */
+    /* Push method_ into the panel UI: exactly one method action is checked.
+     * `ic` non-null → repaint that context's panel. */
     void syncActionStates(fcitx::InputContext *ic) {
-        methodRootAction_.setShortText("Kiểu gõ: " + labelFor(method_));
         for (size_t i = 0; i < methodActions_.size(); ++i) {
             methodActions_[i]->setChecked(method_ == kMethods[i].id);
         }
         if (ic != nullptr) {
-            methodRootAction_.update(ic);
             for (auto &action : methodActions_) {
                 action->update(ic);
             }
@@ -326,9 +314,7 @@ private:
     std::string method_ = "telex";
     std::filesystem::file_time_type methodMtime_{};
 
-    fcitx::SimpleAction methodRootAction_;
     fcitx::SimpleAction configAction_;
-    fcitx::Menu methodMenu_;
     std::vector<std::unique_ptr<fcitx::SimpleAction>> methodActions_;
     std::vector<fcitx::ScopedConnection> connections_;
 };
