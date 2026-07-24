@@ -5,6 +5,7 @@ members = [
     "crates/buttre-core",
     # Platform (UI + Backends)
     "crates/buttre-platform",
+    "crates/buttre-ffi",
     "crates/buttre-config",
     "crates/buttre-autostart",
     # Cross-platform testing

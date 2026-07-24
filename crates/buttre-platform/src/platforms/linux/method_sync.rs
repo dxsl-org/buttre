@@ -47,7 +47,11 @@ pub const KNOWN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 /// `keyboards/{id}.toml` for any non-builtin id), so an id admitted here is
 /// exactly one the engine will resolve — a deleted-while-active custom TOML
 /// degrades to telex on the next read instead of leaving a dangling id.
-fn is_engine_method(id: &str) -> bool {
+///
+/// `pub`: also the validation gate for ids arriving through `buttre-ffi`
+/// (the fcitx5 addon) — `build_keyboard` itself is lenient (unknown id →
+/// telex fallback), so rejecting bogus ids must happen at the boundary.
+pub fn is_engine_method(id: &str) -> bool {
     is_engine_method_in(id, &buttre_core::vietnamese::get_custom_dir())
 }
 
