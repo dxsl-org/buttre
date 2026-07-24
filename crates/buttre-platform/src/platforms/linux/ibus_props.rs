@@ -66,12 +66,13 @@ pub(crate) const CONFIG_KEY: &str = "config";
 /// dictionary/candidate UI is not wired on Linux yet (see
 /// `shared::engine_bridge::build_keyboard`). "English" is the passthrough
 /// method (engine goes silent, OS input source untouched — the tray's
-/// "English" item and this radio are the same Store-B state).
+/// "English" item and this radio are the same Store-B state); it sits FIRST
+/// to mirror the tray menu's order, so the two surfaces read identically.
 const METHOD_ITEMS: [(&str, &str); 4] = [
+    ("english", "English"),
     ("telex", "Telex"),
     ("vni", "VNI"),
     ("nom", "Chữ Nôm"),
-    ("english", "English"),
 ];
 
 /// One `IBusProperty`. Wire: `(sa{sv} s u v s v b b u v v)` = name, attachments,
@@ -265,7 +266,7 @@ mod tests {
     /// unchecked so the panel can never end up with two checked radios.
     #[test]
     fn method_prop_updates_check_only_current() {
-        for (current, expect_idx) in [("telex", 0usize), ("vni", 1), ("nom", 2), ("english", 3)] {
+        for (current, expect_idx) in [("english", 0usize), ("telex", 1), ("vni", 2), ("nom", 3)] {
             let updates = method_prop_updates(current);
             for (i, prop) in updates.iter().enumerate() {
                 let Value::Structure(s) = prop else {
