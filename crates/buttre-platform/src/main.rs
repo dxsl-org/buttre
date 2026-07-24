@@ -605,6 +605,13 @@ fn main() -> Result<()> {
     // different means a genuine external change (config window), apply it.
     // This avoids the "external edit racing our own autosave gets silently
     // dropped" gap a fixed suppression window would have.
+    // Mirror of the "Thoát" handler below: quitting the tray switches
+    // KWin's IME off (stopping the background `--ime` respawn), so tray
+    // startup switches it back on — relaunching the tray restores typing
+    // on Plasma Wayland. No-op everywhere else.
+    #[cfg(platform_linux)]
+    buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(true);
+
     let (settings_file_tx, settings_file_rx) = mpsc::channel::<()>();
     watch_settings_file(settings_file_tx);
 
@@ -972,6 +979,12 @@ fn main() -> Result<()> {
                 // Menu events
                 if let Ok(event) = menu_channel.try_recv() {
                     if event.id == thoat_item.id() {
+                        // "Thoát" must stop typing too, not just the tray:
+                        // on Plasma Wayland KWin owns and RESPAWNS the
+                        // `--ime` engine, so tell it to switch the IME off
+                        // (best-effort; startup re-enables it).
+                        #[cfg(platform_linux)]
+                        buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(false);
                         elwt.exit();
                     } else if event.id == nom_item.id() {
                         let _ = app_state.lock().unwrap().set_method("nom");

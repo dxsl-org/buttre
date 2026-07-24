@@ -6,6 +6,7 @@
 
 pub mod ibus;
 pub mod ibus_bus;
+pub mod kwin_ime;
 mod ibus_props;
 pub mod macro_sync;
 pub mod method_sync;
