@@ -49,3 +49,12 @@ install(FILES buttre-addon.conf
         DESTINATION "${CMAKE_INSTALL_DATADIR}/fcitx5/addon" RENAME buttre.conf)
 install(FILES buttre-im.conf
         DESTINATION "${CMAKE_INSTALL_DATADIR}/fcitx5/inputmethod" RENAME buttre.conf)
+
+# Per-method icons for the panel menu (the same PNGs the tray uses),
+# published into the icon theme as buttre-<method>.
+set(BUTTRE_ICON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/buttre-platform/icons")
+foreach(method english telex vni nom)
+    install(FILES "${BUTTRE_ICON_SRC}/${method}.png"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps"
+            RENAME "buttre-${method}.png")
+endforeach()

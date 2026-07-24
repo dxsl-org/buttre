@@ -43,13 +43,18 @@ namespace {
 struct MethodEntry {
     const char *id;
     const char *label;
+    const char *icon; /* icon-theme name; PNGs installed by this addon's CMake */
 };
 constexpr std::array<MethodEntry, 4> kMethods{{
-    {"english", "English"},
-    {"telex", "Telex"},
-    {"vni", "VNI"},
-    {"nom", "Chữ Nôm"},
+    {"english", "English", "buttre-english"},
+    {"telex", "Telex", "buttre-telex"},
+    {"vni", "VNI", "buttre-vni"},
+    {"nom", "Chữ Nôm", "buttre-nom"},
 }};
+
+/* Candidate page size — matches ibus_props::LOOKUP_PAGE_SIZE so digit keys
+ * and paging behave identically on both panels. */
+constexpr uint32_t kPageSize = 9;
 
 /* ~/.config/buttre/method (XDG_CONFIG_HOME honored, like dirs::config_dir). */
 std::filesystem::path sharedMethodPath() {
@@ -111,10 +116,50 @@ public:
         if (keyEvent.isRelease() || engine_ == 0) {
             return;
         }
-        refreshMethodFromSharedFile(keyEvent.inputContext());
-        const BtKeyResult result = bt_engine_process_keysym(
-            engine_, static_cast<uint32_t>(keyEvent.rawKey().sym()));
-        applyResult(keyEvent.inputContext(), result);
+        auto *ic = keyEvent.inputContext();
+        refreshMethodFromSharedFile(ic);
+        const auto sym = static_cast<uint32_t>(keyEvent.rawKey().sym());
+        /* Candidate navigation first (mirror of ibus.rs): while the Nôm
+         * list is showing, digits/arrows/paging/Return-Space drive the
+         * BRIDGE's cursor instead of composing — otherwise digit keys
+         * would type into the word and PgUp/PgDn would flush it. */
+        if (bt_engine_candidate_count(engine_) > 0) {
+            bool routed = true;
+            BtKeyResult navResult;
+            switch (sym) {
+            case 0xFF0D /*Return*/:
+            case 0x0020 /*space*/:
+                navResult = bt_engine_select_current(engine_);
+                break;
+            case 0xFF54 /*Down*/:
+            case 0xFF53 /*Right*/:
+                navResult = bt_engine_cursor_next(engine_);
+                break;
+            case 0xFF52 /*Up*/:
+            case 0xFF51 /*Left*/:
+                navResult = bt_engine_cursor_prev(engine_);
+                break;
+            case 0xFF56 /*Page_Down*/:
+                navResult = bt_engine_cursor_page_down(engine_, kPageSize);
+                break;
+            case 0xFF55 /*Page_Up*/:
+                navResult = bt_engine_cursor_page_up(engine_, kPageSize);
+                break;
+            default:
+                if (sym >= '1' && sym <= '9') {
+                    navResult = bt_engine_select_at_page(engine_, sym - '1', kPageSize);
+                } else {
+                    routed = false;
+                }
+            }
+            if (routed) {
+                applyResult(ic, navResult);
+                keyEvent.filterAndAccept();
+                return;
+            }
+        }
+        const BtKeyResult result = bt_engine_process_keysym(engine_, sym);
+        applyResult(ic, result);
         if (result.handled) {
             keyEvent.filterAndAccept();
         }
@@ -185,6 +230,7 @@ private:
         for (const auto &entry : kMethods) {
             auto action = std::make_unique<fcitx::SimpleAction>();
             action->setShortText(entry.label);
+            action->setIcon(entry.icon);
             action->setCheckable(true);
             const std::string id = entry.id;
             connections_.emplace_back(action->connect<fcitx::SimpleAction::Activated>(
@@ -193,6 +239,7 @@ private:
             methodActions_.push_back(std::move(action));
         }
         configAction_.setShortText("Cấu hình…");
+        configAction_.setIcon("configure");
         configAction_.setLongText("Mở cửa sổ cấu hình buttre");
         connections_.emplace_back(configAction_.connect<fcitx::SimpleAction::Activated>(
             [](fcitx::InputContext * /*ic*/) {
@@ -251,7 +298,7 @@ private:
             return;
         }
         auto list = std::make_unique<fcitx::CommonCandidateList>();
-        list->setPageSize(9);
+        list->setPageSize(static_cast<int>(kPageSize));
         for (uint32_t i = 0; i < count; ++i) {
             const char *display = bt_engine_candidate_display(engine_, i);
             if (display == nullptr) {
@@ -259,6 +306,10 @@ private:
             }
             list->append<ButtreCandidateWord>(this, i, fcitx::Text(display));
         }
+        /* The bridge owns the cursor; render its highlight (this also puts
+         * the visible page where the cursor is). */
+        list->setGlobalCursorIndex(
+            static_cast<int>(bt_engine_candidate_cursor(engine_)));
         ic->inputPanel().setCandidateList(std::move(list));
     }
 
