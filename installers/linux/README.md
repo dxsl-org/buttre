@@ -205,3 +205,17 @@ To test changes without reinstalling:
 # Build and run directly
 cargo run --release --package buttre-platform
 ```
+
+## KDE Plasma (Wayland) — kích hoạt bộ gõ
+
+KWin không dùng IBus: nó tự spawn engine được khai trong `kwinrc`. Sau khi
+cài gói, chạy một lần cho mỗi user (rồi logout/login hoặc chờ KWin nhận
+config):
+
+```bash
+kwriteconfig6 --notify --file kwinrc --group Wayland --key InputMethod \
+  /usr/share/applications/buttre-ime.desktop
+```
+
+Hoặc: System Settings → Keyboard → Virtual Keyboard → chọn "buttre (Wayland
+IME)". Tray vẫn autostart qua `/etc/xdg/autostart` như GNOME.

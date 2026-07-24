@@ -1,9 +1,18 @@
-//! Wayland-native input method via `zwp_input_method_v2`.
+//! Wayland-native input method via `zwp_input_method_v2` (+ v1 fallback).
 //!
-//! First-class IME on wlroots compositors (sway, Hyprland) and KDE — no
-//! IBus daemon in the path. The compositor routes keys to us through an
-//! input-method keyboard grab; composition semantics come from the shared
-//! [`EngineBridge`](super::engine_bridge), identical to the IBus backend.
+//! First-class IME with no IBus daemon in the path. The compositor routes
+//! keys to us through an input-method keyboard grab; composition semantics
+//! come from the shared [`EngineBridge`](super::engine_bridge), identical to
+//! the IBus backend. Two protocol generations, one entry point:
+//!
+//! - `zwp_input_method_v2` (this module) — wlroots compositors (sway,
+//!   Hyprland). KDE does NOT implement it, despite what one might expect.
+//! - `zwp_input_method_v1` ([`v1`]) — KDE Plasma/KWin (and Weston). KWin
+//!   spawns the IME itself from `kwinrc [Wayland] InputMethod=<desktop file>`
+//!   and passes a privileged socket via `WAYLAND_SOCKET`; only that
+//!   connection sees the global, and `connect_to_env` CONSUMES the variable —
+//!   which is why [`run_engine`] connects exactly once and hands the same
+//!   [`Connection`] to whichever protocol generation is present.
 //!
 //! ## Protocol shape (verified against sway 1.9 headless)
 //!
@@ -28,6 +37,7 @@
 //!   has no IBus-style "commit preedit on focus change" mode.
 
 mod dispatch;
+mod v1;
 
 use super::engine_bridge::EngineBridge;
 use super::macro_sync;
@@ -183,12 +193,30 @@ impl ImeState {
     }
 }
 
-/// Run the Wayland-native engine. Blocks for the process lifetime.
-/// Returns [`Unavailable`] (as anyhow error) when the compositor lacks the
-/// protocol or another IME owns the seat — callers then fall back to IBus.
+/// Run the Wayland-native engine: `zwp_input_method_v2` when the compositor
+/// has it (wlroots), else the [`v1`] backend (KDE/KWin). Blocks for the
+/// process lifetime. Returns [`Unavailable`] (as anyhow error) when NEITHER
+/// protocol is present or another IME owns the seat — callers then fall back
+/// to IBus.
+///
+/// Connects exactly once and shares the [`Connection`] across both attempts:
+/// `connect_to_env` consumes KWin's `WAYLAND_SOCKET` (see module docs), so a
+/// second connect would land on the unprivileged socket and always miss the
+/// input-method global.
 pub fn run_engine() -> Result<()> {
     let conn = Connection::connect_to_env()
         .map_err(|e| anyhow!(Unavailable(format!("no wayland display: {e}"))))?;
+    match run_engine_v2(conn.clone()) {
+        Err(e) if e.downcast_ref::<Unavailable>().is_some() => {
+            tracing::info!("{e}; trying zwp_input_method_v1 (KDE/Weston)");
+            v1::run_engine(conn)
+        }
+        other => other,
+    }
+}
+
+/// The `zwp_input_method_v2` backend on an already-open connection.
+fn run_engine_v2(conn: Connection) -> Result<()> {
     let display = conn.display();
 
     // NB: do NOT spawn the method watcher yet — this function may still

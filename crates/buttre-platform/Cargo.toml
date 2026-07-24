@@ -153,6 +153,10 @@ assets = [
     # App-menu launcher for the tray/config UI (the engine is a separate,
     # ibus-daemon-spawned process — nothing else surfaces the tray).
     ["../../installers/linux/buttre.desktop",                  "usr/share/applications/",               "644"],
+    # KDE Plasma Wayland engine entry: KWin spawns the IME configured in
+    # kwinrc [Wayland] InputMethod, which must point at a desktop file —
+    # X-KDE-Wayland-VirtualKeyboard=true lists it in the Virtual Keyboard KCM.
+    ["../../installers/linux/buttre-ime.desktop",              "usr/share/applications/",               "644"],
     # System-wide XDG autostart so the tray starts at every user's login
     # (autostart defaults ON — see buttre-core Settings::default). A per-user
     # ~/.config/autostart/buttre.desktop, if the tray ever writes one, shares
@@ -181,6 +185,7 @@ assets = [
     { source = "target/release/buttre_nom.db",                 dest = "/usr/share/buttre/buttre_nom.db",                        mode = "644" },
     { source = "../../installers/linux/buttre.xml",            dest = "/usr/share/ibus/component/buttre.xml",                   mode = "644" },
     { source = "../../installers/linux/buttre.desktop",        dest = "/usr/share/applications/buttre.desktop",                 mode = "644" },
+    { source = "../../installers/linux/buttre-ime.desktop",    dest = "/usr/share/applications/buttre-ime.desktop",             mode = "644" },
     { source = "../../installers/linux/buttre-autostart.desktop", dest = "/etc/xdg/autostart/buttre.desktop",                   mode = "644" },
     { source = "icons/vietnamese.png",                         dest = "/usr/share/icons/hicolor/128x128/apps/buttre.png",       mode = "644" },
     { source = "../../keyboards/cham.toml",                    dest = "/usr/share/buttre/keyboards/cham.toml",                  mode = "644" },
