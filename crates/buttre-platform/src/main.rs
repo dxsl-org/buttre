@@ -481,11 +481,16 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new()?;
 
-    // We need a hidden window for the event loop to work properly on some platforms/configs
-    use winit::window::WindowBuilder;
-    let _window = WindowBuilder::new()
-        .with_visible(false)
-        .build(&event_loop)?;
+    // A hidden window keeps the event loop serviced on Windows/macOS (win32
+    // message pump). NOT created on Linux: the loop runs windowless there —
+    // menu/tray events arrive via the GTK pump below — and KDE Plasma lists
+    // even an invisible winit window as a ghost taskbar entry ("buttre" with
+    // no window), while GNOME merely hides it.
+    #[cfg(not(target_os = "linux"))]
+    let _window = {
+        use winit::window::WindowBuilder;
+        WindowBuilder::new().with_visible(false).build(&event_loop)?
+    };
 
     // tray-icon and muda render the tray menu through GTK on Linux, so GTK
     // must be initialised on this (the tray-owning) thread BEFORE any menu or
@@ -738,7 +743,18 @@ fn main() -> Result<()> {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => elwt.exit(),
+            } => {
+                // The only winit window is the hidden event-loop helper. KWin
+                // can still deliver a close for it (task switcher / session
+                // manager) — observed on Plasma 6 killing the tray silently
+                // ~10 min into the session, leaving a zombie SNI icon; GNOME
+                // never sends one. The tray must exit only via "Thoát" (or a
+                // signal), so on Linux the close is ignored.
+                #[cfg(not(target_os = "linux"))]
+                elwt.exit();
+                #[cfg(target_os = "linux")]
+                info!("CloseRequested on the hidden helper window ignored (tray exits via menu)");
+            }
 
             Event::AboutToWait => {
                 // Service GTK on Linux: the tray icon and its menu live on the
