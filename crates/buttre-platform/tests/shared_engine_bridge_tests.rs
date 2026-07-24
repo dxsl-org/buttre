@@ -305,3 +305,46 @@ fn set_use_composition_is_a_noop_for_nom() {
         out.ops
     );
 }
+
+// ============================================================================
+// English / passthrough (tắt bộ gõ — Unikey model, OS input source untouched)
+// ============================================================================
+
+#[test]
+fn english_passthrough_lets_every_key_through_untouched() {
+    let mut bridge = EngineBridge::new("english");
+    for ch in ['v', 'i', 'e', 'j', 't', ' ', 'w', '\x08'] {
+        let outcome = if ch == '\x08' {
+            bridge.backspace()
+        } else {
+            bridge.process_char(ch)
+        };
+        assert!(!outcome.handled, "{ch:?} must pass through unhandled");
+        assert!(outcome.ops.is_empty(), "{ch:?} must emit no IME ops");
+    }
+    assert_eq!(bridge.preedit(), "", "passthrough never builds a preedit");
+}
+
+#[test]
+fn rebuild_to_english_discards_composition_and_goes_silent() {
+    let mut bridge = EngineBridge::new("telex");
+    type_chars(&mut bridge, "vieej");
+    let outcome = bridge
+        .rebuild("english")
+        .expect("english rebuild can never fail — no keyboard build involved");
+    // The live preedit is cleared on the way out (mode switch = reset).
+    assert_eq!(outcome.ops, vec![ImeOp::Preedit(String::new())]);
+    let after = bridge.process_char('w');
+    assert!(!after.handled && after.ops.is_empty(), "silent after switch");
+}
+
+#[test]
+fn rebuild_from_english_back_to_telex_composes_again() {
+    let mut bridge = EngineBridge::new("english");
+    assert!(!bridge.process_char('a').handled);
+    bridge
+        .rebuild("telex")
+        .expect("telex must always build");
+    let ops = type_chars(&mut bridge, "vieejt");
+    assert_eq!(ops.last(), Some(&ImeOp::Preedit("việt".into())));
+}

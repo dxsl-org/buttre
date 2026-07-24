@@ -10,9 +10,15 @@
 //!   [`MethodState`]'s generation; each engine object compares generations
 //!   per keystroke (one atomic load) and rebuilds its `Keyboard` lazily.
 //!
-//! Enable/disable ("english") is deliberately NOT synced: IBus users toggle
-//! via the OS input-source switcher, which is the native pattern — the tray
-//! writes only real method ids (telex/vni/nom).
+//! "english" IS a synced method id: it means engine-side passthrough (the
+//! Unikey model — the engine stays the active IBus engine but stops composing,
+//! `EngineBridge::passthrough`). It deliberately does NOT switch the OS input
+//! source: on GNOME the Shell owns source state (an external `SetGlobalEngine`
+//! desyncs its indicator and is reverted on the next focus change), and when
+//! the user has no English xkb source there is no meaningful target anyway.
+//! The OS input-source switcher (Super+Space, buttre ⇄ another source) remains
+//! an ORTHOGONAL mechanism, mirrored one-way engine→tray via the `enabled`
+//! file below — never written by the tray.
 //!
 //! The LAST hop (engine → GNOME top-bar radio repaint) has its own contract —
 //! `RegisterProperties` alone is ignored by GNOME Shell after the first
@@ -25,11 +31,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// Method ids the engine knows how to build. Anything else falls back to
-/// telex on read and is skipped on write (a custom-TOML method silently
-/// degrading to telex would be more surprising than the tray switch not
-/// applying to IBus).
-pub const KNOWN_METHODS: [&str; 3] = ["telex", "vni", "nom"];
+/// Method ids the engine knows how to build ("english" = passthrough, no
+/// keyboard — see module docs). Anything else falls back to telex on read and
+/// is skipped on write (a custom-TOML method silently degrading to telex
+/// would be more surprising than the tray switch not applying to IBus).
+pub const KNOWN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 
 /// `~/.config/buttre/method`
 pub fn method_file_path() -> Option<PathBuf> {

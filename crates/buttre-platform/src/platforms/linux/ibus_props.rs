@@ -64,9 +64,15 @@ pub(crate) const CONFIG_KEY: &str = "config";
 /// libibus echoes back in `PropertyActivate`, so a click maps straight to a
 /// method without a lookup table. Nôm switches the keyboard, but note its
 /// dictionary/candidate UI is not wired on Linux yet (see
-/// `shared::engine_bridge::build_keyboard`).
-const METHOD_ITEMS: [(&str, &str); 3] =
-    [("telex", "Telex"), ("vni", "VNI"), ("nom", "Chữ Nôm")];
+/// `shared::engine_bridge::build_keyboard`). "English" is the passthrough
+/// method (engine goes silent, OS input source untouched — the tray's
+/// "English" item and this radio are the same Store-B state).
+const METHOD_ITEMS: [(&str, &str); 4] = [
+    ("telex", "Telex"),
+    ("vni", "VNI"),
+    ("nom", "Chữ Nôm"),
+    ("english", "English"),
+];
 
 /// One `IBusProperty`. Wire: `(sa{sv} s u v s v b b u v v)` = name, attachments,
 /// key, type, label, icon, tooltip, sensitive, visible, state, sub_props,
@@ -218,10 +224,17 @@ mod tests {
         // overwrites the selection (the original "always lands on VNI" bug).
         assert_eq!(method_for_activation("vni", PROP_STATE_UNCHECKED), None);
         assert_eq!(method_for_activation("telex", PROP_STATE_UNCHECKED), None);
+        // English is a real radio (passthrough method) since the tri-surface
+        // sync — a checked click switches to it like any other method.
+        assert_eq!(
+            method_for_activation("english", PROP_STATE_CHECKED),
+            Some("english")
+        );
+        assert_eq!(method_for_activation("english", PROP_STATE_UNCHECKED), None);
         // Non-method keys are ignored: the settings launcher is handled by the
         // engine as a config-open, never as a method switch.
         assert_eq!(method_for_activation(CONFIG_KEY, PROP_STATE_CHECKED), None);
-        assert_eq!(method_for_activation("english", PROP_STATE_CHECKED), None);
+        assert_eq!(method_for_activation("french", PROP_STATE_CHECKED), None);
     }
 
     /// libibus subscribes to the property signal BY SIGNATURE and silently
@@ -242,7 +255,7 @@ mod tests {
     #[test]
     fn method_prop_updates_have_ibus_property_signature() {
         let updates = method_prop_updates("vni");
-        assert_eq!(updates.len(), 3, "one update per method radio");
+        assert_eq!(updates.len(), 4, "one update per method radio");
         for prop in &updates {
             assert_eq!(prop.value_signature().to_string(), "(sa{sv}suvsvbbuvv)");
         }
@@ -252,7 +265,7 @@ mod tests {
     /// unchecked so the panel can never end up with two checked radios.
     #[test]
     fn method_prop_updates_check_only_current() {
-        for (current, expect_idx) in [("telex", 0usize), ("vni", 1), ("nom", 2)] {
+        for (current, expect_idx) in [("telex", 0usize), ("vni", 1), ("nom", 2), ("english", 3)] {
             let updates = method_prop_updates(current);
             for (i, prop) in updates.iter().enumerate() {
                 let Value::Structure(s) = prop else {

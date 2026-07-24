@@ -715,6 +715,17 @@ fn main() -> Result<()> {
     #[cfg(platform_linux)]
     let _enabled_watcher = watch_enabled_file(enabled_file_tx);
 
+    // Method stashed by the enabled-file mirror when IT flips the tray to
+    // English on an OS input-source switch away from buttre. "english" is a
+    // real Store-B id now (engine passthrough), so the mirror's own
+    // `set_method("english")` overwrites Store B — without this stash the
+    // re-enable branch could only read back "english" and the user's real
+    // Vietnamese method would be lost across an OS round-trip. `None` whenever
+    // the last disable was NOT mirror-initiated (e.g. the user picked English
+    // themselves, which must persist across the round-trip).
+    #[cfg(platform_linux)]
+    let mut os_disable_stash: Option<String> = None;
+
     // --- Event Loop ---
     let menu_channel = muda::MenuEvent::receiver();
 
@@ -945,12 +956,13 @@ fn main() -> Result<()> {
                 // the settings.toml write it also triggers is likewise a no-op
                 // for the settings watcher (AppState already matches).
                 //
-                // `disk` is always a real engine method (telex/vni/nom) written
-                // on an explicit panel switch — the file's only writers are that
-                // switch and the tray's own echo. So comparing against AppState's
-                // current method (which may be "english" or a custom id) is
-                // deliberate: picking a Vietnamese method from the IBus panel
-                // while the tray is in English adopts it, flipping to Vietnamese.
+                // `disk` is any KNOWN_METHODS id — telex/vni/nom, or "english"
+                // since the passthrough method landed (panel "English" radio,
+                // the tray's own echo, or the enabled-mirror below). Comparing
+                // against AppState's current method (which may be a custom
+                // TOML id) is deliberate: a method picked from the IBus panel
+                // always wins and the tray adopts it, in either direction
+                // (English → Vietnamese and Vietnamese → English).
                 #[cfg(platform_linux)]
                 if method_file_rx.try_iter().count() > 0 {
                     use buttre_platform::platforms::linux::method_sync;
@@ -965,12 +977,15 @@ fn main() -> Result<()> {
                 }
 
                 // The engine writes `enabled` on IBus Enable/Disable — an OS
-                // input-source switch between buttre and English. Mirror it in
-                // the tray: disabled ⇒ show English; re-enabled ⇒ restore the
-                // real Vietnamese method from Store B (`method`). Own-write
-                // suppression is inherent: only the ENGINE writes this file, and
-                // `set_method("english")` writes no method id to Store B, so
-                // neither path refires this watcher.
+                // input-source switch between buttre and another source. Mirror
+                // it in the tray: disabled ⇒ show English; re-enabled ⇒ restore
+                // the method stashed at disable time (see `os_disable_stash` —
+                // `set_method("english")` writes Store B since english became a
+                // real passthrough id, so Store B alone no longer remembers the
+                // pre-disable method). Own-write suppression: only the ENGINE
+                // writes this file; the Store-B write that set_method triggers
+                // refires the METHOD watcher above, where disk == AppState
+                // suppresses it.
                 #[cfg(platform_linux)]
                 if enabled_file_rx.try_iter().count() > 0 {
                     use buttre_platform::platforms::linux::method_sync;
@@ -979,8 +994,14 @@ fn main() -> Result<()> {
                     let known_enabled = known_method != "english";
                     if enabled != known_enabled {
                         let target = if enabled {
-                            method_sync::read_method()
+                            // No stash ⇒ the disable wasn't mirror-initiated
+                            // (user picked English explicitly): keep whatever
+                            // Store B says — which is exactly that choice.
+                            os_disable_stash
+                                .take()
+                                .unwrap_or_else(method_sync::read_method)
                         } else {
+                            os_disable_stash = Some(method_sync::read_method());
                             "english".to_string()
                         };
                         info!("engine enabled={enabled} — tray applying method {target}");

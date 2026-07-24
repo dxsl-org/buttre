@@ -131,6 +131,14 @@ pub struct EngineBridge {
     /// only the IBus engine flips it off via [`Self::set_use_composition`] once
     /// the client is confirmed to support in-place deletion. Nôm ignores it.
     use_composition: bool,
+    /// English/passthrough mode (`method == "english"`): the bridge stops
+    /// composing entirely — every key returns unhandled with no ops, so the
+    /// raw keystroke reaches the app. This is how "tắt bộ gõ" works WITHOUT
+    /// touching the OS input source (Unikey model): the engine stays the
+    /// active IBus engine, it just goes silent. The `keyboard` field keeps its
+    /// last real build (never consulted while passthrough) so no call path
+    /// has to handle a missing keyboard.
+    passthrough: bool,
 }
 
 impl EngineBridge {
@@ -152,6 +160,7 @@ impl EngineBridge {
             cursor: 0,
             method: method.to_string(),
             use_composition: true,
+            passthrough: method == "english",
         }
     }
 
@@ -173,6 +182,7 @@ impl EngineBridge {
             cursor: 0,
             method: method.to_string(),
             use_composition: true,
+            passthrough: method == "english",
         }
     }
 
@@ -189,6 +199,7 @@ impl EngineBridge {
             cursor: 0,
             method: method.to_string(),
             use_composition: true,
+            passthrough: method == "english",
         })
     }
 
@@ -209,6 +220,7 @@ impl EngineBridge {
             cursor: 0,
             method: method.to_string(),
             use_composition: true,
+            passthrough: method == "english",
         })
     }
 
@@ -297,9 +309,19 @@ impl EngineBridge {
     /// failure rather than silently switching to something else or crashing.
     /// The new keyboard keeps the current preedit model (`use_composition`),
     /// except Nôm which always composes.
+    ///
+    /// `"english"` needs no keyboard build at all: it flips [`Self::passthrough`]
+    /// on and keeps the previous keyboard idle (see the field doc) — so it can
+    /// never fail, and switching back to a real method clears the flag.
     pub fn rebuild(&mut self, method: &str) -> Option<KeyOutcome> {
+        if method == "english" {
+            self.method = method.to_string();
+            self.passthrough = true;
+            return Some(self.reset_outcome());
+        }
         let keyboard = build_keyboard(method, self.use_composition)?;
         self.method = method.to_string();
+        self.passthrough = false;
         self.install_keyboard(keyboard);
         Some(self.reset_outcome())
     }
@@ -311,7 +333,10 @@ impl EngineBridge {
     /// clear. Callers gate this on the client actually supporting the
     /// no-preedit model (surrounding-text) before turning composition off.
     pub fn set_use_composition(&mut self, use_composition: bool) -> KeyOutcome {
-        if self.method == "nom" || use_composition == self.use_composition {
+        // Passthrough guard mirrors the Nôm guard: there is nothing to rebuild
+        // while english is active; the model is re-negotiated per keystroke by
+        // the host (`sync_use_preedit`) once a real method is back.
+        if self.passthrough || self.method == "nom" || use_composition == self.use_composition {
             return KeyOutcome::default();
         }
         let mut outcome = self.flush_pending();
@@ -330,6 +355,11 @@ impl EngineBridge {
     /// the no-preedit (commit-as-you-go) mapping based on the active model. Nôm
     /// always uses composition (its `use_composition` never flips).
     pub fn process_char(&mut self, ch: char) -> KeyOutcome {
+        // English/passthrough: never touch the keyboard — the raw key must
+        // reach the app unmodified (handled=false, no ops).
+        if self.passthrough {
+            return KeyOutcome::default();
+        }
         self.sync_strict_spelling();
         let actions = match self.keyboard.process(ch) {
             Ok(actions) => actions,
@@ -501,6 +531,11 @@ impl EngineBridge {
     /// no-preedit mode it consumes the engine's returned diff action and
     /// corrects the already-committed text in place.
     pub fn backspace(&mut self) -> KeyOutcome {
+        // Same passthrough contract as process_char: the app handles its own
+        // backspace while english is active.
+        if self.passthrough {
+            return KeyOutcome::default();
+        }
         if self.use_composition {
             self.composition_backspace()
         } else {
