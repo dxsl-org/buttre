@@ -186,7 +186,7 @@ pub(crate) fn method_prop_list(current: &str) -> Value<'static> {
     props.push(build_property(
         CONFIG_KEY,
         PROP_TYPE_NORMAL,
-        "Cấu hình",
+        "Cấu hình Buttre...",
         PROP_STATE_UNCHECKED,
     ));
     prop_list(props)
