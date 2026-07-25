@@ -15,6 +15,7 @@ Usage:
 Exit code 0 = all scenarios pass. Used manually today; wired into the CI
 ibus-smoke job in the ci workflow (plan phase 5).
 """
+import os
 import sys
 import gi
 gi.require_version("IBus", "1.0")
@@ -47,7 +48,11 @@ def pump(ms=150):
 
 def key(keyval, state=0):
     handled = ic.process_key_event(keyval, 0, state)
-    pump(120)
+    # 120ms is enough on a bare Linux box; CI's xvfb + shared runner adds
+    # scheduling jitter to the signal round-trip, so give it more margin
+    # there (found via a real CI failure: zero preedit signals observed for
+    # a sequence that reproduces cleanly outside CI every time).
+    pump(300 if os.environ.get("CI") else 120)
     return handled
 
 def type_str(s):
@@ -112,7 +117,7 @@ ok = commits() == ["chào"] and h_enter is False
 results.append(("F Enter commits 'chào' + passes", ok, commits(), h_enter))
 
 # --- Scenario G (B5): tray-side method switch applies to the live engine ---
-import os, pathlib
+import pathlib
 method_file = pathlib.Path(os.path.expanduser("~/.config/buttre/method"))
 method_file.parent.mkdir(parents=True, exist_ok=True)
 
