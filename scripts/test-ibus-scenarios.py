@@ -17,9 +17,12 @@ ibus-smoke job in the ci workflow (plan phase 5).
 """
 import os
 import sys
+import time
 import gi
 gi.require_version("IBus", "1.0")
 from gi.repository import IBus, GLib
+
+T0 = time.monotonic()
 
 IBUS_RELEASE_MASK = 1 << 30
 CONTROL_MASK = 1 << 2
@@ -34,8 +37,17 @@ ic = bus.create_input_context("buttre-scenarios")
 ic.set_capabilities(IBus.Capabilite.PREEDIT_TEXT | IBus.Capabilite.FOCUS)
 
 events = []
-ic.connect("update-preedit-text", lambda _ic, text, cursor, visible: events.append(("preedit", text.get_text(), visible)))
-ic.connect("commit-text", lambda _ic, text: events.append(("commit", text.get_text())))
+
+def on_preedit(_ic, text, cursor, visible):
+    events.append(("preedit", text.get_text(), visible))
+    print(f"[+{time.monotonic()-T0:6.3f}s] preedit {text.get_text()!r} visible={visible}", file=sys.stderr)
+
+def on_commit(_ic, text):
+    events.append(("commit", text.get_text()))
+    print(f"[+{time.monotonic()-T0:6.3f}s] commit {text.get_text()!r}", file=sys.stderr)
+
+ic.connect("update-preedit-text", on_preedit)
+ic.connect("commit-text", on_commit)
 
 ic.focus_in()
 ic.set_engine("buttre")
@@ -47,12 +59,15 @@ def pump(ms=150):
     loop.run()
 
 def key(keyval, state=0):
+    print(f"[+{time.monotonic()-T0:6.3f}s] key {keyval:#x} state={state:#x}", file=sys.stderr)
     handled = ic.process_key_event(keyval, 0, state)
-    # 120ms is enough on a bare Linux box; CI's xvfb + shared runner adds
-    # scheduling jitter to the signal round-trip, so give it more margin
-    # there (found via a real CI failure: zero preedit signals observed for
-    # a sequence that reproduces cleanly outside CI every time).
-    pump(300 if os.environ.get("CI") else 120)
+    # 120ms is plenty on a bare Linux box (verified: 6/6 clean runs locally,
+    # including under real Xvfb matching CI's setup exactly, even pinned to
+    # a single CPU core). GitHub Actions' shared runners have reproduced a
+    # failure that 300ms didn't fix — root cause not yet confirmed, so this
+    # run also logs a per-event timeline (stderr) to diagnose from the CI
+    # log directly rather than guessing at another margin blindly.
+    pump(1000 if os.environ.get("CI") else 120)
     return handled
 
 def type_str(s):
@@ -86,10 +101,23 @@ events.clear()
 type_str("hoaf")
 before = visible_preedits()[-1] if visible_preedits() else None
 h_bs = key(0xFF08)
-after = [e for e in events if e[0] == "preedit"][-1][1]
-# buttre applies modern orthography: hoaf -> "hòa" (not "hoà")
-ok = before == "hòa" and h_bs is True and len(after) < len(before) and commits() == []
-results.append(("C backspace shrinks preedit, no commit", ok, before, after))
+preedits_after_bs = [e for e in events if e[0] == "preedit"]
+# Guarded (not a bare [-1] index): a prior CI-only failure hit zero preedit
+# events here with no local repro (6/6 clean runs, incl. real Xvfb and a
+# single-pinned CPU core) — surface full diagnostics instead of crashing so
+# every later scenario (D-G) still runs and reports in the same CI attempt.
+after = preedits_after_bs[-1][1] if preedits_after_bs else None
+ok = (
+    before == "hòa"
+    and h_bs is True
+    and after is not None
+    and before is not None
+    and len(after) < len(before)
+    and commits() == []
+)
+results.append(
+    ("C backspace shrinks preedit, no commit", ok, before, after, events if after is None else None)
+)
 key(0xFF1B)  # escape -> commit pending, clean state
 events.clear()
 
