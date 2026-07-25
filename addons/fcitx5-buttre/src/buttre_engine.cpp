@@ -66,6 +66,17 @@ public:
             return;
         }
         refreshMethodFromSharedFile();
+        /* Ctrl/Alt/Super combos (copy, paste, save, window shortcuts) carry
+         * no modifier info through bt_engine_process_keysym (keysym-only
+         * ABI), so process_keysym would compose the bare letter and this
+         * addon would swallow every shortcut. Commit whatever is pending —
+         * same rule the ibus/wayland backends apply
+         * (ibus.rs::is_control_combo) — then let the combo reach the
+         * client untouched. */
+        if (keyEvent.rawKey().states().testAny(fcitx::KeyState::Ctrl_Alt_Super)) {
+            applyResult(keyEvent.inputContext(), bt_engine_flush(engine_));
+            return;
+        }
         const BtKeyResult result = bt_engine_process_keysym(
             engine_, static_cast<uint32_t>(keyEvent.rawKey().sym()));
         applyResult(keyEvent.inputContext(), result);
@@ -80,6 +91,12 @@ public:
     void activate(const fcitx::InputMethodEntry & /*entry*/,
                   fcitx::InputContextEvent & /*event*/) override {
         refreshMethodFromSharedFile();
+        /* One engine_ handle serves every input context (fcitx5 creates one
+         * engine instance per addon, not per IC) — without this, a
+         * composition left pending when a window closed without
+         * deactivate() (or reset() not delivered) would leak into the next
+         * focused window's first keystroke. */
+        bt_engine_reset(engine_);
     }
 
     /* Focus is leaving: commit the pending word (never drop typed text). */

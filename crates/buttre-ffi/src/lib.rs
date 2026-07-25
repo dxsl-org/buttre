@@ -147,10 +147,26 @@ unsafe fn method_from_ptr<'a>(method: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(method) }.to_str().ok()
 }
 
+/// Built-in method ids — mirrors
+/// `platforms::linux::method_sync::KNOWN_METHODS`, which isn't reachable
+/// from here off Linux (gated behind `cfg(platform_linux)`, not the plain
+/// `cfg(target_os = "linux")` this crate can see everywhere).
+const BUILTIN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
+
 /// The boundary validation for method ids: `build_keyboard` is lenient
 /// (unknown → telex fallback), so bogus ids must be rejected HERE for
-/// `bt_engine_set_method` to honestly report failure. Delegates to the sync
-/// channel's canonical rule (built-ins + present custom TOMLs).
+/// `bt_engine_set_method` to honestly report failure — `build_keyboard`
+/// joins the id straight into a path (`engine_bridge.rs`'s
+/// `get_custom_dir().join(format!("{id}.toml"))`) with no guard of its own,
+/// so this is the only checkpoint before a `..`/separator id ever reaches
+/// that join.
+///
+/// On Linux this delegates to the sync channel's canonical rule. Off Linux
+/// (no fcitx host — the addon never runs there, but this crate still builds
+/// and its tests still run in CI) the same rule is reconstructed from
+/// `buttre-core` directly: a built-in, or a syntactically-safe id
+/// (non-empty, no path separator, no `..`, lowercase) whose `{id}.toml`
+/// actually exists in the custom keyboards dir.
 fn method_is_known(id: &str) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -158,9 +174,14 @@ fn method_is_known(id: &str) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // Non-Linux builds of this crate have no fcitx host; keep the
-        // lenient engine behaviour rather than duplicate the rule.
-        !id.is_empty()
+        BUILTIN_METHODS.contains(&id)
+            || (!id.is_empty()
+                && !id.contains(['/', '\\'])
+                && !id.contains("..")
+                && id == id.to_lowercase()
+                && buttre_core::vietnamese::get_custom_dir()
+                    .join(format!("{id}.toml"))
+                    .is_file())
     }
 }
 
@@ -404,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn set_method_switches_and_rejects_unknown() {
+    fn set_method_switches() {
         // SAFETY: null is allowed (defaults to telex).
         let id = unsafe { bt_engine_new(std::ptr::null()) };
         let vni = CString::new("vni").unwrap();
@@ -412,9 +433,22 @@ mod tests {
         assert!(unsafe { bt_engine_set_method(id, vni.as_ptr()) });
         let result = type_str(id, "viet65");
         assert_eq!(cstr(result.preedit), "việt");
+        bt_engine_free(id);
+    }
+
+    #[test]
+    fn set_method_rejects_unknown() {
+        // SAFETY: null is allowed (defaults to telex).
+        let id = unsafe { bt_engine_new(std::ptr::null()) };
         let bogus = CString::new("not-a-method").unwrap();
         // SAFETY: pointer from a live CString local, NUL-terminated.
         assert!(!unsafe { bt_engine_set_method(id, bogus.as_ptr()) });
+        // Syntactically-invalid ids (path traversal / separators) must be
+        // rejected on every platform — this is the only checkpoint before
+        // build_keyboard's unguarded path join.
+        let traversal = CString::new("../../../etc/passwd").unwrap();
+        // SAFETY: pointer from a live CString local, NUL-terminated.
+        assert!(!unsafe { bt_engine_set_method(id, traversal.as_ptr()) });
         bt_engine_free(id);
     }
 
