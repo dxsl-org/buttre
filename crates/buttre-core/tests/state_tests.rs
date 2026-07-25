@@ -66,7 +66,9 @@ fn test_default_settings() {
     assert_eq!(settings.input_method, "english");
     assert!(!settings.auto_correct);
     assert!(!settings.shorthand);
-    assert!(!settings.startup);
+    // Autostart defaults ON for a fresh install — an input method is expected
+    // to come back after every login. Existing users keep their saved choice.
+    assert!(settings.startup);
 }
 
 #[test]

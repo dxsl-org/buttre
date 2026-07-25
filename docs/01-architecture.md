@@ -645,14 +645,15 @@ regsvr32 target/release/buttre_platform.dll
 
 ---
 
-### Linux IBus/Fcitx5
+### Linux IBus/Wayland
 
-**Trạng thái**: Đang lên kế hoạch
+**Trạng thái**: Đã hoàn thành cho IBus + Wayland native (v0.7.10+)
 
 **Kiến trúc**:
-- Shared object (.so) được IBus/Fcitx5 tải
-- Giao tiếp D-Bus
-- Core Rust expose qua C FFI
+- **IBus (GNOME/X11)**: Engine đăng ký với IBus daemon, nhận phím qua D-Bus, trả về composition string; custom keyboard TOML tải vào menu IBus radio
+- **Wayland native (sway/Hyprland/KDE)**: Backend `zwp_input_method_v2` cho sway/Hyprland, fallback `zwp_input_method_v1` cho KDE Plasma (KWin không hỗ trợ v2)
+- **Shared bridge**: `crates/buttre-platform/src/shared/engine_bridge.rs` — xử lý keyboard loading, composition modes; 3-surface method sync (panel ↔ tray ↔ config window) qua `platforms/linux/method_sync.rs`
+- **Custom keyboard**: File `~/.local/share/buttre/keyboards/{id}.toml` tải động, constraint: filename lowercase, `metadata.id` nên match stem, GNOME Shell chỉ nhận RegisterProperties lần đầu nên custom TOML thêm mid-session cần engine restart, tên `config.toml` và `-.toml` reserved (menu-key collision)
 
 ---
 

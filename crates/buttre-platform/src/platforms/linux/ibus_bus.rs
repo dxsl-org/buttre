@@ -18,7 +18,8 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer};
+use tokio::sync::Notify;
+use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer, SignalContext};
 
 use super::ibus::ButtreEngine;
 use super::macro_sync;
@@ -137,6 +138,15 @@ struct ButtreFactory {
     /// `macro_sync` watcher — every engine's bridge consults it lazily per
     /// keystroke (`EngineBridge::set_strict_flag`).
     strict: Arc<std::sync::atomic::AtomicBool>,
+    /// `Settings::use_preedit` mirror on the same watcher — each engine reads
+    /// it per keystroke to choose the preedit vs commit-as-you-go model
+    /// (gated on the client's surrounding-text capability).
+    use_preedit: Arc<std::sync::atomic::AtomicBool>,
+    /// Currently focused engine path, shared with every engine and the async
+    /// property-refresh task (`run_engine`). An engine claims it on `focus_in`
+    /// and releases it on `focus_out`; the task emits `RegisterProperties` here
+    /// when the method changes externally so the panel radio follows at once.
+    focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>>,
 }
 
 #[dbus_interface(name = "org.freedesktop.IBus.Factory")]
@@ -162,6 +172,9 @@ impl ButtreFactory {
             self.method_state.clone(),
             self.macros.clone(),
             self.strict.clone(),
+            self.use_preedit.clone(),
+            path.clone(),
+            self.focused.clone(),
         );
         server
             .at(&path, engine)
@@ -215,24 +228,35 @@ pub async fn run_engine() -> Result<()> {
 
     // Tray↔engine method sync (B5): shared state + config-dir watcher.
     let method_state = MethodState::load();
+    // Woken by the watcher on every genuine method change so the refresh task
+    // below re-publishes the panel properties immediately (not just on the next
+    // keystroke). Wired before the watcher starts so no early change is missed.
+    let method_changed = Arc::new(Notify::new());
+    method_state.set_change_notify(method_changed.clone());
     method_sync::spawn_watcher(method_state.clone());
+
+    // Shared focused-engine path (see ButtreFactory::focused).
+    let focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>> = Arc::new(Mutex::new(None));
 
     // Shorthand/gõ tắt (phase-02): shared macro store + its own watcher over
     // macros.toml + settings.toml.
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
-    macro_sync::spawn_watcher(macros.clone(), strict.clone());
+    let use_preedit = macro_sync::load_initial_use_preedit();
+    macro_sync::spawn_watcher(macros.clone(), strict.clone(), use_preedit.clone());
 
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
-    let _connection = ConnectionBuilder::address(addr.as_str())?
+    let connection = ConnectionBuilder::address(addr.as_str())?
         .serve_at(
             "/org/freedesktop/IBus/Factory",
             ButtreFactory {
                 engine_counter: 0,
-                method_state,
+                method_state: method_state.clone(),
                 macros,
                 strict,
+                use_preedit,
+                focused: focused.clone(),
             },
         )?
         .name("org.freedesktop.IBus.buttre")?
@@ -240,6 +264,26 @@ pub async fn run_engine() -> Result<()> {
         .await?;
 
     tracing::info!("buttre registered with ibus-daemon (factory ready)");
+
+    // Property-refresh task (Phase 2): when the method changes externally
+    // (tray menu / config window writes Store B), the watcher wakes
+    // `method_changed`; we re-publish the property list on the focused engine
+    // so the IBus panel radio moves immediately, without waiting for the next
+    // keystroke's `sync_method`. No focused engine ⇒ nothing to emit; the next
+    // `focus_in` republishes with the current method anyway.
+    tokio::spawn(async move {
+        loop {
+            method_changed.notified().await;
+            let method = method_state.method();
+            let target = focused.lock().unwrap().clone();
+            let Some(path) = target else { continue };
+            match SignalContext::new(&connection, &path) {
+                Ok(ctx) => ButtreEngine::publish_method_props(&ctx, &method).await,
+                Err(e) => tracing::warn!("property-refresh: bad signal context: {e}"),
+            }
+        }
+    });
+
     std::future::pending::<()>().await;
     Ok(())
 }

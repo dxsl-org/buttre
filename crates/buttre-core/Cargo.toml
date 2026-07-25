@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 license = "GPL-3.0-only"
 description = "Core processing engine, state management, and language methods for Buttre"
-authors = ["Buttre Contributors"]
+authors = ["DXSL"]
 # Internal workspace crate — never published to crates.io. Also lets
 # cargo-deny's [licenses.private] exempt this GPL-3.0-only crate from the
 # third-party license allow-list check (see root deny.toml).

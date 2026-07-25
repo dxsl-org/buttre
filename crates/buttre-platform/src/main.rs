@@ -112,160 +112,195 @@ fn drain_latest_learning_save(rx: &mpsc::Receiver<LearningFile>) -> Option<Learn
     latest
 }
 
-/// Watch learning.toml's directory for on-disk changes to the file (tray →
-/// "Từ đã học" → user edits and saves). Returns the watcher handle — dropping
-/// it stops the watch, so the caller must keep it alive for the app's
-/// lifetime. `None` (with a log) when the path can't be resolved or the
-/// watch can't be established: hand-edits then simply require a restart,
-/// never an error.
-fn watch_learning_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
-    use notify::{RecursiveMode, Watcher};
-    let path = match LearningStore::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("learning.toml path unresolved, hand-edit reload disabled: {e:?}");
-            return None;
-        }
+/// Bridge a re-arming directory watch (`fs_watch`) to a `()` channel,
+/// filtered to one file name. The DIRECTORY is watched, not the file:
+/// `write_atomic`'s rename replaces the file node, which breaks per-file
+/// watches on some backends — and `fs_watch` additionally survives the
+/// directory itself being deleted and re-created (`Rearmed` counts as a
+/// change: the file may have been rewritten while unwatched). Fire-and-
+/// forget: the watch lives for the process lifetime; on failure it logs
+/// and the feature degrades to requiring a restart, never an error.
+fn watch_single_file(label: &'static str, path: std::path::PathBuf, tx: mpsc::Sender<()>) {
+    use buttre_platform::fs_watch::{spawn_dir_watch, WatchCue};
+    let Some(dir) = path.parent().map(std::path::Path::to_path_buf) else {
+        warn!("{label}: {path:?} has no parent directory, watch disabled");
+        return;
     };
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
-        return None;
-    }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("learning.toml watcher failed, hand-edit reload disabled: {e:?}");
-                return None;
-            }
+    let Some(file_name) = path.file_name().map(std::ffi::OsStr::to_os_string) else {
+        warn!("{label}: {path:?} has no file name, watch disabled");
+        return;
+    };
+    spawn_dir_watch(label, dir, move |cue| {
+        let changed = match cue {
+            WatchCue::Rearmed => true,
+            WatchCue::Event(event) => event
+                .paths
+                .iter()
+                .any(|p| p.file_name() == Some(file_name.as_os_str())),
         };
-    // Watch the DIRECTORY, not the file: `write_atomic`'s rename replaces
-    // the file node, which breaks per-file watches on some backends.
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("learning.toml watch failed, hand-edit reload disabled: {e:?}");
-        return None;
-    }
-    Some(watcher)
+        if changed {
+            let _ = tx.send(());
+        }
+    });
 }
 
-/// Watch macros.toml's directory for on-disk changes (config window / hand
-/// edit) — mirrors `watch_learning_file` exactly, same directory, different
-/// filename. Simpler than the learning watcher: nothing at the TYPING layer
-/// ever writes `macros.toml` (see `buttre_core::state::macros`'s module
-/// doc), so there is no own-write suppression concern for THAT writer.
-/// The config window's "Mở tệp gốc" (`buttre_config::open_in_editor`,
-/// seed-if-missing) is the sole
-/// exception — it fires this same watcher, but reloading an unchanged
-/// (still-empty) file is an idempotent no-op, so no suppression is needed
-/// there either.
-fn watch_macros_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
-    use notify::{RecursiveMode, Watcher};
-    let path = match MacroStore::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("macros.toml path unresolved, hand-edit reload disabled: {e:?}");
-            return None;
-        }
-    };
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
-        return None;
+/// Watch learning.toml for on-disk changes (tray → "Từ đã học" → user edits
+/// and saves): hand-edits apply live instead of requiring a restart.
+fn watch_learning_file(tx: mpsc::Sender<()>) {
+    match LearningStore::get_path() {
+        Ok(path) => watch_single_file("learning-watch", path, tx),
+        Err(e) => warn!("learning.toml path unresolved, hand-edit reload disabled: {e:?}"),
     }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("macros.toml watcher failed, hand-edit reload disabled: {e:?}");
-                return None;
-            }
-        };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("macros.toml watch failed, hand-edit reload disabled: {e:?}");
-        return None;
-    }
-    Some(watcher)
 }
 
-/// Watch settings.toml's directory for on-disk changes (the config window's
-/// "Lưu", or a hand-edit) — same shape as `watch_learning_file`/
-/// `watch_macros_file`. See the call site's comment for how the reader
-/// tells its own writes apart from a genuine external change.
-fn watch_settings_file(tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
-    use notify::{RecursiveMode, Watcher};
-    let path = match Settings::get_path() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("settings.toml path unresolved, hand-edit reload disabled: {e:?}");
-            return None;
+/// Watch macros.toml for on-disk changes (config window / hand edit).
+/// Nothing at the TYPING layer ever writes `macros.toml` (see
+/// `buttre_core::state::macros`'s module doc), so there is no own-write
+/// suppression concern for THAT writer. The config window's "Mở tệp gốc"
+/// (`buttre_config::open_in_editor`, seed-if-missing) is the sole exception
+/// — it fires this same watcher, but reloading an unchanged (still-empty)
+/// file is an idempotent no-op, so no suppression is needed there either.
+fn watch_macros_file(tx: mpsc::Sender<()>) {
+    match MacroStore::get_path() {
+        Ok(path) => watch_single_file("macros-watch", path, tx),
+        Err(e) => warn!("macros.toml path unresolved, hand-edit reload disabled: {e:?}"),
+    }
+}
+
+/// Watch settings.toml for on-disk changes (the config window's "Lưu", or a
+/// hand-edit). See the call site's comment for how the reader tells its own
+/// writes apart from a genuine external change.
+fn watch_settings_file(tx: mpsc::Sender<()>) {
+    match Settings::get_path() {
+        Ok(path) => watch_single_file("settings-watch", path, tx),
+        Err(e) => warn!("settings.toml path unresolved, hand-edit reload disabled: {e:?}"),
+    }
+}
+
+/// Watch the shared method file (`~/.config/buttre/method`) so a switch made
+/// from the IBus panel — which the engine persists there and the tray does not
+/// otherwise observe — reflects in the tray menu and icon. The call site diffs
+/// the file against `AppState` to tell the tray's own writes from a genuine
+/// external change.
+#[cfg(platform_linux)]
+fn watch_method_file(tx: mpsc::Sender<()>) {
+    use buttre_platform::platforms::linux::method_sync;
+    match method_sync::method_file_path() {
+        Some(path) => watch_single_file("method-watch", path, tx),
+        None => warn!("no XDG config directory, IBus-panel method sync disabled"),
+    }
+}
+
+/// Watch the `enabled` file the IBus engine writes on `Enable`/`Disable`
+/// (`~/.config/buttre/enabled`) so the tray mirrors an OS input-source switch
+/// between buttre and English. Same shape as [`watch_method_file`] — a separate
+/// watch on the same config dir, filtered to the `enabled` filename.
+#[cfg(platform_linux)]
+fn watch_enabled_file(tx: mpsc::Sender<()>) {
+    use buttre_platform::platforms::linux::method_sync;
+    match method_sync::enabled_file_path() {
+        Some(path) => watch_single_file("enabled-watch", path, tx),
+        None => warn!("no XDG config directory, IBus enable/disable sync disabled"),
+    }
+}
+
+/// Open the engine's log file (truncated per session so it can't grow
+/// unbounded). ibus-daemon spawns `buttre --ibus` with stdout/stderr on
+/// /dev/null, so without a file sink every engine log line is lost — which
+/// is exactly how a dead file watcher went unnoticed (method-sync debug).
+fn engine_log_file() -> Option<std::fs::File> {
+    let dir = dirs::cache_dir()?.join("buttre");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::File::create(dir.join("engine.log")).ok()
+}
+
+/// Initialize tracing (handles both log crate and tracing crate). Defaults
+/// to INFO when `RUST_LOG` is unset — the previous default (ERROR-only)
+/// made watcher/sync diagnostics invisible in normal runs. The `--ibus`
+/// engine logs to `~/.cache/buttre/engine.log` (its stderr is /dev/null,
+/// see [`engine_log_file`]); everything else keeps stderr.
+fn init_tracing(args: &[String]) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if args.iter().any(|a| a == "--ibus") {
+        if let Some(file) = engine_log_file() {
+            builder
+                .with_writer(Mutex::new(file))
+                .with_ansi(false)
+                .init();
+            return;
         }
-    };
-    let dir = path.parent()?.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("cannot create {dir:?}, hand-edit reload disabled: {e:?}");
-        return None;
     }
-    let file_name = path.file_name()?.to_os_string();
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name() == Some(file_name.as_os_str()))
-                {
-                    let _ = tx.send(());
-                }
+    builder.init();
+}
+
+/// `buttre --doctor`: one-screen diagnosis of which IME path this machine
+/// should use (priority fcitx5 → IBus → Wayland `--ime`) and where the
+/// tri-surface sync state lives. Read-only; safe to run anytime.
+#[cfg(platform_linux)]
+fn run_doctor() {
+    use buttre_platform::platforms::linux::{backend_detect, kwin_ime, method_sync};
+    let probes = backend_detect::probe();
+    println!("buttre {} — doctor\n", env!("CARGO_PKG_VERSION"));
+    println!(
+        "session:  XDG_SESSION_TYPE={} XDG_CURRENT_DESKTOP={}",
+        std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "?".into()),
+        std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "?".into()),
+    );
+    println!(
+        "probes:   fcitx5={} ibus={} wayland={}",
+        probes.fcitx5, probes.ibus, probes.wayland
+    );
+    match backend_detect::pick(probes) {
+        Some(backend_detect::ImeBackend::Fcitx5) => {
+            if backend_detect::fcitx5_addon_installed() {
+                println!(
+                    "backend:  fcitx5 (addon fcitx5-buttre đã cài — chọn \"Buttre\" trong fcitx5)"
+                );
+            } else {
+                println!(
+                    "backend:  fcitx5 (đang chạy) — LƯU Ý: addon fcitx5-buttre CHƯA cài;\n\
+                     \x20         gõ tiếng Việt hiện đi qua ibus/wayland, có thể tranh nguồn gõ với fcitx5"
+                );
             }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("settings.toml watcher failed, hand-edit reload disabled: {e:?}");
-                return None;
-            }
-        };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        warn!("settings.toml watch failed, hand-edit reload disabled: {e:?}");
-        return None;
+        }
+        Some(backend_detect::ImeBackend::IBus) => {
+            println!("backend:  ibus (engine: buttre --ibus)")
+        }
+        Some(backend_detect::ImeBackend::WaylandIme) => {
+            println!("backend:  wayland (compositor-managed: buttre --ime)");
+        }
+        None => println!("backend:  không phát hiện được đường IME nào (X11 không daemon?)"),
     }
-    Some(watcher)
+    println!(
+        "kwinrc:   [Wayland] InputMethod = {}",
+        kwin_ime::kwinrc_input_method().unwrap_or_else(|| "(không đặt)".into())
+    );
+    println!(
+        "state:    method={:?} enabled={} (files trong ~/.config/buttre/)",
+        method_sync::read_method(),
+        method_sync::read_enabled(),
+    );
+    match Settings::get_path() {
+        Ok(p) => println!("settings: {}", p.display()),
+        Err(e) => println!("settings: không resolve được đường dẫn: {e}"),
+    }
+}
+
+#[cfg(not(platform_linux))]
+fn run_doctor() {
+    println!("buttre --doctor hiện chỉ hỗ trợ Linux.");
 }
 
 fn main() -> Result<()> {
-    // Initialize tracing (handles both log crate and tracing crate)
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     // Informational flags are handled before ANY backend or UI setup: they
     // need no display, and letting them fall through to the tray path below
     // panics on Linux (the tray builds a GTK menu). Unknown flags still start
     // the tray, matching prior behaviour; `--ibus`/`--ime`/`--config` are
     // matched further down.
     let args: Vec<String> = std::env::args().collect();
+    init_tracing(&args);
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("buttre {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -279,10 +314,15 @@ fn main() -> Result<()> {
              --ibus      Run as the IBus engine (spawned by ibus-daemon, not by hand)\n  \
              --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
              --config    Open the settings window\n  \
+             --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \
              --version   Print version and exit\n  \
              --help      Print this help and exit",
             ver = env!("CARGO_PKG_VERSION")
         );
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--doctor") {
+        run_doctor();
         return Ok(());
     }
 
@@ -400,11 +440,18 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new()?;
 
-    // We need a hidden window for the event loop to work properly on some platforms/configs
-    use winit::window::WindowBuilder;
-    let _window = WindowBuilder::new()
-        .with_visible(false)
-        .build(&event_loop)?;
+    // A hidden window keeps the event loop serviced on Windows/macOS (win32
+    // message pump). NOT created on Linux: the loop runs windowless there —
+    // menu/tray events arrive via the GTK pump below — and KDE Plasma lists
+    // even an invisible winit window as a ghost taskbar entry ("buttre" with
+    // no window), while GNOME merely hides it.
+    #[cfg(not(target_os = "linux"))]
+    let _window = {
+        use winit::window::WindowBuilder;
+        WindowBuilder::new()
+            .with_visible(false)
+            .build(&event_loop)?
+    };
 
     // tray-icon and muda render the tray menu through GTK on Linux, so GTK
     // must be initialised on this (the tray-owning) thread BEFORE any menu or
@@ -434,13 +481,19 @@ fn main() -> Result<()> {
         ..
     } = menu_items;
 
-    // Re-apply autostart registration while the setting is on: the exe path
-    // may have changed since it was registered (update/move), and re-writing
-    // the same entry is idempotent. Failure is a warning, never fatal.
-    if settings.startup {
-        if let Err(e) = buttre_autostart::set_enabled(true) {
-            warn!("autostart re-registration failed: {e:?}");
-        }
+    // Reconcile autostart registration with the saved setting, both ways.
+    // ON: the exe path may have changed since registration (update/move).
+    // OFF: a stale enabled entry may still exist — e.g. written by an older
+    // build whose config window didn't unregister, or by a packaged
+    // /etc/xdg/autostart entry — and without re-masking here that entry
+    // relaunches the tray at every login forever, making the "Tự động khởi
+    // động" toggle look dead. Re-writing either state is idempotent.
+    // Failure is a warning, never fatal.
+    if let Err(e) = buttre_autostart::set_enabled(settings.startup) {
+        warn!(
+            "autostart reconciliation (set_enabled({})) failed: {e:?}",
+            settings.startup
+        );
     }
 
     // --- Tray Setup ---
@@ -482,7 +535,7 @@ fn main() -> Result<()> {
     // `learning_reload_pending` carries a suppressed-but-real external edit
     // over to a later iteration instead of dropping it.
     let (learning_file_tx, learning_file_rx) = mpsc::channel::<()>();
-    let _learning_watcher = watch_learning_file(learning_file_tx);
+    watch_learning_file(learning_file_tx);
     let mut last_own_save = std::time::Instant::now();
     let mut learning_reload_pending = false;
 
@@ -501,7 +554,7 @@ fn main() -> Result<()> {
         keyboard_manager.set_macros(macros_store.clone());
     }
     let (macros_file_tx, macros_file_rx) = mpsc::channel::<()>();
-    let _macros_watcher = watch_macros_file(macros_file_tx);
+    watch_macros_file(macros_file_tx);
 
     // Strict-spelling control ("Kiểm soát gắt gao chính tả tiếng Việt") —
     // remembered by the manager and re-applied on every method switch, so
@@ -617,8 +670,59 @@ fn main() -> Result<()> {
     // different means a genuine external change (config window), apply it.
     // This avoids the "external edit racing our own autosave gets silently
     // dropped" gap a fixed suppression window would have.
+    // Mirror of the "Thoát" handler below: quitting the tray switches
+    // KWin's IME off (stopping the background `--ime` respawn), so tray
+    // startup switches it back on — relaunching the tray restores typing
+    // on Plasma Wayland. No-op everywhere else.
+    #[cfg(platform_linux)]
+    buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(true);
+
+    // Log which IME path this machine should be on (fcitx5 → ibus →
+    // wayland) and flag the one conflict we can detect: fcitx5 running
+    // while buttre serves typing through another daemon.
+    #[cfg(platform_linux)]
+    {
+        use buttre_platform::platforms::linux::backend_detect;
+        let probes = backend_detect::probe();
+        info!(
+            "IME backend probes: {probes:?} -> {:?}",
+            backend_detect::pick(probes)
+        );
+        if probes.fcitx5 && !backend_detect::fcitx5_addon_installed() {
+            warn!(
+                "fcitx5 đang chạy nhưng addon fcitx5-buttre chưa được cài — nguồn gõ \
+                 có thể xung đột; chạy `buttre --doctor` để xem chi tiết"
+            );
+        }
+    }
+
     let (settings_file_tx, settings_file_rx) = mpsc::channel::<()>();
-    let _settings_watcher = watch_settings_file(settings_file_tx);
+    watch_settings_file(settings_file_tx);
+
+    // Watch the IBus-shared method file so a panel-side switch (persisted there
+    // by the engine, never in settings.toml) reflects in the tray. Linux-only.
+    #[cfg(platform_linux)]
+    let (method_file_tx, method_file_rx) = mpsc::channel::<()>();
+    #[cfg(platform_linux)]
+    watch_method_file(method_file_tx);
+
+    // Watch the engine's `enabled` file so an OS input-source switch between
+    // buttre and English reflects in the tray (icon/menu). Linux-only.
+    #[cfg(platform_linux)]
+    let (enabled_file_tx, enabled_file_rx) = mpsc::channel::<()>();
+    #[cfg(platform_linux)]
+    watch_enabled_file(enabled_file_tx);
+
+    // Method stashed by the enabled-file mirror when IT flips the tray to
+    // English on an OS input-source switch away from buttre. "english" is a
+    // real Store-B id now (engine passthrough), so the mirror's own
+    // `set_method("english")` overwrites Store B — without this stash the
+    // re-enable branch could only read back "english" and the user's real
+    // Vietnamese method would be lost across an OS round-trip. `None` whenever
+    // the last disable was NOT mirror-initiated (e.g. the user picked English
+    // themselves, which must persist across the round-trip).
+    #[cfg(platform_linux)]
+    let mut os_disable_stash: Option<String> = None;
 
     // --- Event Loop ---
     let menu_channel = muda::MenuEvent::receiver();
@@ -632,7 +736,18 @@ fn main() -> Result<()> {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => elwt.exit(),
+            } => {
+                // The only winit window is the hidden event-loop helper. KWin
+                // can still deliver a close for it (task switcher / session
+                // manager) — observed on Plasma 6 killing the tray silently
+                // ~10 min into the session, leaving a zombie SNI icon; GNOME
+                // never sends one. The tray must exit only via "Thoát" (or a
+                // signal), so on Linux the close is ignored.
+                #[cfg(not(target_os = "linux"))]
+                elwt.exit();
+                #[cfg(target_os = "linux")]
+                info!("CloseRequested on the hidden helper window ignored (tray exits via menu)");
+            }
 
             Event::AboutToWait => {
                 // Service GTK on Linux: the tray icon and its menu live on the
@@ -841,6 +956,70 @@ fn main() -> Result<()> {
                     }
                 }
 
+                // The IBus panel persists a method switch to the shared method
+                // file (not settings.toml), so drain that watcher and apply any
+                // genuine change through the same `set_method` path the tray's
+                // own menu uses. Pre-compare against AppState suppresses our own
+                // writes: `set_method` → LinuxBackend re-writes the file with the
+                // SAME value → this watcher refires → `disk == known` ⇒ ignored;
+                // the settings.toml write it also triggers is likewise a no-op
+                // for the settings watcher (AppState already matches).
+                //
+                // `disk` is any KNOWN_METHODS id — telex/vni/nom, or "english"
+                // since the passthrough method landed (panel "English" radio,
+                // the tray's own echo, or the enabled-mirror below). Comparing
+                // against AppState's current method (which may be a custom
+                // TOML id) is deliberate: a method picked from the IBus panel
+                // always wins and the tray adopts it, in either direction
+                // (English → Vietnamese and Vietnamese → English).
+                #[cfg(platform_linux)]
+                if method_file_rx.try_iter().count() > 0 {
+                    use buttre_platform::platforms::linux::method_sync;
+                    let known = app_state.lock().unwrap().settings().input_method.clone();
+                    let disk = method_sync::read_method();
+                    if disk != known {
+                        info!("method file changed externally — applying {disk}");
+                        if let Err(e) = app_state.lock().unwrap().set_method(&disk) {
+                            error!("Failed to apply external method change: {e:?}");
+                        }
+                    }
+                }
+
+                // The engine writes `enabled` on IBus Enable/Disable — an OS
+                // input-source switch between buttre and another source. Mirror
+                // it in the tray: disabled ⇒ show English; re-enabled ⇒ restore
+                // the method stashed at disable time (see `os_disable_stash` —
+                // `set_method("english")` writes Store B since english became a
+                // real passthrough id, so Store B alone no longer remembers the
+                // pre-disable method). Own-write suppression: only the ENGINE
+                // writes this file; the Store-B write that set_method triggers
+                // refires the METHOD watcher above, where disk == AppState
+                // suppresses it.
+                #[cfg(platform_linux)]
+                if enabled_file_rx.try_iter().count() > 0 {
+                    use buttre_platform::platforms::linux::method_sync;
+                    let enabled = method_sync::read_enabled();
+                    let known_method = app_state.lock().unwrap().settings().input_method.clone();
+                    let known_enabled = known_method != "english";
+                    if enabled != known_enabled {
+                        let target = if enabled {
+                            // No stash ⇒ the disable wasn't mirror-initiated
+                            // (user picked English explicitly): keep whatever
+                            // Store B says — which is exactly that choice.
+                            os_disable_stash
+                                .take()
+                                .unwrap_or_else(method_sync::read_method)
+                        } else {
+                            os_disable_stash = Some(method_sync::read_method());
+                            "english".to_string()
+                        };
+                        info!("engine enabled={enabled} — tray applying method {target}");
+                        if let Err(e) = app_state.lock().unwrap().set_method(&target) {
+                            error!("Failed to apply engine enable/disable: {e:?}");
+                        }
+                    }
+                }
+
                 if let Some(action) = hotkey_manager.check_hotkey() {
                     match action {
                         HotkeyAction::Toggle => {
@@ -884,6 +1063,12 @@ fn main() -> Result<()> {
                 // Menu events
                 if let Ok(event) = menu_channel.try_recv() {
                     if event.id == thoat_item.id() {
+                        // "Thoát" must stop typing too, not just the tray:
+                        // on Plasma Wayland KWin owns and RESPAWNS the
+                        // `--ime` engine, so tell it to switch the IME off
+                        // (best-effort; startup re-enables it).
+                        #[cfg(platform_linux)]
+                        buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(false);
                         elwt.exit();
                     } else if event.id == nom_item.id() {
                         let _ = app_state.lock().unwrap().set_method("nom");

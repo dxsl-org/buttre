@@ -1,5 +1,6 @@
 //! Tray icon management for buttre application
 
+use crate::shared::ui::menu::MethodMenuItem;
 use crate::shared::ui::{
     load_icon_from_bytes, CUSTOM_ICON_BYTES, ENGLISH_ICON_BYTES, NOM_ICON_BYTES, TELEX_ICON_BYTES,
     VIETNAMESE_ICON_BYTES, VNI_ICON_BYTES,
@@ -16,7 +17,7 @@ use tray_icon::{Icon as TrayIcon, TrayIconBuilder};
 pub fn create_tray_icon(
     menu: &muda::Menu,
     settings: &Settings,
-    custom_items: &[(MethodMetadata, muda::IconMenuItem)],
+    custom_items: &[(MethodMetadata, MethodMenuItem)],
 ) -> Result<(
     tray_icon::TrayIcon,
     TrayIcon, // telex_icon
@@ -75,7 +76,7 @@ pub fn create_tray_icon(
 }
 
 /// Get tooltip text for a given input method
-pub fn get_tooltip(method: &str, custom_items: &[(MethodMetadata, muda::IconMenuItem)]) -> String {
+pub fn get_tooltip(method: &str, custom_items: &[(MethodMetadata, MethodMenuItem)]) -> String {
     match method {
         "english" => "buttre\nEnglish".to_string(),
         "telex" => "buttre\nChữ Việt\nTELEX".to_string(),
@@ -99,7 +100,7 @@ pub fn get_tooltip(method: &str, custom_items: &[(MethodMetadata, muda::IconMenu
 #[allow(clippy::too_many_arguments)]
 pub fn get_icon_for_method(
     method: &str,
-    custom_items: &[(MethodMetadata, muda::IconMenuItem)],
+    custom_items: &[(MethodMetadata, MethodMenuItem)],
     telex_icon: &TrayIcon,
     vni_icon: &TrayIcon,
     english_icon: &TrayIcon,

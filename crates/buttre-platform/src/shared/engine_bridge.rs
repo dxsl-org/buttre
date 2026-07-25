@@ -19,6 +19,18 @@ use buttre_core::{Action, Keyboard, KeyboardBuilder};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// One candidate offered for the current composition (Nôm lookup). Decoupled
+/// from the engine's `Candidate` so backends depend only on this bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateView {
+    /// Shown in the candidate UI — the character plus its gloss, e.g.
+    /// `"𡗶 (trời)"`.
+    pub display: String,
+    /// Committed when this candidate is chosen — the bare character, e.g.
+    /// `"𡗶"` (the engine `Candidate`'s `get_value()`).
+    pub value: String,
+}
+
 /// One IME-visible operation, in emission order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImeOp {
@@ -26,6 +38,22 @@ pub enum ImeOp {
     Preedit(String),
     /// Commit text to the application.
     Commit(String),
+    /// Show/replace the candidate list (Nôm) with `cursor` highlighted. Empty
+    /// is never emitted — use [`ImeOp::HideCandidates`] to clear. `cursor` is a
+    /// GLOBAL index into `items`; the backend's page size decides which page is
+    /// shown. Backends without a candidate UI (Wayland, macOS today) ignore it.
+    Candidates {
+        items: Vec<CandidateView>,
+        cursor: usize,
+    },
+    /// Hide the candidate list.
+    HideCandidates,
+    /// Delete `n` characters immediately before the cursor from ALREADY
+    /// COMMITTED text (no-preedit / commit-as-you-go mode). Emitted only when
+    /// composition is off; a backend without an in-place delete primitive must
+    /// never receive it — the IBus engine only turns composition off after
+    /// confirming the client advertises surrounding-text support.
+    DeleteSurrounding(usize),
 }
 
 /// Result of feeding one event to the bridge.
@@ -41,17 +69,59 @@ pub struct KeyOutcome {
 /// panic here would kill the host process outright. Callers decide whether
 /// to keep the current keyboard, fall back, or report failure.
 ///
-/// Nôm runs WITHOUT its dictionary here: the candidate UI isn't wired on
-/// either Linux backend yet, so lookups would produce actions we drop.
-fn build_keyboard(method: &str) -> Option<Keyboard> {
+/// Nôm loads its dictionary from the discovered `buttre_nom.db` (the same path
+/// resolver the Windows TSF host uses) so lookups produce candidates for the
+/// IBus lookup table. A missing db degrades to no-candidate Nôm rather than
+/// failing the build — `get_nom_db_path` returns `None` and
+/// `nom_with_composition` runs dictionary-less. Telex/VNI ignore the path.
+///
+/// `use_composition` selects the preedit (underline) model vs the no-preedit
+/// diff model (`Replace`/`Commit`). Nôm ALWAYS composes regardless — its
+/// candidate popup needs a preedit anchor — so the flag only affects Telex/VNI.
+///
+/// A non-built-in `method` is a CUSTOM keyboard id: its config is loaded from
+/// `keyboards/{method}.toml` (the id was admitted into the sync channel by
+/// `method_sync::is_engine_method_in`, which stat'ed that exact file). A TOML
+/// deleted or broken between admission and this build degrades to Telex — the
+/// same fallback the sync channel's read path uses — rather than failing.
+fn build_keyboard(method: &str, use_composition: bool) -> Option<Keyboard> {
+    let composition = method == "nom" || use_composition;
     let result = match method {
-        "vni" => KeyboardBuilder::vni_with_composition(true),
-        "nom" => KeyboardBuilder::nom_with_composition(None, true),
-        _ => KeyboardBuilder::telex_with_composition(true),
+        "telex" => KeyboardBuilder::telex_with_composition(composition),
+        "vni" => KeyboardBuilder::vni_with_composition(composition),
+        "nom" => KeyboardBuilder::nom_with_composition(
+            buttre_core::vietnamese::get_nom_db_path(),
+            composition,
+        ),
+        custom => match load_custom_config(custom) {
+            Some(config) => KeyboardBuilder::new()
+                .with_config(config)
+                .with_composition(composition)
+                .build(),
+            None => KeyboardBuilder::telex_with_composition(composition),
+        },
     };
     result
         .map_err(|e| tracing::warn!("build_keyboard({method}): {e}"))
         .ok()
+}
+
+/// Load a custom keyboard's `Config` from `keyboards/{id}.toml`, `None` (with
+/// a warning) when the file is missing or unparseable. Split from
+/// [`build_keyboard`] so the fallback decision stays readable there.
+fn load_custom_config(id: &str) -> Option<buttre_core::Config> {
+    let path = buttre_core::vietnamese::get_custom_dir().join(format!("{id}.toml"));
+    let Some(path_str) = path.to_str() else {
+        tracing::warn!("custom keyboard path {path:?} is not UTF-8, falling back to telex");
+        return None;
+    };
+    match buttre_core::Config::load(path_str) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::warn!("custom keyboard {id:?} failed to load ({e}), falling back to telex");
+            None
+        }
+    }
 }
 
 pub struct EngineBridge {
@@ -74,6 +144,32 @@ pub struct EngineBridge {
     /// Last value pushed into the live `Keyboard` (see
     /// `VietnameseEngine::strict_applied` — same cheap-compare pattern).
     strict_applied: bool,
+    /// Candidates for the current composition (Nôm). Mirrors what the engine
+    /// last emitted via `Action::ShowCandidates`, so a backend can select one
+    /// by index ([`Self::select_candidate`]) without re-querying. Empty when no
+    /// candidate list is showing. Always empty for Telex/VNI.
+    candidates: Vec<CandidateView>,
+    /// Highlighted candidate — a global index into `candidates`, moved by the
+    /// cursor/page navigation methods. Meaningless (always 0) when `candidates`
+    /// is empty.
+    cursor: usize,
+    /// The current method id (`"telex"`/`"vni"`/`"nom"`), needed to rebuild the
+    /// keyboard when [`Self::set_use_composition`] toggles the preedit model and
+    /// to keep Nôm on composition regardless of that toggle.
+    method: String,
+    /// Whether the active keyboard uses the preedit (underline) model. Always
+    /// `true` at construction (macOS/Wayland/Windows and the IBus default);
+    /// only the IBus engine flips it off via [`Self::set_use_composition`] once
+    /// the client is confirmed to support in-place deletion. Nôm ignores it.
+    use_composition: bool,
+    /// English/passthrough mode (`method == "english"`): the bridge stops
+    /// composing entirely — every key returns unhandled with no ops, so the
+    /// raw keystroke reaches the app. This is how "tắt bộ gõ" works WITHOUT
+    /// touching the OS input source (Unikey model): the engine stays the
+    /// active IBus engine, it just goes silent. The `keyboard` field keeps its
+    /// last real build (never consulted while passthrough) so no call path
+    /// has to handle a missing keyboard.
+    passthrough: bool,
 }
 
 impl EngineBridge {
@@ -82,8 +178,8 @@ impl EngineBridge {
     /// engine process; only a telex-build failure — the hardcoded default,
     /// meaning the whole app is unusable — is treated as unrecoverable.
     pub fn new(method: &str) -> Self {
-        let keyboard = build_keyboard(method)
-            .or_else(|| build_keyboard("telex"))
+        let keyboard = build_keyboard(method, true)
+            .or_else(|| build_keyboard("telex", true))
             .expect("the built-in telex keyboard must always build");
         Self {
             keyboard,
@@ -91,6 +187,11 @@ impl EngineBridge {
             macros: None,
             strict_spelling: None,
             strict_applied: false,
+            candidates: Vec::new(),
+            cursor: 0,
+            method: method.to_string(),
+            use_composition: true,
+            passthrough: method == "english",
         }
     }
 
@@ -98,8 +199,8 @@ impl EngineBridge {
     /// at construction, and remembers it so [`Self::rebuild`] can re-apply
     /// it to every subsequent `Keyboard`.
     pub fn new_with_macros(method: &str, macros: Arc<Mutex<MacroStore>>) -> Self {
-        let mut keyboard = build_keyboard(method)
-            .or_else(|| build_keyboard("telex"))
+        let mut keyboard = build_keyboard(method, true)
+            .or_else(|| build_keyboard("telex", true))
             .expect("the built-in telex keyboard must always build");
         keyboard.set_macros(macros.clone());
         Self {
@@ -108,6 +209,11 @@ impl EngineBridge {
             macros: Some(macros),
             strict_spelling: None,
             strict_applied: false,
+            candidates: Vec::new(),
+            cursor: 0,
+            method: method.to_string(),
+            use_composition: true,
+            passthrough: method == "english",
         }
     }
 
@@ -115,11 +221,16 @@ impl EngineBridge {
     /// — the macOS host decides what to do when `buttre_engine_new` fails.
     pub fn try_new(method: &str) -> Option<Self> {
         Some(Self {
-            keyboard: build_keyboard(method)?,
+            keyboard: build_keyboard(method, true)?,
             preedit: String::new(),
             macros: None,
             strict_spelling: None,
             strict_applied: false,
+            candidates: Vec::new(),
+            cursor: 0,
+            method: method.to_string(),
+            use_composition: true,
+            passthrough: method == "english",
         })
     }
 
@@ -128,7 +239,7 @@ impl EngineBridge {
     /// so the store-holding path compiles and is ready for that host to
     /// adopt without another `EngineBridge` change.
     pub fn try_new_with_macros(method: &str, macros: Arc<Mutex<MacroStore>>) -> Option<Self> {
-        let mut keyboard = build_keyboard(method)?;
+        let mut keyboard = build_keyboard(method, true)?;
         keyboard.set_macros(macros.clone());
         Some(Self {
             keyboard,
@@ -136,6 +247,11 @@ impl EngineBridge {
             macros: Some(macros),
             strict_spelling: None,
             strict_applied: false,
+            candidates: Vec::new(),
+            cursor: 0,
+            method: method.to_string(),
+            use_composition: true,
+            passthrough: method == "english",
         })
     }
 
@@ -165,24 +281,45 @@ impl EngineBridge {
         }
     }
 
-    /// Switch input method, discarding any live composition (a mode switch
-    /// is a reset by definition). Returns `None` — keyboard unchanged — when
-    /// the requested method fails to build, so `set_method` can report the
-    /// failure rather than silently switching to something else or crashing.
-    pub fn rebuild(&mut self, method: &str) -> Option<KeyOutcome> {
-        let mut keyboard = build_keyboard(method)?;
-        // A fresh `Keyboard` always starts with no store attached — without
-        // this, a method switch would silently disable shorthand until the
-        // next macro_sync reload happened to fire (same reason
-        // `KeyboardManager` re-injects `learning` on method switch).
+    /// Drop any showing candidate list, yielding a `HideCandidates` op only
+    /// when one was actually showing — callers append it to their outcome so a
+    /// reset/commit/method-switch never leaves a stale popup on screen.
+    fn clear_candidates_op(&mut self) -> Option<ImeOp> {
+        if self.candidates.is_empty() {
+            None
+        } else {
+            self.candidates.clear();
+            self.cursor = 0;
+            Some(ImeOp::HideCandidates)
+        }
+    }
+
+    /// The `Candidates` op for the current list + cursor. Callers only build it
+    /// when `candidates` is non-empty (the variant is never emitted empty).
+    fn candidates_op(&self) -> ImeOp {
+        ImeOp::Candidates {
+            items: self.candidates.clone(),
+            cursor: self.cursor,
+        }
+    }
+
+    /// Install a freshly built keyboard, re-applying the shorthand store and
+    /// strict-spelling choice — a new `Keyboard` always starts store-less and
+    /// lenient, so without this a method or preedit-model switch would silently
+    /// drop both until the next `macro_sync` reload happened to fire. Shared by
+    /// [`Self::rebuild`] and [`Self::set_use_composition`].
+    fn install_keyboard(&mut self, mut keyboard: Keyboard) {
         if let Some(store) = &self.macros {
             keyboard.set_macros(store.clone());
         }
         self.keyboard = keyboard;
-        // A fresh `Keyboard` always starts lenient — force the next
-        // `process_char` sync to re-push the user's strict-spelling choice.
         self.strict_applied = false;
         self.sync_strict_spelling();
+    }
+
+    /// Build the outcome that clears any live preedit + candidate popup after a
+    /// keyboard swap (method or preedit-model change resets composition).
+    fn reset_outcome(&mut self) -> KeyOutcome {
         let mut outcome = KeyOutcome {
             ops: Vec::new(),
             handled: true,
@@ -191,11 +328,69 @@ impl EngineBridge {
             self.preedit.clear();
             outcome.ops.push(ImeOp::Preedit(String::new()));
         }
-        Some(outcome)
+        if let Some(op) = self.clear_candidates_op() {
+            outcome.ops.push(op);
+        }
+        outcome
     }
 
-    /// Feed one character. The engine classifies separators itself.
+    /// Switch input method, discarding any live composition (a mode switch
+    /// is a reset by definition). Returns `None` — keyboard unchanged — when
+    /// the requested method fails to build, so `set_method` can report the
+    /// failure rather than silently switching to something else or crashing.
+    /// The new keyboard keeps the current preedit model (`use_composition`),
+    /// except Nôm which always composes.
+    ///
+    /// `"english"` needs no keyboard build at all: it flips [`Self::passthrough`]
+    /// on and keeps the previous keyboard idle (see the field doc) — so it can
+    /// never fail, and switching back to a real method clears the flag.
+    pub fn rebuild(&mut self, method: &str) -> Option<KeyOutcome> {
+        if method == "english" {
+            self.method = method.to_string();
+            self.passthrough = true;
+            return Some(self.reset_outcome());
+        }
+        let keyboard = build_keyboard(method, self.use_composition)?;
+        self.method = method.to_string();
+        self.passthrough = false;
+        self.install_keyboard(keyboard);
+        Some(self.reset_outcome())
+    }
+
+    /// Turn the preedit (underline) model on/off for Telex/VNI, rebuilding the
+    /// current keyboard. No-op when unchanged or for Nôm (always composes). Any
+    /// pending word is COMMITTED first (not discarded) so flipping mid-word
+    /// never loses text; the returned ops carry that commit plus a preedit
+    /// clear. Callers gate this on the client actually supporting the
+    /// no-preedit model (surrounding-text) before turning composition off.
+    pub fn set_use_composition(&mut self, use_composition: bool) -> KeyOutcome {
+        // Passthrough guard mirrors the Nôm guard: there is nothing to rebuild
+        // while english is active; the model is re-negotiated per keystroke by
+        // the host (`sync_use_preedit`) once a real method is back.
+        if self.passthrough || self.method == "nom" || use_composition == self.use_composition {
+            return KeyOutcome::default();
+        }
+        let mut outcome = self.flush_pending();
+        self.use_composition = use_composition;
+        // The current method already built once; rebuilding it with a different
+        // composition flag cannot newly fail. Keep the existing keyboard if it
+        // somehow does rather than leave the engine keyboard-less.
+        if let Some(keyboard) = build_keyboard(&self.method, use_composition) {
+            self.install_keyboard(keyboard);
+        }
+        outcome.handled = true;
+        outcome
+    }
+
+    /// Feed one character. Dispatches to the preedit (composition) mapping or
+    /// the no-preedit (commit-as-you-go) mapping based on the active model. Nôm
+    /// always uses composition (its `use_composition` never flips).
     pub fn process_char(&mut self, ch: char) -> KeyOutcome {
+        // English/passthrough: never touch the keyboard — the raw key must
+        // reach the app unmodified (handled=false, no ops).
+        if self.passthrough {
+            return KeyOutcome::default();
+        }
         self.sync_strict_spelling();
         let actions = match self.keyboard.process(ch) {
             Ok(actions) => actions,
@@ -207,10 +402,29 @@ impl EngineBridge {
                 };
             }
         };
+        if self.use_composition {
+            self.map_composition_actions(ch, actions)
+        } else {
+            self.map_direct_actions(ch, actions)
+        }
+    }
 
+    /// Preedit-model mapping: fold the engine's composition actions into
+    /// `ImeOp`s (preedit updates, confirmed commits, Nôm candidates). Extracted
+    /// verbatim so the no-preedit path is a sibling, not a branch inside a
+    /// giant function.
+    fn map_composition_actions(&mut self, ch: char, actions: Vec<Action>) -> KeyOutcome {
         let mut ops = Vec::new();
         let mut emitted = false;
         let mut pass_char = false;
+        // A committed word ends the composition. Track it (and whether the
+        // engine explicitly refreshed/hid candidates this round) so a stale
+        // popup is dropped after the loop: the punctuation PassThrough path
+        // emits `ConfirmComposition` + `Commit(sep)` with NO candidate action,
+        // which would otherwise leave the old word's candidate list live and
+        // let the next Space/digit commit a character from it.
+        let mut committed = false;
+        let mut candidates_refreshed = false;
         for action in actions {
             match action {
                 Action::UpdateComposition { text, .. } => {
@@ -225,6 +439,7 @@ impl EngineBridge {
                     ops.push(ImeOp::Preedit(String::new()));
                     ops.push(ImeOp::Commit(text));
                     emitted = true;
+                    committed = true;
                 }
                 Action::Commit(text) => {
                     // The engine echoing the input character back is a
@@ -234,11 +449,32 @@ impl EngineBridge {
                     } else {
                         ops.push(ImeOp::Commit(text));
                         emitted = true;
+                        committed = true;
                     }
                 }
                 Action::DoNothing => {}
-                Action::ShowCandidates { .. } | Action::HideCandidates => {
-                    // Nôm candidate UI: future phase on both backends.
+                Action::ShowCandidates { candidates, .. } => {
+                    // Nôm lookup hit: remember the list for index selection and
+                    // hand the backend a view to render. A candidate list means
+                    // the key was consumed into the composition.
+                    self.candidates = candidates
+                        .iter()
+                        .map(|c| CandidateView {
+                            display: c.text.clone(),
+                            value: c.get_value().to_string(),
+                        })
+                        .collect();
+                    // A fresh list starts highlighting the top candidate.
+                    self.cursor = 0;
+                    ops.push(self.candidates_op());
+                    emitted = true;
+                    candidates_refreshed = true;
+                }
+                Action::HideCandidates => {
+                    if let Some(op) = self.clear_candidates_op() {
+                        ops.push(op);
+                    }
+                    candidates_refreshed = true;
                 }
                 other => {
                     tracing::warn!(
@@ -246,6 +482,15 @@ impl EngineBridge {
                         other
                     );
                 }
+            }
+        }
+
+        // A commit with no explicit candidate action this round left the popup
+        // stale (punctuation PassThrough) — drop it so a later selection key
+        // can't commit the previous word's candidate.
+        if committed && !candidates_refreshed {
+            if let Some(op) = self.clear_candidates_op() {
+                ops.push(op);
             }
         }
 
@@ -261,10 +506,75 @@ impl EngineBridge {
         KeyOutcome { ops, handled }
     }
 
-    /// Backspace shrinks the composition; the engine recomputes the word
-    /// from raw keys and the new preedit is its canonical buffer. With no
-    /// composition the app handles the key itself.
+    /// No-preedit (commit-as-you-go) mapping for Telex/VNI: the engine emits a
+    /// left-aligned diff per keystroke — `Replace{backspace_count, text}`
+    /// (delete then insert), `Commit(text)`, or `DoNothing`. Nothing here
+    /// touches `preedit` (there is none) or candidates (Telex/VNI produce
+    /// none). Mirrors the Windows Hook consumer.
+    fn map_direct_actions(&mut self, ch: char, actions: Vec<Action>) -> KeyOutcome {
+        let mut ops = Vec::new();
+        let mut emitted = false;
+        let mut pass_char = false;
+        for action in actions {
+            match action {
+                Action::Replace {
+                    backspace_count,
+                    text,
+                } => {
+                    if backspace_count > 0 {
+                        ops.push(ImeOp::DeleteSurrounding(backspace_count));
+                    }
+                    if !text.is_empty() {
+                        ops.push(ImeOp::Commit(text));
+                    }
+                    emitted = true;
+                }
+                Action::Commit(text) => {
+                    // The engine echoing the just-typed char back is a natural
+                    // pass-through (no transform) — let the app insert it, same
+                    // rule as the composition path.
+                    if text.chars().eq(std::iter::once(ch)) {
+                        pass_char = true;
+                    } else {
+                        ops.push(ImeOp::Commit(text));
+                        emitted = true;
+                    }
+                }
+                Action::DoNothing => {}
+                other => {
+                    // Composition/candidate actions cannot occur with
+                    // composition off for Telex/VNI; log if the engine ever
+                    // emits one so the divergence is visible.
+                    tracing::warn!("unexpected composition action in direct mode: {:?}", other);
+                }
+            }
+        }
+        // No preedit buffer here, so anything not emitted/passed just falls
+        // through to the app (handled=false).
+        KeyOutcome {
+            ops,
+            handled: emitted && !pass_char,
+        }
+    }
+
+    /// Backspace. In preedit mode it shrinks the composition (the engine
+    /// recomputes the word and the new preedit is its canonical buffer). In
+    /// no-preedit mode it consumes the engine's returned diff action and
+    /// corrects the already-committed text in place.
     pub fn backspace(&mut self) -> KeyOutcome {
+        // Same passthrough contract as process_char: the app handles its own
+        // backspace while english is active.
+        if self.passthrough {
+            return KeyOutcome::default();
+        }
+        if self.use_composition {
+            self.composition_backspace()
+        } else {
+            self.direct_backspace()
+        }
+    }
+
+    fn composition_backspace(&mut self) -> KeyOutcome {
         if self.preedit.is_empty() {
             return KeyOutcome {
                 ops: Vec::new(),
@@ -275,9 +585,55 @@ impl EngineBridge {
             tracing::warn!("Keyboard backspace error: {}", e);
         }
         self.preedit = self.keyboard.buffer().to_string();
-        KeyOutcome {
-            ops: vec![ImeOp::Preedit(self.preedit.clone())],
-            handled: true,
+        let mut ops = vec![ImeOp::Preedit(self.preedit.clone())];
+        // MVP: backspace hides the candidate list rather than re-querying the
+        // shrunken buffer; the next character re-populates it (Phase 2 can wire
+        // `Keyboard::backspace_with_candidates` for live refresh).
+        if let Some(op) = self.clear_candidates_op() {
+            ops.push(op);
+        }
+        KeyOutcome { ops, handled: true }
+    }
+
+    /// No-preedit backspace: the engine pops its buffer and returns how to
+    /// repair the on-screen (already-committed) text. A `DoNothing` means the
+    /// engine has nothing to correct, so we let the app delete one char itself
+    /// (handled=false) — keeping engine and screen in sync, exactly like the
+    /// Windows Hook "let system handle" branch.
+    fn direct_backspace(&mut self) -> KeyOutcome {
+        let action = match self.keyboard.backspace() {
+            Ok(action) => action,
+            Err(e) => {
+                tracing::warn!("Keyboard backspace error: {}", e);
+                return KeyOutcome {
+                    ops: Vec::new(),
+                    handled: false,
+                };
+            }
+        };
+        match action {
+            Action::Replace {
+                backspace_count,
+                text,
+            } => {
+                let mut ops = Vec::new();
+                if backspace_count > 0 {
+                    ops.push(ImeOp::DeleteSurrounding(backspace_count));
+                }
+                if !text.is_empty() {
+                    ops.push(ImeOp::Commit(text));
+                }
+                let handled = !ops.is_empty();
+                KeyOutcome { ops, handled }
+            }
+            Action::Commit(text) => KeyOutcome {
+                ops: vec![ImeOp::Commit(text)],
+                handled: true,
+            },
+            _ => KeyOutcome {
+                ops: Vec::new(),
+                handled: false,
+            },
         }
     }
 
@@ -286,7 +642,14 @@ impl EngineBridge {
     /// the pipeline's own PassThrough repair. No-op when nothing composes.
     pub fn flush_pending(&mut self) -> KeyOutcome {
         if self.preedit.is_empty() {
-            return KeyOutcome::default();
+            // No composition, but a stray candidate list must not linger.
+            return match self.clear_candidates_op() {
+                Some(op) => KeyOutcome {
+                    ops: vec![op],
+                    handled: true,
+                },
+                None => KeyOutcome::default(),
+            };
         }
         let text = self
             .keyboard
@@ -294,10 +657,11 @@ impl EngineBridge {
             .unwrap_or_else(|| self.preedit.clone());
         self.keyboard.reset();
         self.preedit.clear();
-        KeyOutcome {
-            ops: vec![ImeOp::Preedit(String::new()), ImeOp::Commit(text)],
-            handled: true,
+        let mut ops = vec![ImeOp::Preedit(String::new()), ImeOp::Commit(text)];
+        if let Some(op) = self.clear_candidates_op() {
+            ops.push(op);
         }
+        KeyOutcome { ops, handled: true }
     }
 
     /// Discard the composition without committing (daemon Reset semantics).
@@ -305,12 +669,92 @@ impl EngineBridge {
         let had = !self.preedit.is_empty();
         self.keyboard.reset();
         self.preedit.clear();
+        let mut ops = if had {
+            vec![ImeOp::Preedit(String::new())]
+        } else {
+            Vec::new()
+        };
+        if let Some(op) = self.clear_candidates_op() {
+            ops.push(op);
+        }
+        KeyOutcome { ops, handled: true }
+    }
+
+    /// Number of candidates currently offered (0 when none / not Nôm). The
+    /// backend consults this to decide whether to route navigation/selection
+    /// keys to the popup instead of composition.
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// Move the highlight to the next candidate, wrapping at the end. Re-emits
+    /// the list so the panel repaints (and re-pages if the cursor crossed a
+    /// page boundary). No-op when nothing is showing.
+    pub fn cursor_next(&mut self) -> KeyOutcome {
+        self.move_cursor(|cur, n| (cur + 1) % n)
+    }
+
+    /// Move the highlight to the previous candidate, wrapping at the start.
+    pub fn cursor_prev(&mut self) -> KeyOutcome {
+        self.move_cursor(|cur, n| (cur + n - 1) % n)
+    }
+
+    /// Advance the highlight by one `page` (clamped to the last candidate).
+    pub fn cursor_page_down(&mut self, page: usize) -> KeyOutcome {
+        self.move_cursor(move |cur, n| (cur + page).min(n - 1))
+    }
+
+    /// Retreat the highlight by one `page` (clamped to the first candidate).
+    pub fn cursor_page_up(&mut self, page: usize) -> KeyOutcome {
+        self.move_cursor(move |cur, _| cur.saturating_sub(page))
+    }
+
+    /// Shared cursor mover: applies `f(current, len) -> new` and re-emits.
+    fn move_cursor(&mut self, f: impl FnOnce(usize, usize) -> usize) -> KeyOutcome {
+        let n = self.candidates.len();
+        if n == 0 {
+            return KeyOutcome::default();
+        }
+        self.cursor = f(self.cursor, n).min(n - 1);
         KeyOutcome {
-            ops: if had {
-                vec![ImeOp::Preedit(String::new())]
-            } else {
-                Vec::new()
-            },
+            ops: vec![self.candidates_op()],
+            handled: true,
+        }
+    }
+
+    /// Commit the highlighted candidate (Space/Enter, panel double-click).
+    pub fn select_current(&mut self) -> KeyOutcome {
+        self.select_candidate(self.cursor)
+    }
+
+    /// Commit the candidate at position `page_index` (0-based) WITHIN the page
+    /// currently holding the cursor — the mapping for number keys 1..=9 and the
+    /// panel's `CandidateClicked` (both are page-relative). Out-of-range no-ops.
+    pub fn select_at_page(&mut self, page_index: usize, page: usize) -> KeyOutcome {
+        let page_start = (self.cursor / page) * page;
+        self.select_candidate(page_start + page_index)
+    }
+
+    /// Commit the candidate at global `index` and reset the composition — the
+    /// selection primitive the higher-level methods delegate to. Out-of-range
+    /// is a no-op (empty, unhandled outcome). Clears the preedit BEFORE
+    /// committing so the word is never momentarily doubled, then hides the
+    /// now-stale candidate list.
+    pub fn select_candidate(&mut self, index: usize) -> KeyOutcome {
+        let Some(candidate) = self.candidates.get(index) else {
+            return KeyOutcome::default();
+        };
+        let value = candidate.value.clone();
+        self.keyboard.reset();
+        self.preedit.clear();
+        self.candidates.clear();
+        self.cursor = 0;
+        KeyOutcome {
+            ops: vec![
+                ImeOp::Preedit(String::new()),
+                ImeOp::Commit(value),
+                ImeOp::HideCandidates,
+            ],
             handled: true,
         }
     }

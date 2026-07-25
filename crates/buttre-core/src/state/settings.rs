@@ -24,7 +24,13 @@ pub struct Settings {
     /// Enable shorthand/macro expansion
     pub shorthand: bool,
 
-    /// Launch buttre on system startup
+    /// Launch buttre on system startup. Default `true`: a fresh install (no
+    /// `settings.toml` yet) starts with autostart ON, and the tray registers
+    /// the per-OS login entry on its first launch (see
+    /// `buttre-platform/src/main.rs`) — matching the "always start with the
+    /// OS" expectation of an input method. Existing users are unaffected:
+    /// their saved `settings.toml` already carries an explicit choice, and
+    /// `load()` reads it verbatim rather than this default.
     pub startup: bool,
 
     /// Backspace deletion granularity (event-sourcing-completion Phase 4):
@@ -59,6 +65,17 @@ pub struct Settings {
     /// `Keyboard::set_strict_spelling`.
     #[serde(default)]
     pub strict_spelling: bool,
+
+    /// Show the composition as underlined preedit (`true`, the long-standing
+    /// behavior) or commit text as-you-go with NO underline (`false`,
+    /// Unikey-style). Honored only by the Linux/macOS preedit backends —
+    /// Windows already commits real text. Nôm always uses preedit regardless
+    /// (its candidate popup needs it). `false` relies on the focused app
+    /// supporting in-place text deletion; backends that can't do it for a given
+    /// client fall back to preedit rather than corrupt input. Default `true` so
+    /// an upgrade never changes a user's typing out from under them.
+    #[serde(default = "default_use_preedit")]
+    pub use_preedit: bool,
 }
 
 /// `serde(default)` value for `Settings::backspace_mode` — also the fallback
@@ -72,16 +89,24 @@ fn default_learning_enabled() -> bool {
     true
 }
 
+/// `serde(default)` value for `Settings::use_preedit` — preedit ON, matching
+/// the behavior every prior release shipped so an old `settings.toml` (and a
+/// fresh install) keeps the known-good underline model until the user opts out.
+fn default_use_preedit() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             input_method: "english".to_string(),
             auto_correct: false,
             shorthand: false,
-            startup: false,
+            startup: true,
             backspace_mode: default_backspace_mode(),
             learning_enabled: default_learning_enabled(),
             strict_spelling: false,
+            use_preedit: default_use_preedit(),
         }
     }
 }
@@ -89,10 +114,11 @@ impl Default for Settings {
 impl Settings {
     /// Get the settings file path
     ///
-    /// Platform-specific paths:
+    /// Resolved under `dirs::data_dir()` — NOT the config dir. This is a
+    /// separate store from `~/.config/buttre/` (the tray↔engine sync files):
     /// - Windows: %APPDATA%\buttre\settings.toml
     /// - macOS: ~/Library/Application Support/buttre/settings.toml
-    /// - Linux: ~/.config/buttre/settings.toml
+    /// - Linux: ~/.local/share/buttre/settings.toml
     pub fn get_path() -> Result<PathBuf> {
         let data_dir =
             dirs::data_dir().ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
@@ -173,6 +199,23 @@ mod tests {
         let settings: Settings =
             toml::from_str(toml_str).expect("must deserialize without backspace_mode present");
         assert_eq!(settings.backspace_mode, "grapheme");
+    }
+
+    #[test]
+    fn use_preedit_defaults_true_when_absent_from_toml() {
+        // Every settings.toml written before this field existed must load with
+        // preedit ON (the prior behavior), not fail or silently flip to the
+        // no-underline model.
+        let toml_str = r#"
+            input_method = "telex"
+            auto_correct = false
+            shorthand = false
+            startup = false
+        "#;
+        let settings: Settings =
+            toml::from_str(toml_str).expect("must deserialize without use_preedit present");
+        assert!(settings.use_preedit);
+        assert!(Settings::default().use_preedit);
     }
 
     #[test]

@@ -70,7 +70,10 @@ fn strict_mode_restores_the_raw_revert() {
     let opts = ComposeOpts::from_config(&config);
     let closed = compose_closed(&chars("ddt"), &opts);
     assert_eq!(closed.text, "ddt");
-    assert!(closed.temp_english, "strict revert latches English fallback");
+    assert!(
+        closed.temp_english,
+        "strict revert latches English fallback"
+    );
 }
 
 #[test]
@@ -104,7 +107,11 @@ fn non_vietnamese_letters_after_dd_still_revert() {
     );
     // đ + vowel continues down the normal (non-lenient) path: an invalid
     // syllable with a vowel is NOT covered by the đ branch.
-    assert_eq!(type_word("ddta", &config), "ddta", "vowel present → normal gate");
+    assert_eq!(
+        type_word("ddta", &config),
+        "ddta",
+        "vowel present → normal gate"
+    );
 }
 
 #[test]

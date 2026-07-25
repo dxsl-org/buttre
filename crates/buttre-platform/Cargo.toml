@@ -108,6 +108,11 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.8"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Endianness marker for `zvariant::to_bytes` in the IBus property wire-format
+# encode test (`ibus_props`). Already in the tree via zvariant — no new build cost.
+byteorder = "1.5"
+
 [build-dependencies]
 embed-resource = "2.4"
 
@@ -145,6 +150,18 @@ assets = [
     ["target/release/buttre",                                  "usr/bin/",                              "755"],
     ["target/release/buttre_nom.db",                           "usr/share/buttre/",                     "644"],
     ["../../installers/linux/buttre.xml",                      "usr/share/ibus/component/",             "644"],
+    # App-menu launcher for the tray/config UI (the engine is a separate,
+    # ibus-daemon-spawned process — nothing else surfaces the tray).
+    ["../../installers/linux/buttre.desktop",                  "usr/share/applications/",               "644"],
+    # KDE Plasma Wayland engine entry: KWin spawns the IME configured in
+    # kwinrc [Wayland] InputMethod, which must point at a desktop file —
+    # X-KDE-Wayland-VirtualKeyboard=true lists it in the Virtual Keyboard KCM.
+    ["../../installers/linux/buttre-ime.desktop",              "usr/share/applications/",               "644"],
+    # System-wide XDG autostart so the tray starts at every user's login
+    # (autostart defaults ON — see buttre-core Settings::default). A per-user
+    # ~/.config/autostart/buttre.desktop, if the tray ever writes one, shares
+    # this basename and overrides it, so the two never double-launch.
+    ["../../installers/linux/buttre-autostart.desktop",        "etc/xdg/autostart/buttre.desktop",      "644"],
     # Backs <icon>buttre</icon> in buttre.xml — without it the input-source switcher shows text only.
     ["icons/vietnamese.png",                                   "usr/share/icons/hicolor/128x128/apps/buttre.png", "644"],
     ["../../keyboards/cham.toml",                              "usr/share/buttre/keyboards/",           "644"],
@@ -167,6 +184,9 @@ assets = [
     { source = "target/release/buttre",                        dest = "/usr/bin/buttre",                                        mode = "755" },
     { source = "target/release/buttre_nom.db",                 dest = "/usr/share/buttre/buttre_nom.db",                        mode = "644" },
     { source = "../../installers/linux/buttre.xml",            dest = "/usr/share/ibus/component/buttre.xml",                   mode = "644" },
+    { source = "../../installers/linux/buttre.desktop",        dest = "/usr/share/applications/buttre.desktop",                 mode = "644" },
+    { source = "../../installers/linux/buttre-ime.desktop",    dest = "/usr/share/applications/buttre-ime.desktop",             mode = "644" },
+    { source = "../../installers/linux/buttre-autostart.desktop", dest = "/etc/xdg/autostart/buttre.desktop",                   mode = "644" },
     { source = "icons/vietnamese.png",                         dest = "/usr/share/icons/hicolor/128x128/apps/buttre.png",       mode = "644" },
     { source = "../../keyboards/cham.toml",                    dest = "/usr/share/buttre/keyboards/cham.toml",                  mode = "644" },
     { source = "../../keyboards/cham_akhar_thrah.toml",        dest = "/usr/share/buttre/keyboards/cham_akhar_thrah.toml",      mode = "644" },

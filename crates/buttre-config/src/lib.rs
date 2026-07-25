@@ -38,6 +38,7 @@ mod generated {
 use generated::*;
 
 /// One selectable entry in the General tab's method dropdown.
+#[derive(Clone)]
 struct MethodChoice {
     id: String,
     name: String,
@@ -108,6 +109,34 @@ fn open_in_editor(path: &std::path::Path) {
     }
 }
 
+/// Push persisted settings onto the window's value widgets. Shared by the
+/// initial open and the live-refresh poll so the two paths can never drift.
+/// The method-name LIST is static (set once at open) and deliberately not
+/// touched here.
+fn apply_settings_to_window(window: &ConfigWindow, settings: &Settings, methods: &[MethodChoice]) {
+    let method_index = methods
+        .iter()
+        .position(|m| m.id == settings.input_method)
+        .unwrap_or(0) as i32;
+    window.set_method_index(method_index);
+    // ComboBox renders `current-value`; setting the index alone does not
+    // refresh it, so set the value too (see the open-time single-shot fix).
+    window.set_method_value(
+        methods
+            .get(method_index as usize)
+            .map(|m| m.name.as_str())
+            .unwrap_or("English")
+            .into(),
+    );
+    window.set_autostart(settings.startup);
+    window.set_raw_backspace(settings.backspace_mode == "raw");
+    window.set_strict_spelling(settings.strict_spelling);
+    window.set_learning_enabled(settings.learning_enabled);
+    window.set_shorthand_enabled(settings.shorthand);
+    // Checkbox is inverted: ON = no-preedit = use_preedit false.
+    window.set_use_preedit_off(!settings.use_preedit);
+}
+
 fn learned_word_row_to_slint(r: &learned_adapter::LearnedWordRow) -> LearnedWordRow {
     LearnedWordRow {
         word: r.word.as_str().into(),
@@ -166,22 +195,7 @@ pub fn run() -> anyhow::Result<()> {
 
     let window = ConfigWindow::new()?;
     window.set_method_names(slint::ModelRc::new(slint::VecModel::from(method_names)));
-    window.set_method_index(method_index);
-    // ComboBox renders `current-value`, and setting `current-index` from
-    // Rust does not refresh it — without this the box always displays the
-    // model's first entry ("English") regardless of the active method.
-    window.set_method_value(
-        methods
-            .get(method_index as usize)
-            .map(|m| m.name.as_str())
-            .unwrap_or("English")
-            .into(),
-    );
-    window.set_autostart(settings.startup);
-    window.set_raw_backspace(settings.backspace_mode == "raw");
-    window.set_strict_spelling(settings.strict_spelling);
-    window.set_learning_enabled(settings.learning_enabled);
-    window.set_shorthand_enabled(settings.shorthand);
+    apply_settings_to_window(&window, &settings, &methods);
     // Single-sourced from Cargo.toml — the old help_dialog.rs MessageBox
     // had this hardcoded ("0.7.7-beta") and silently went stale after every
     // release bump; `CARGO_PKG_VERSION` can never drift.
@@ -213,6 +227,11 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
 
+    // Snapshots for the live-refresh poll timer below — on_save_settings moves
+    // the originals, so capture what the poll needs before that.
+    let poll_methods = methods.clone();
+    let mut poll_last = settings.clone();
+
     let weak = window.as_weak();
     window.on_save_settings(move || {
         let Some(window) = weak.upgrade() else {
@@ -236,6 +255,7 @@ pub fn run() -> anyhow::Result<()> {
             },
             learning_enabled: window.get_learning_enabled(),
             strict_spelling: window.get_strict_spelling(),
+            use_preedit: !window.get_use_preedit_off(),
         };
 
         // Autostart registration is a per-OS side effect, not just a
@@ -348,7 +368,34 @@ pub fn run() -> anyhow::Result<()> {
         center_on_screen(&window);
     });
 
+    // Live-refresh: while this window is open, follow external settings.toml
+    // changes (the tray menu, or an IBus-panel switch the tray relays into the
+    // file) so the widgets never go stale against the resident tray. Polling on
+    // the Slint UI thread avoids a notify dependency and cross-thread
+    // marshalling. Widget edits auto-save (each control's `selected`/`toggled`
+    // is wired to `save-settings()`), but a PROGRAMMATIC property set from Rust
+    // does not emit those interaction callbacks — so this poll only writes
+    // widgets, never triggering save-settings, and there is no write-back loop.
+    // The PartialEq guard also leaves an unsaved in-progress edit untouched:
+    // until it auto-saves, disk still equals the last applied snapshot.
+    let poll_timer = slint::Timer::default();
+    let weak = window.as_weak();
+    poll_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(1000),
+        move || {
+            let Some(window) = weak.upgrade() else { return };
+            let disk = Settings::load();
+            if disk != poll_last {
+                apply_settings_to_window(&window, &disk, &poll_methods);
+                poll_last = disk;
+            }
+        },
+    );
+
     slint::run_event_loop()?;
+    // `poll_timer` lives until here — dropping it earlier would stop the poll.
+    drop(poll_timer);
     Ok(())
 }
 

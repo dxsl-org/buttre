@@ -4,6 +4,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# Redirect the target dir off vboxsf when needed (no-op on a native disk).
+# cargo-deb / cargo-generate-rpm resolve the target via `cargo metadata`, so
+# they honor this too and read the binary from the redirected location.
+# shellcheck source=scripts/lib/vboxsf-target-dir.sh
+. "$REPO_ROOT/scripts/lib/vboxsf-target-dir.sh"
+
 echo "==> Building buttre-platform release..."
 cargo build -p buttre-platform --release
 

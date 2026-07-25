@@ -1,20 +1,71 @@
 //! Menu building utilities for buttre application
 
 use crate::shared::input::MethodRegistry;
+#[cfg(not(target_os = "linux"))]
 use crate::shared::ui::{load_menu_icon, CHECK_ICON_BYTES};
 use buttre_core::state::Settings;
 use buttre_core::vietnamese::config_loader::MethodMetadata;
 use muda::accelerator::{Accelerator, Code, Modifiers};
-use muda::{IconMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+/// The widget type of one method row in the tray menu.
+///
+/// Linux is a `CheckMenuItem`, not an `IconMenuItem`: the tray menu is
+/// exported over DBusMenu (libappindicator), whose hosts render an item's
+/// `icon-data` at the TRAILING edge (GNOME's appindicator extension) and do
+/// not reliably clear it when the pixbuf is nulled — so a check drawn as an
+/// icon appears after the label and the previous method's check sticks.
+/// `toggle-type=checkmark` is the protocol's native selection state: leading
+/// ornament, cleared via `toggle-state`. Windows/macOS keep the original
+/// leading check icon.
+#[cfg(target_os = "linux")]
+pub type MethodMenuItem = muda::CheckMenuItem;
+#[cfg(not(target_os = "linux"))]
+pub type MethodMenuItem = muda::IconMenuItem;
+
+/// One method row, checked or not — the per-OS check representation (see
+/// [`MethodMenuItem`]) is decided here and in [`set_method_checked`] ONLY.
+fn new_method_item(label: &str, checked: bool, accelerator: Option<Accelerator>) -> MethodMenuItem {
+    #[cfg(target_os = "linux")]
+    {
+        muda::CheckMenuItem::new(label, true, checked, accelerator)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        muda::IconMenuItem::new(
+            label,
+            true,
+            if checked {
+                load_menu_icon(CHECK_ICON_BYTES)
+            } else {
+                None
+            },
+            accelerator,
+        )
+    }
+}
+
+/// Reflect selection state on a method row (see [`MethodMenuItem`] for why
+/// this is per-OS).
+pub fn set_method_checked(item: &MethodMenuItem, checked: bool) {
+    #[cfg(target_os = "linux")]
+    item.set_checked(checked);
+    #[cfg(not(target_os = "linux"))]
+    item.set_icon(if checked {
+        load_menu_icon(CHECK_ICON_BYTES)
+    } else {
+        None
+    });
+}
 
 /// Menu items that need to be accessed for event handling
 pub struct MenuItems {
-    pub english_item: IconMenuItem,
+    pub english_item: MethodMenuItem,
     pub chu_viet_menu: Submenu,
-    pub telex_item: IconMenuItem,
-    pub vni_item: IconMenuItem,
-    pub nom_item: IconMenuItem, // Unified Nôm method
-    pub custom_items: Vec<(MethodMetadata, IconMenuItem)>,
+    pub telex_item: MethodMenuItem,
+    pub vni_item: MethodMenuItem,
+    pub nom_item: MethodMenuItem, // Unified Nôm method
+    pub custom_items: Vec<(MethodMetadata, MethodMenuItem)>,
     /// Root-level "Cấu hình…": spawns `buttre --config` (the Slint config
     /// window, a separate process — see `buttre_config`'s crate doc). Owns
     /// everything the tray used to expose directly: Học thông minh, Tự động
@@ -41,15 +92,10 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
         })
         .collect();
 
-    // 0. English (disable input method) - IconMenuItem
-    let english_item = IconMenuItem::new(
+    // 0. English (disable input method)
+    let english_item = new_method_item(
         "English",
-        true,
-        if settings.input_method == "english" {
-            load_menu_icon(CHECK_ICON_BYTES)
-        } else {
-            None
-        },
+        settings.input_method == "english",
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Space,
@@ -103,27 +149,17 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
             is_builtin: true,
         });
 
-    let telex_item = IconMenuItem::new(
+    let telex_item = new_method_item(
         &telex_meta.name,
-        true,
-        if settings.input_method == "telex" {
-            load_menu_icon(CHECK_ICON_BYTES)
-        } else {
-            None
-        },
+        settings.input_method == "telex",
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Digit1,
         )),
     );
-    let vni_item = IconMenuItem::new(
+    let vni_item = new_method_item(
         &vni_meta.name,
-        true,
-        if settings.input_method == "vni" {
-            load_menu_icon(CHECK_ICON_BYTES)
-        } else {
-            None
-        },
+        settings.input_method == "vni",
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Digit2,
@@ -132,15 +168,9 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     let _ = chu_viet_menu.append_items(&[&telex_item, &vni_item]);
 
     // 2. Chữ Nôm - single unified method (no submenu)
-    let is_nom = settings.input_method == "nom";
-    let nom_item = IconMenuItem::new(
+    let nom_item = new_method_item(
         &nom_meta.name,
-        true,
-        if is_nom {
-            load_menu_icon(CHECK_ICON_BYTES)
-        } else {
-            None
-        },
+        settings.input_method == "nom",
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Digit3,
@@ -149,7 +179,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
 
     // 3. Custom items - dynamically generated from config list
     // We don't use a submenu anymore, they are appended directly to the main menu
-    let mut custom_items: Vec<(MethodMetadata, IconMenuItem)> = Vec::new();
+    let mut custom_items: Vec<(MethodMetadata, MethodMenuItem)> = Vec::new();
 
     // Helper array for hotkeys (Ctrl+Shift+4..0)
     let digit_codes = [
@@ -178,8 +208,6 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
             continue;
         }
 
-        let is_selected = settings.input_method == method.id;
-
         // Assign accelerator if within limit
         let accelerator = if custom_count < digit_codes.len() {
             Some(Accelerator::new(
@@ -190,14 +218,9 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
             None
         };
 
-        let item = IconMenuItem::new(
+        let item = new_method_item(
             &method.name,
-            true,
-            if is_selected {
-                load_menu_icon(CHECK_ICON_BYTES)
-            } else {
-                None
-            },
+            settings.input_method == method.id,
             accelerator,
         );
         custom_items.push((method, item));
@@ -241,54 +264,4 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     };
 
     (menu, menu_items)
-}
-
-/// Update menu icons to reflect the selected input method
-#[allow(dead_code)]
-pub fn update_menu_for_method(
-    menu_items: &MenuItems,
-    method: &str,
-    custom_methods: &[(MethodMetadata, IconMenuItem)],
-) {
-    // Clear all icons first
-    menu_items.english_item.set_icon(None);
-    menu_items.telex_item.set_icon(None);
-    menu_items.vni_item.set_icon(None);
-    menu_items.nom_item.set_icon(None);
-    for (_, item) in &menu_items.custom_items {
-        item.set_icon(None);
-    }
-
-    // Set check icon for selected method
-    let check_icon = load_menu_icon(CHECK_ICON_BYTES);
-    match method {
-        "english" => {
-            if let Some(icon) = check_icon {
-                menu_items.english_item.set_icon(Some(icon));
-            }
-        }
-        "telex" => {
-            if let Some(icon) = check_icon {
-                menu_items.telex_item.set_icon(Some(icon));
-            }
-        }
-        "vni" => {
-            if let Some(icon) = check_icon {
-                menu_items.vni_item.set_icon(Some(icon));
-            }
-        }
-        "nom" => {
-            if let Some(icon) = check_icon {
-                menu_items.nom_item.set_icon(Some(icon));
-            }
-        }
-        custom_id => {
-            // Check if it's a custom method
-            if let Some((_, item)) = custom_methods.iter().find(|(d, _)| d.id == custom_id) {
-                if let Some(icon) = check_icon {
-                    item.set_icon(Some(icon));
-                }
-            }
-        }
-    }
 }

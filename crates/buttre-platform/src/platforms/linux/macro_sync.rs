@@ -45,17 +45,29 @@ pub fn load_initial_strict() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(strict))
 }
 
-/// Re-read `settings.toml` and swap `store`'s contents + refresh `strict`
-/// to match — the single reload spelling both watch callbacks below share.
-fn reload(store: &Arc<Mutex<MacroStore>>, strict: &Arc<AtomicBool>) {
+/// Build the initial `Settings::use_preedit` mirror for engine-process startup
+/// — rides the SAME `settings.toml` watcher as `strict_spelling` (one re-read
+/// serves shorthand + strict + use_preedit). The IBus engine consults it per
+/// keystroke to decide the preedit vs commit-as-you-go model.
+pub fn load_initial_use_preedit() -> Arc<AtomicBool> {
+    let use_preedit = Settings::load().use_preedit;
+    tracing::info!("macro_sync: initial use_preedit = {use_preedit}");
+    Arc::new(AtomicBool::new(use_preedit))
+}
+
+/// Re-read `settings.toml` and swap `store`'s contents + refresh `strict` and
+/// `use_preedit` to match — the single reload spelling both watch callbacks
+/// below share.
+fn reload(store: &Arc<Mutex<MacroStore>>, strict: &Arc<AtomicBool>, use_preedit: &Arc<AtomicBool>) {
     let settings = Settings::load();
-    *store.lock().unwrap_or_else(|e| e.into_inner()) =
-        MacroStore::load_gated(settings.shorthand);
+    *store.lock().unwrap_or_else(|e| e.into_inner()) = MacroStore::load_gated(settings.shorthand);
     strict.store(settings.strict_spelling, Ordering::Relaxed);
+    use_preedit.store(settings.use_preedit, Ordering::Relaxed);
     tracing::info!(
-        "macro_sync: reloaded (shorthand={}, strict_spelling={})",
+        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={})",
         settings.shorthand,
-        settings.strict_spelling
+        settings.strict_spelling,
+        settings.use_preedit
     );
 }
 
@@ -85,61 +97,47 @@ fn push_parent(dirs: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 /// Watch `macros.toml`'s and `settings.toml`'s directories, reloading
-/// `store` in place whenever either changes. Runs in a plain thread
-/// (notify's callbacks are sync); lives for the process lifetime — the
-/// daemon/compositor owns the engine process, so there is no teardown path
-/// to plumb (mirrors `method_sync::spawn_watcher`).
-pub fn spawn_watcher(store: Arc<Mutex<MacroStore>>, strict: Arc<AtomicBool>) {
+/// `store` in place whenever either changes. Built on [`crate::fs_watch`]
+/// (one re-arming watch per deduplicated directory), so the watch survives
+/// the data dir being deleted and re-created; lives for the process lifetime
+/// — the daemon/compositor owns the engine process, so there is no teardown
+/// path to plumb (mirrors `method_sync::spawn_watcher`).
+pub fn spawn_watcher(
+    store: Arc<Mutex<MacroStore>>,
+    strict: Arc<AtomicBool>,
+    use_preedit: Arc<AtomicBool>,
+) {
     let dirs = watch_dirs();
     if dirs.is_empty() {
         tracing::warn!("macro_sync: no watchable directory found, watcher not started");
         return;
     }
 
-    std::thread::Builder::new()
-        .name("buttre-macro-watch".into())
-        .spawn(move || {
-            use notify::{RecursiveMode, Watcher};
-            let store_cb = store.clone();
-            let strict_cb = strict.clone();
-            let mut watcher =
-                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    // The watched dirs also hold unrelated state (method
-                    // file, learning.toml), so filter to the two files that
-                    // feed the store — an unfiltered reload would re-read
-                    // both files on every neighbor write.
-                    let Ok(event) = res else {
-                        return;
-                    };
-                    let relevant = event.paths.iter().any(|p| {
-                        matches!(
-                            p.file_name().and_then(|n| n.to_str()),
-                            Some("macros.toml") | Some("settings.toml")
-                        )
-                    });
-                    if relevant {
-                        reload(&store_cb, &strict_cb);
-                    }
-                }) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!("macro_sync: watcher init failed: {e}");
-                        return;
-                    }
-                };
-            for dir in &dirs {
-                if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
-                    tracing::warn!("macro_sync: watch {dir:?} failed: {e}");
-                }
+    for dir in dirs {
+        let store = store.clone();
+        let strict = strict.clone();
+        let use_preedit = use_preedit.clone();
+        crate::fs_watch::spawn_dir_watch("macro_sync", dir, move |cue| {
+            // The watched dirs also hold unrelated state (method file,
+            // learning.toml), so filter to the two files that feed the
+            // store — an unfiltered reload would re-read both files on
+            // every neighbor write. A re-armed watch reloads
+            // unconditionally: either file may have changed while the
+            // directory was unwatched.
+            let relevant = match cue {
+                crate::fs_watch::WatchCue::Rearmed => true,
+                crate::fs_watch::WatchCue::Event(event) => event.paths.iter().any(|p| {
+                    matches!(
+                        p.file_name().and_then(|n| n.to_str()),
+                        Some("macros.toml") | Some("settings.toml")
+                    )
+                }),
+            };
+            if relevant {
+                reload(&store, &strict, &use_preedit);
             }
-            tracing::info!("macro_sync: watching {dirs:?}");
-            // Park forever — the watcher lives as long as the thread does.
-            loop {
-                std::thread::park();
-            }
-        })
-        .map(|_| ())
-        .unwrap_or_else(|e| tracing::warn!("macro_sync: watcher thread spawn failed: {e}"));
+        });
+    }
 }
 
 #[cfg(test)]
