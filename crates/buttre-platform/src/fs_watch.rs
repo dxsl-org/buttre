@@ -43,6 +43,16 @@ pub fn spawn_dir_watch(
         tracing::warn!("{label}: cannot create {dir:?}, watch disabled: {e}");
         return false;
     }
+    // Canonicalize BEFORE arming: notify's macOS (FSEvents) backend reports
+    // event paths with symlink components resolved (e.g. `/var/...` — itself
+    // a symlink to `/private/var/...` — comes back as `/private/var/...`).
+    // Comparing un-resolved `dir` against those paths below would silently
+    // never match, so the handler would never fire despite events arriving
+    // (caught by `missing_dir_is_created`/`survives_dir_delete_and_recreate`
+    // failing on macOS CI with a resolved-path callback dir). Canonicalize
+    // once so every later `==`/`parent()` comparison uses the same form the
+    // backend hands back.
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
     let (tx, rx) = mpsc::channel();
     let mut watcher = match notify::recommended_watcher(move |res| {
         let _ = tx.send(res);

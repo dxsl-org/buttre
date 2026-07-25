@@ -150,7 +150,10 @@ unsafe fn method_from_ptr<'a>(method: *const c_char) -> Option<&'a str> {
 /// Built-in method ids — mirrors
 /// `platforms::linux::method_sync::KNOWN_METHODS`, which isn't reachable
 /// from here off Linux (gated behind `cfg(platform_linux)`, not the plain
-/// `cfg(target_os = "linux")` this crate can see everywhere).
+/// `cfg(target_os = "linux")` this crate can see everywhere). Only used by
+/// the non-Linux arm of `method_is_known` below — on Linux itself
+/// `is_engine_method` covers built-ins already, so this would be dead code.
+#[cfg(not(target_os = "linux"))]
 const BUILTIN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 
 /// The boundary validation for method ids: `build_keyboard` is lenient
