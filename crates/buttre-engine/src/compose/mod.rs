@@ -973,8 +973,22 @@ fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
 fn is_vietnamese_consonant(c: char) -> bool {
     matches!(
         c,
-        'b' | 'c' | 'd' | 'đ' | 'g' | 'h' | 'k' | 'l' | 'm' | 'n' | 'p' | 'q' | 'r' | 's' | 't'
-            | 'v' | 'x'
+        'b' | 'c'
+            | 'd'
+            | 'đ'
+            | 'g'
+            | 'h'
+            | 'k'
+            | 'l'
+            | 'm'
+            | 'n'
+            | 'p'
+            | 'q'
+            | 'r'
+            | 's'
+            | 't'
+            | 'v'
+            | 'x'
     )
 }
 

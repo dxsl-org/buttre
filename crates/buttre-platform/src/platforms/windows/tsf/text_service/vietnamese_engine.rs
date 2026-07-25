@@ -70,8 +70,7 @@ impl VietnameseEngine {
         engine
             .strict_spelling
             .store(settings.strict_spelling, Ordering::Relaxed);
-        engine._macros_watcher =
-            spawn_reload_watcher(macros, engine.strict_spelling.clone());
+        engine._macros_watcher = spawn_reload_watcher(macros, engine.strict_spelling.clone());
         engine
     }
 

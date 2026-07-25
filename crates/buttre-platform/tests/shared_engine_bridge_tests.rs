@@ -300,7 +300,10 @@ fn set_use_composition_is_a_noop_for_nom() {
     let out = bridge.process_char('a');
     assert!(
         out.ops.iter().any(|o| matches!(o, ImeOp::Preedit(_)))
-            || out.ops.iter().any(|o| matches!(o, ImeOp::Candidates { .. })),
+            || out
+                .ops
+                .iter()
+                .any(|o| matches!(o, ImeOp::Candidates { .. })),
         "Nôm stays in composition after the toggle, got {:?}",
         out.ops
     );
@@ -335,16 +338,17 @@ fn rebuild_to_english_discards_composition_and_goes_silent() {
     // The live preedit is cleared on the way out (mode switch = reset).
     assert_eq!(outcome.ops, vec![ImeOp::Preedit(String::new())]);
     let after = bridge.process_char('w');
-    assert!(!after.handled && after.ops.is_empty(), "silent after switch");
+    assert!(
+        !after.handled && after.ops.is_empty(),
+        "silent after switch"
+    );
 }
 
 #[test]
 fn rebuild_from_english_back_to_telex_composes_again() {
     let mut bridge = EngineBridge::new("english");
     assert!(!bridge.process_char('a').handled);
-    bridge
-        .rebuild("telex")
-        .expect("telex must always build");
+    bridge.rebuild("telex").expect("telex must always build");
     let ops = type_chars(&mut bridge, "vieejt");
     assert_eq!(ops.last(), Some(&ImeOp::Preedit("việt".into())));
 }
@@ -415,5 +419,9 @@ fn rebuild_to_missing_custom_falls_back_to_telex() {
         type_chars(&mut bridge, "aa");
         bridge.process_char(' ')
     };
-    assert_eq!(commits(&space.ops), vec!["â"], "missing custom must behave as telex");
+    assert_eq!(
+        commits(&space.ops),
+        vec!["â"],
+        "missing custom must behave as telex"
+    );
 }

@@ -117,7 +117,9 @@ fn method_items_in(custom_dir: &std::path::Path) -> Vec<(String, String)> {
         if stem == CONFIG_KEY || stem == "-" {
             // A radio named "config" would be swallowed by the settings
             // launcher's PropertyActivate branch; "-" is the separator key.
-            tracing::warn!("ibus_props: keyboard filename {stem:?} collides with a menu key, skipping");
+            tracing::warn!(
+                "ibus_props: keyboard filename {stem:?} collides with a menu key, skipping"
+            );
             continue;
         }
         if stem != stem.to_lowercase() {
@@ -182,7 +184,12 @@ pub(crate) fn method_prop_list(current: &str) -> Value<'static> {
     let mut props = method_prop_updates(current);
     // Divider, then the settings launcher. The launcher is a NORMAL item, not
     // part of the radio group, so its click is routed by key (not check-state).
-    props.push(build_property("-", PROP_TYPE_SEPARATOR, "", PROP_STATE_UNCHECKED));
+    props.push(build_property(
+        "-",
+        PROP_TYPE_SEPARATOR,
+        "",
+        PROP_STATE_UNCHECKED,
+    ));
     props.push(build_property(
         CONFIG_KEY,
         PROP_TYPE_NORMAL,
@@ -297,9 +304,18 @@ mod tests {
     #[test]
     fn activation_honors_only_a_checked_known_radio() {
         // The newly-selected radio switches methods...
-        assert_eq!(method_for_activation("telex", PROP_STATE_CHECKED), Some("telex"));
-        assert_eq!(method_for_activation("vni", PROP_STATE_CHECKED), Some("vni"));
-        assert_eq!(method_for_activation("nom", PROP_STATE_CHECKED), Some("nom"));
+        assert_eq!(
+            method_for_activation("telex", PROP_STATE_CHECKED),
+            Some("telex")
+        );
+        assert_eq!(
+            method_for_activation("vni", PROP_STATE_CHECKED),
+            Some("vni")
+        );
+        assert_eq!(
+            method_for_activation("nom", PROP_STATE_CHECKED),
+            Some("nom")
+        );
         // ...but the de-select half of the same click MUST be ignored, else it
         // overwrites the selection (the original "always lands on VNI" bug).
         assert_eq!(method_for_activation("vni", PROP_STATE_UNCHECKED), None);
@@ -360,16 +376,24 @@ mod tests {
     #[test]
     fn method_prop_updates_check_only_current() {
         let items = items_with_custom();
-        for (current, expect_idx) in
-            [("english", 0usize), ("telex", 1), ("vni", 2), ("nom", 3), ("cham", 4)]
-        {
+        for (current, expect_idx) in [
+            ("english", 0usize),
+            ("telex", 1),
+            ("vni", 2),
+            ("nom", 3),
+            ("cham", 4),
+        ] {
             let updates = method_prop_updates_with(current, &items);
             for (i, prop) in updates.iter().enumerate() {
                 let Value::Structure(s) = prop else {
                     panic!("IBusProperty must be a structure")
                 };
                 let state = state_field(s);
-                let expected = if i == expect_idx { PROP_STATE_CHECKED } else { PROP_STATE_UNCHECKED };
+                let expected = if i == expect_idx {
+                    PROP_STATE_CHECKED
+                } else {
+                    PROP_STATE_UNCHECKED
+                };
                 assert_eq!(state, expected, "radio {i} state for current={current}");
             }
         }
@@ -414,11 +438,18 @@ language = \"cja\"
 
         let items = method_items_in(&dir);
         let builtin_count = BUILTIN_METHOD_ITEMS.len();
-        assert_eq!(items.len(), builtin_count + 1, "exactly one custom admitted");
+        assert_eq!(
+            items.len(),
+            builtin_count + 1,
+            "exactly one custom admitted"
+        );
         for (i, (key, _)) in BUILTIN_METHOD_ITEMS.iter().enumerate() {
             assert_eq!(items[i].0, *key, "built-ins keep their order");
         }
-        assert_eq!(items[builtin_count], ("cham".to_string(), "Cham Keyboard".to_string()));
+        assert_eq!(
+            items[builtin_count],
+            ("cham".to_string(), "Cham Keyboard".to_string())
+        );
     }
 
     /// Missing custom dir degrades to built-ins only — never an error.
@@ -438,9 +469,18 @@ language = \"cja\"
             method_for_activation_in("cham", PROP_STATE_CHECKED, &dir),
             Some("cham")
         );
-        assert_eq!(method_for_activation_in("cham", PROP_STATE_UNCHECKED, &dir), None);
-        assert_eq!(method_for_activation_in("khmer", PROP_STATE_CHECKED, &dir), None);
-        assert_eq!(method_for_activation_in("../cham", PROP_STATE_CHECKED, &dir), None);
+        assert_eq!(
+            method_for_activation_in("cham", PROP_STATE_UNCHECKED, &dir),
+            None
+        );
+        assert_eq!(
+            method_for_activation_in("khmer", PROP_STATE_CHECKED, &dir),
+            None
+        );
+        assert_eq!(
+            method_for_activation_in("../cham", PROP_STATE_CHECKED, &dir),
+            None
+        );
     }
 
     /// Field 9 of the 12-field IBusProperty struct is `state` (see
@@ -467,11 +507,7 @@ language = \"cja\"
         let ctxt = EncodingContext::<byteorder::LE>::new_dbus(0);
         let many: Vec<String> = (0..15).map(|i| format!("c{i}")).collect();
         // include a cursor on a later page to exercise paged cursor_pos.
-        for (list, cursor) in [
-            (Vec::new(), 0u32),
-            (vec!["x".to_string()], 0),
-            (many, 12),
-        ] {
+        for (list, cursor) in [(Vec::new(), 0u32), (vec!["x".to_string()], 0), (many, 12)] {
             let table = build_lookup_table(&list, cursor);
             let bytes = to_bytes(ctxt, &table).expect("IBusLookupTable must encode");
             assert!(!bytes.is_empty(), "encoded lookup table must not be empty");
@@ -487,8 +523,7 @@ language = \"cja\"
         let ctxt = EncodingContext::<byteorder::LE>::new_dbus(0);
         for current in ["telex", "vni", "nom", "english", ""] {
             let props = method_prop_list(current);
-            let bytes =
-                to_bytes(ctxt, &props).expect("IBusPropList must encode as valid D-Bus");
+            let bytes = to_bytes(ctxt, &props).expect("IBusPropList must encode as valid D-Bus");
             assert!(!bytes.is_empty(), "encoded property list must not be empty");
         }
     }

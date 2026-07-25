@@ -387,7 +387,9 @@ mod tests {
         // SAFETY: ptr comes from this crate's per-engine CString storage,
         // non-null (asserted) and NUL-terminated by construction; no call
         // is made on the engine between obtaining and reading it.
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn type_str(id: u64, text: &str) -> BtKeyResult {

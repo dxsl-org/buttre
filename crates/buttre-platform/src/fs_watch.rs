@@ -166,7 +166,8 @@ mod tests {
     }
 
     fn unique_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("buttre-fs-watch-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("buttre-fs-watch-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -175,7 +176,9 @@ mod tests {
     /// as a match — it means "assume changed", which is what callers do.
     fn wait_for_file_cue(rx: &mpsc::Receiver<Option<String>>, name: &str) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while let Ok(cue) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        while let Ok(cue) =
+            rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
             match cue {
                 None => return true, // Rearmed
                 Some(n) if n == name => return true,

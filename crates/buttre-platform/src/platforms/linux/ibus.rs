@@ -168,9 +168,7 @@ impl ButtreEngine {
     /// (see [`Self::update_property`]). Best-effort: a failed emit only stales
     /// the panel radio, never typing.
     pub(crate) async fn publish_method_props(ctx: &SignalContext<'_>, method: &str) {
-        if let Err(e) =
-            Self::register_properties(ctx, ibus_props::method_prop_list(method)).await
-        {
+        if let Err(e) = Self::register_properties(ctx, ibus_props::method_prop_list(method)).await {
             tracing::warn!("publish_method_props: RegisterProperties failed: {e}");
         }
         for prop in ibus_props::method_prop_updates(method) {
@@ -352,9 +350,12 @@ impl ButtreEngine {
                 // Number keys pick a slot on the current page. Always consume
                 // 1..=9 while the popup is open (out-of-range is a no-op) so a
                 // stray digit never leaks into the Nôm composition.
-                KEY_1..=KEY_9 => {
-                    Some(self.bridge.lock().unwrap().select_at_page((keyval - KEY_1) as usize, page))
-                }
+                KEY_1..=KEY_9 => Some(
+                    self.bridge
+                        .lock()
+                        .unwrap()
+                        .select_at_page((keyval - KEY_1) as usize, page),
+                ),
                 // Anything else (more letters, backspace) refines the list.
                 _ => None,
             };
@@ -633,8 +634,7 @@ impl ButtreEngine {
                     Self::commit_text(ctx, build_ibus_text(&text)).await.ok();
                 }
                 ImeOp::Candidates { items, cursor } => {
-                    let displays: Vec<String> =
-                        items.iter().map(|v| v.display.clone()).collect();
+                    let displays: Vec<String> = items.iter().map(|v| v.display.clone()).collect();
                     let table = ibus_props::build_lookup_table(&displays, cursor as u32);
                     Self::update_lookup_table(ctx, table, true).await.ok();
                     Self::show_lookup_table(ctx).await.ok();
@@ -709,11 +709,7 @@ impl ButtreEngine {
         self.applied_no_preedit = effective;
         // set_use_composition commits any pending word before switching models;
         // the guard is dropped before the await (owned outcome returned).
-        let outcome = self
-            .bridge
-            .lock()
-            .unwrap()
-            .set_use_composition(!effective);
+        let outcome = self.bridge.lock().unwrap().set_use_composition(!effective);
         self.emit_ops(ctx, outcome.ops).await;
         tracing::info!("Preedit model: no_preedit={effective}");
     }

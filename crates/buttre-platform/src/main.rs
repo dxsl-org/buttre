@@ -255,7 +255,9 @@ fn run_doctor() {
     match backend_detect::pick(probes) {
         Some(backend_detect::ImeBackend::Fcitx5) => {
             if backend_detect::fcitx5_addon_installed() {
-                println!("backend:  fcitx5 (addon fcitx5-buttre đã cài — chọn \"Buttre\" trong fcitx5)");
+                println!(
+                    "backend:  fcitx5 (addon fcitx5-buttre đã cài — chọn \"Buttre\" trong fcitx5)"
+                );
             } else {
                 println!(
                     "backend:  fcitx5 (đang chạy) — LƯU Ý: addon fcitx5-buttre CHƯA cài;\n\
@@ -263,7 +265,9 @@ fn run_doctor() {
                 );
             }
         }
-        Some(backend_detect::ImeBackend::IBus) => println!("backend:  ibus (engine: buttre --ibus)"),
+        Some(backend_detect::ImeBackend::IBus) => {
+            println!("backend:  ibus (engine: buttre --ibus)")
+        }
         Some(backend_detect::ImeBackend::WaylandIme) => {
             println!("backend:  wayland (compositor-managed: buttre --ime)");
         }
@@ -444,7 +448,9 @@ fn main() -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     let _window = {
         use winit::window::WindowBuilder;
-        WindowBuilder::new().with_visible(false).build(&event_loop)?
+        WindowBuilder::new()
+            .with_visible(false)
+            .build(&event_loop)?
     };
 
     // tray-icon and muda render the tray menu through GTK on Linux, so GTK
@@ -678,7 +684,10 @@ fn main() -> Result<()> {
     {
         use buttre_platform::platforms::linux::backend_detect;
         let probes = backend_detect::probe();
-        info!("IME backend probes: {probes:?} -> {:?}", backend_detect::pick(probes));
+        info!(
+            "IME backend probes: {probes:?} -> {:?}",
+            backend_detect::pick(probes)
+        );
         if probes.fcitx5 && !backend_detect::fcitx5_addon_installed() {
             warn!(
                 "fcitx5 đang chạy nhưng addon fcitx5-buttre chưa được cài — nguồn gõ \
