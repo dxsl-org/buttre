@@ -137,32 +137,6 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
         }
     }
 
-    // For open-syllable non-adjacent đ: fire only when a vowel follows the
-    // second 'd' in raw.  This lets "dodong"→"đông" fire (vowel 'o' follows)
-    // while preserving English "dad"/"dads" (no vowel after the trailing 'd').
-    //
-    // KEEP (phase-03 adjudication table): "dad"→"đa" IS an attested Vietnamese
-    // syllable, so the attestation gate cannot tell it apart from a deliberate
-    // đ transform — this guard is the ONLY thing protecting English "dad"/
-    // "dads". Applies to every đ-path guard below (this fn, `base_ends_with_coda`,
-    // and the open-syllable vowel check at the đ branch's call site), not just
-    // this helper.
-    let has_vowel_after_second_d = {
-        let mut d_count = 0usize;
-        let second_d_pos = raw.iter().position(|&c| {
-            if c.eq_ignore_ascii_case(&'d') {
-                d_count += 1;
-            }
-            d_count == 2
-        });
-        second_d_pos.is_some_and(|pos| {
-            raw.get(pos + 1..)
-                .unwrap_or(&[])
-                .iter()
-                .any(|&c| is_vowel(c.to_ascii_lowercase()))
-        })
-    };
-
     let mut vowel_in_base = [false; 4];
 
     for (i, &ch) in raw.iter().enumerate() {
@@ -259,30 +233,30 @@ fn segment_mark_based(raw: &[char], opts: &ComposeOpts, allow_nonadjacent: bool)
             }
         }
 
-        // ── Non-adjacent đ (flexible typing: "datjd" → "đạt") ──────────────
+        // ── Non-adjacent đ (flexible typing: "datjd" → "đạt", "dads" → "đá") ─
         // The trailing 'd' turns the onset 'd' into 'đ'.  Unlike the vowel case,
         // the coda/nucleus guards do not apply (đ is a consonant transform on the
-        // onset).  To avoid mangling English ("dad" → "đa"), fire ONLY when the
-        // syllable is "committed" — it already has a coda consonant OR a tone —
-        // which signals genuine Vietnamese intent.  So "datjd"/"datd"/"datdj"
-        // → đạt/đat, but bare "dad" stays "dad".
+        // onset).  Fire when the syllable has a nucleus to build on: a coda
+        // consonant, a tone already typed, or an open syllable ending in its
+        // vowel.  So "datjd"/"datd"/"datdj" → đạt/đat, "dodong" → đông, and the
+        // free-marking order that puts the đ key last on an OPEN syllable
+        // ("dads" → "đá", "did" → "đi", "duadf" → "đùa") composes too.
         //
-        // KEEP unconditionally, for ALL validators (phase-03 adjudication
-        // table): "đa" (from bare "dad") IS an attested Vietnamese syllable —
-        // the attestation gate in `compose::mod` cannot distinguish this from
-        // a deliberate transform, so it can never protect English "d…d" words.
-        // This whole đ branch is NOT subject to the conditional-keep bypass
-        // used above for the vowel branch.
+        // ACCEPTED COLLISION (not a leak): English "dad"/"dads"/"did"/"dude"
+        // now compose to "đa"/"đá"/"đi"/"đue". "đa" IS an attested Vietnamese
+        // syllable, so no lexical gate can separate them from a deliberate
+        // transform — the escape is the double-key undo, the same hatch
+        // "reset" → "rết" already relies on. This costs 4 more words out of
+        // the 9 858-word English typeability corpus and buys back ~45% of the
+        // common đ-vocabulary in free-marking order, which the earlier
+        // "a vowel must follow the second d" guard made unreachable in Telex
+        // (VNI was never affected: its đ key is the digit 9, not a letter).
         if lc == 'd'
             && double_candidates[3] == 2
             && vowel_in_base[3]
-            && (!tones.is_empty() || base_ends_with_coda(&base)
-                // Fast-typing: onset 'd' followed by a vowel (open syllable) before
-                // the doubling key — "dodong"→"đông", "dodongf"→"đồng".
-                // Guard: a vowel must follow the second 'd' in raw; otherwise
-                // English words ending in 'd' ("dad", "dads") are preserved.
-                || (is_vowel(base.chars().last().unwrap_or('_').to_ascii_lowercase())
-                    && has_vowel_after_second_d))
+            && (!tones.is_empty()
+                || base_ends_with_coda(&base)
+                || is_vowel(base.chars().last().unwrap_or('_').to_ascii_lowercase()))
         {
             let base_len = base.chars().count();
             let non_adjacent = mark_non_adjacent(raw, i, lc, base_len, opts);

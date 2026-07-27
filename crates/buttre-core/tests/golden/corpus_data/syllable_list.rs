@@ -228,9 +228,14 @@ pub const SYLLABLES: &[&str] = &[
 /// and cannot distinguish "English word" from "real Vietnamese word" any more
 /// than the rest of the attestation-collision list above can).
 ///
+/// `dad` → `đa` and `dads` → `đá` are a further accepted collision (Telex
+/// only): the free-marking key order types the đ trigger last on an open
+/// syllable, and `đa` is itself an attested syllable, so no lexical gate can
+/// separate the two readings. Escape is the double-key undo, as with `reset`.
+///
 /// The remaining new entries (`meme`, `photo`, `papa`, `salsa`, `radar`,
-/// `banana`, `canal`, `media`, `dad`, `dads`, `nasa`) compose to their literal
-/// ASCII form in both methods.
+/// `banana`, `canal`, `media`, `nasa`) compose to their literal ASCII form in
+/// both methods.
 pub const ENGLISH_WORDS: &[&str] = &[
     "file", "text", "next", "expect", "window", "water", "their", "weird", "fix", "email",
     "password", "data", "type", "user", "name", "first", "last", "list", "from", "this", "that",

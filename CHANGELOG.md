@@ -4,6 +4,11 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- engine: bỏ dấu tự do (gõ hết chữ rồi mới bỏ dấu, kiểu Unikey) chạy được với nhóm từ `đ` âm tiết mở trong Telex — `dads`→`đá`, `did`→`đi`, `duadf`→`đùa`, `daodj`→`đạo`. Trước đây dấu `đ` chỉ nổ khi còn nguyên âm phía sau chữ `d` thứ hai, nên 20/44 từ `đ` thông dụng không gõ được theo thứ tự này (VNI không dính vì phím `đ` là chữ số 9). Đánh đổi: `dad`/`dads` giờ ra `đa`/`đá` — trùng nghĩa không tách được bằng từ điển, lối thoát là double-key undo như `reset`→`rết`; đo trên corpus 9.858 từ tiếng Anh chỉ thêm 4 từ cần escape, không từ nào mất khả năng gõ
+- engine: VNI bỏ dấu tự do không còn phụ thuộc thứ tự phím — dấu suy ra không liền kề chỉ cần hợp lệ về cấu trúc thay vì phải có trong từ điển 7.889 âm tiết (`dech91`→`đéch` như `d9ech1`). Phím chữ số không thể nằm trong từ tiếng Anh nên cổng từ vựng ở nhánh này không bảo vệ được gì, chỉ chặn nhầm tiếng lóng/tên riêng/phương ngữ
+- engine: gõ tắt `đt`/`đc`/`đhqg` với dấu `9` đặt cuối (`dt9`) không còn bị hoàn nguyên về phím thô khi nhấn dấu cách — chốt biên từ giờ miễn trừ dạng viết tắt `đ`, vốn không bao giờ có dấu thanh để thỏa điều kiện cũ
+- test: golden corpus thêm nhãn `FreeToneMarking` (+193 case mỗi kiểu gõ) và test bất biến "thứ tự phím không đổi kết quả"; bộ dữ liệu `buttre-test` thêm 353 case bỏ dấu tự do
+
 ## [0.7.11-beta] — 2026-07-25
 
 - linux: tải custom keyboard
