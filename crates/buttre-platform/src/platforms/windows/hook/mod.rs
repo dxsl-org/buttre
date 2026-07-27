@@ -6,7 +6,10 @@ mod profiling;
 mod queue;
 
 pub use crate::platforms::windows::common::{send_backspaces, send_string, send_unicode_char};
-pub use callback::{dispatch_toggle_last_word, install_hook, run_message_loop, uninstall_hook};
+pub use callback::{
+    dispatch_toggle_last_word, install_hook, poll_pending_toggle_last_word, run_message_loop,
+    uninstall_hook,
+};
 pub use profiling::{ProfileStats, HOOK_PROFILER};
 pub use queue::{KeyEvent, QueueProcessor};
 

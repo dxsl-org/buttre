@@ -100,6 +100,18 @@ fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
 #[cfg(not(platform_windows))]
 fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
 
+/// Complete a word toggle whose chord was still held when the hotkey fired
+/// (see `hook::poll_pending_toggle_last_word` for why injecting under a held
+/// Ctrl/Shift corrupts text). Ticked from the event loop; cheap no-op when no
+/// toggle is pending, and on every non-Windows platform.
+#[cfg(platform_windows)]
+fn poll_pending_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
+    buttre_platform::platforms::windows::hook::poll_pending_toggle_last_word(keyboard);
+}
+
+#[cfg(not(platform_windows))]
+fn poll_pending_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
+
 /// Debounce successive personal-learning save requests down to the LATEST
 /// snapshot only (event-sourcing-completion Phase 5, red-team C3): a
 /// snapshot is the full current store state, not a delta, so replaying every
@@ -1029,6 +1041,10 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+
+                // A word toggle whose chord was still held when the hotkey
+                // fired completes here, once the user lets go.
+                poll_pending_toggle_last_word(&keyboard);
 
                 if let Some(action) = hotkey_manager.check_hotkey() {
                     match action {

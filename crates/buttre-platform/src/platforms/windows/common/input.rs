@@ -14,10 +14,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 /// Extra info flag to identify our own injected keys
 pub const BUTTRE_INJECTED: usize = 0x564B4559; // "VKEY" in hex
 
-/// Modifier keys that turn an injected keystroke into an application shortcut,
-/// in the left/right-specific form `SendInput` needs. Both variants of each are
-/// listed because only the one actually held may be released — releasing the
-/// other would be a keyup for a key that was never down.
+/// Modifier keys that turn an injected keystroke into an application shortcut.
+/// Both the left and right variant of each is listed: either one alone is
+/// enough to change how an injected keystroke is interpreted.
 #[cfg(windows)]
 const SHORTCUT_MODIFIER_VKS: [u16; 8] = [
     VK_LCONTROL,
@@ -30,149 +29,50 @@ const SHORTCUT_MODIFIER_VKS: [u16; 8] = [
     VK_RWIN,
 ];
 
-/// Temporarily lifts the user's physically-held modifier keys for the duration
-/// of an injection, restoring them on drop.
+/// True when any modifier that would turn an injected keystroke into an
+/// application shortcut is currently held.
 ///
-/// ## Why this exists
+/// ## Why callers need this
 ///
 /// Injected input composes with whatever modifiers are ACTUALLY down. The
 /// ordinary typing path never has any (a Ctrl/Alt chord never reaches the
-/// engine as text), but the `Ctrl+Shift+Z` word toggle injects while the user
-/// is still holding the chord — the tray polls the hotkey every 50 ms and
-/// nobody releases a key that fast. Without this guard the application sees
-/// `Ctrl+Shift+Backspace` instead of `Backspace` (delete-previous-WORD in Word
-/// and VS Code, silently destroying text) and the `KEYEVENTF_UNICODE` payload
-/// gets routed to accelerators instead of inserted.
+/// engine as text), but the `Ctrl+Shift+Z` word toggle is dispatched from the
+/// tray's event loop up to 50 ms after the keypress — nobody lets go of a key
+/// that fast. Injecting then makes the application see `Ctrl+Shift+Backspace`
+/// instead of `Backspace` (delete-previous-WORD in Word and VS Code, silently
+/// destroying text) and routes the `KEYEVENTF_UNICODE` payload to accelerators
+/// instead of inserting it.
 ///
-/// ## Restore is conditional, and that asymmetry is deliberate
+/// The fix is to WAIT for the chord to be released — see
+/// `hook::dispatch_toggle_last_word`.
 ///
-/// On drop, a modifier is re-pressed ONLY if it is still physically held at
-/// that instant. Getting it wrong in that direction leaves the application
-/// believing a held key is up — harmless, self-correcting on the next
-/// keystroke. Re-pressing unconditionally could leave a modifier stuck DOWN
-/// from the application's point of view, which breaks all subsequent typing;
-/// never trade toward that failure.
+/// ## Why not synthesize a keyup/keydown pair around the injection
 ///
-/// Every synthetic event carries [`BUTTRE_INJECTED`], so our own low-level
-/// hook skips them and no engine state is touched.
+/// Tried and reverted: `SendInput` UPDATES the async key state this function
+/// reads, so once we release Ctrl ourselves we can no longer tell whether the
+/// user is still holding it. Both ways of restoring are wrong — doing it
+/// unconditionally can strand a modifier DOWN (breaking every later
+/// keystroke), and doing it only for keys that still read as held restores
+/// nothing at all, leaving the system convinced the user let go. The latter is
+/// what silently swallowed every repeat of the chord: the first press worked,
+/// the second arrived as a bare `z`.
 #[cfg(windows)]
-pub struct ModifiersReleased {
-    /// The VKs this guard actually released, in release order.
-    released: Vec<u16>,
+pub fn any_shortcut_modifier_held() -> bool {
+    SHORTCUT_MODIFIER_VKS.into_iter().any(is_physically_down)
 }
 
-#[cfg(windows)]
-impl ModifiersReleased {
-    /// Release every currently-held shortcut modifier. Cheap no-op (no
-    /// `SendInput` at all) when none is held — the normal case for every
-    /// caller other than the word toggle.
-    ///
-    /// Deliberately not named `new`/`default`: constructing this value INJECTS
-    /// input as a side effect, which neither of those names would lead a reader
-    /// to expect.
-    pub fn release_held() -> Self {
-        let released = held_shortcut_modifiers(is_physically_down);
-        if !released.is_empty() {
-            debug!(
-                "Releasing {} held modifier(s) for injection",
-                released.len()
-            );
-            send_modifier_batch(&released, KEYEVENTF_KEYUP);
-        }
-        Self { released }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for ModifiersReleased {
-    fn drop(&mut self) {
-        // Re-check: the user may have let go during the injection, and
-        // re-pressing then would strand the modifier down (see the type doc).
-        let still_held = filter_still_held(&self.released, is_physically_down);
-        if !still_held.is_empty() {
-            send_modifier_batch(&still_held, 0);
-        }
-    }
-}
-
-/// Which shortcut modifiers to release, given a "is this VK down" oracle.
-///
-/// Split out from [`ModifiersReleased::release_held`] so the left/right
-/// selection is unit-testable without injecting real keystrokes into the
-/// developer's session (a test that pressed a real Ctrl and then failed could
-/// strand it down system-wide).
-#[cfg(windows)]
-fn held_shortcut_modifiers(is_down: impl Fn(u16) -> bool) -> Vec<u16> {
-    SHORTCUT_MODIFIER_VKS
-        .into_iter()
-        .filter(|&vk| is_down(vk))
-        .collect()
-}
-
-/// Which of the previously-released modifiers to press back. Same
-/// testability rationale as [`held_shortcut_modifiers`].
-#[cfg(windows)]
-fn filter_still_held(released: &[u16], is_down: impl Fn(u16) -> bool) -> Vec<u16> {
-    released.iter().copied().filter(|&vk| is_down(vk)).collect()
+#[cfg(not(windows))]
+pub fn any_shortcut_modifier_held() -> bool {
+    false
 }
 
 /// True when `vk` is down according to the async (physical) key state.
-///
-/// `SendInput` updates this state, so after [`ModifiersReleased::release_held`]
-/// a released modifier reads as up here — which is exactly what the
-/// `shift_already_held` probe in [`send_replacement_via_selection`] needs to
-/// see.
 #[cfg(windows)]
 fn is_physically_down(vk: u16) -> bool {
     // SAFETY: GetAsyncKeyState takes a plain VK code and cannot fail; the high
     // bit of the result indicates the key is currently down.
     let state = unsafe { GetAsyncKeyState(vk as i32) };
     state as u16 & 0x8000 != 0
-}
-
-/// Send one keyup-or-keydown event per VK in a single batch.
-///
-/// `flags` is [`KEYEVENTF_KEYUP`] to release or `0` to press. Win keys get
-/// [`KEYEVENTF_EXTENDEDKEY`] — they are extended-scancode keys and some
-/// applications ignore the event without it.
-#[cfg(windows)]
-fn send_modifier_batch(vks: &[u16], flags: u32) {
-    let mut inputs: Vec<INPUT> = vks
-        .iter()
-        .map(|&vk| {
-            let extended = if vk == VK_LWIN || vk == VK_RWIN {
-                KEYEVENTF_EXTENDEDKEY
-            } else {
-                0
-            };
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: vk,
-                        wScan: 0,
-                        dwFlags: flags | extended,
-                        time: 0,
-                        dwExtraInfo: BUTTRE_INJECTED,
-                    },
-                },
-            }
-        })
-        .collect();
-
-    // SAFETY: `inputs` is a live Vec of properly initialized INPUT structs;
-    // the count matches its length and the size argument matches the struct.
-    unsafe {
-        let expected = inputs.len() as u32;
-        let sent = SendInput(
-            expected,
-            inputs.as_mut_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        );
-        if sent != expected {
-            tracing::error!("SendInput (modifiers) failed: expected {expected}, sent {sent}");
-        }
-    }
 }
 
 /// Send backspace keys (optimized with batching)
@@ -329,9 +229,9 @@ pub fn send_replacement(backspace_count: usize, text: &str) {
 /// (Ctrl/Alt chords never reach the engine as text), so injecting an
 /// LSHIFT-down/LEFT/LSHIFT-up sandwich cannot compose with a held Ctrl/Alt
 /// into a word-selection chord. The ONE caller for which that does not hold —
-/// the `Ctrl+Shift+Z` word toggle, which injects while the chord is still down
-/// — wraps its call in [`ModifiersReleased`], so by the time this runs the
-/// modifiers are already lifted. When Shift is ALREADY physically held (e.g.
+/// the `Ctrl+Shift+Z` word toggle — defers its injection until the chord is
+/// released (see [`any_shortcut_modifier_held`]), so no modifier is down by
+/// the time this runs either. When Shift is ALREADY physically held (e.g.
 /// typing an all-caps word), the synthetic down/up is skipped — pressing it
 /// anyway would still select correctly, but the synthetic keyup would lift
 /// Shift out from under the user's still-held key, un-capitalizing whatever
@@ -569,27 +469,12 @@ pub fn send_unicode_char(_ch: char) {}
 mod tests {
     use super::*;
 
-    /// Only the variant actually held is released — emitting a keyup for a key
-    /// that was never down would tell the application a key was let go that it
-    /// never saw pressed.
+    /// Every modifier that reinterprets an injected keystroke must be watched,
+    /// in both left and right form: Ctrl and Alt turn Backspace into
+    /// delete-WORD, Shift turns it into a selection extend, Win opens the
+    /// shell. Missing one means the word toggle would inject through it.
     #[test]
-    fn releases_only_the_held_variant_of_each_modifier() {
-        let held = held_shortcut_modifiers(|vk| vk == VK_LCONTROL || vk == VK_RSHIFT);
-        assert_eq!(held, vec![VK_LCONTROL, VK_RSHIFT]);
-    }
-
-    #[test]
-    fn nothing_held_releases_nothing() {
-        assert!(held_shortcut_modifiers(|_| false).is_empty());
-    }
-
-    #[test]
-    fn covers_every_shortcut_modifier() {
-        // Ctrl and Alt turn Backspace into delete-word; Shift turns it into a
-        // selection extend; Win opens the shell. All four must be lifted, in
-        // both left and right form.
-        let held = held_shortcut_modifiers(|_| true);
-        assert_eq!(held.len(), SHORTCUT_MODIFIER_VKS.len());
+    fn watches_both_variants_of_every_shortcut_modifier() {
         for vk in [
             VK_LCONTROL,
             VK_RCONTROL,
@@ -600,22 +485,22 @@ mod tests {
             VK_LWIN,
             VK_RWIN,
         ] {
-            assert!(held.contains(&vk), "missing modifier {vk:#x}");
+            assert!(
+                SHORTCUT_MODIFIER_VKS.contains(&vk),
+                "missing modifier {vk:#x}"
+            );
         }
     }
 
-    /// The restore step re-presses a SUBSET of what was released, never
-    /// anything else — a modifier the user let go of during the injection must
-    /// stay up (stranding one DOWN breaks all subsequent typing).
+    /// Deliberately NOT the generic `VK_CONTROL`/`VK_SHIFT`/`VK_MENU`: those
+    /// report either side, which is fine for a pure probe but would have made
+    /// the list ambiguous for anything that needs to know WHICH key is down.
     #[test]
-    fn restore_skips_modifiers_released_during_the_injection() {
-        let released = vec![VK_LCONTROL, VK_LSHIFT];
-        let still = filter_still_held(&released, |vk| vk == VK_LCONTROL);
-        assert_eq!(still, vec![VK_LCONTROL]);
-    }
-
-    #[test]
-    fn restore_presses_nothing_when_everything_was_let_go() {
-        assert!(filter_still_held(&[VK_LCONTROL, VK_LSHIFT], |_| false).is_empty());
+    fn watch_list_has_no_duplicates() {
+        let mut seen = SHORTCUT_MODIFIER_VKS.to_vec();
+        seen.sort_unstable();
+        let len_before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), len_before);
     }
 }
