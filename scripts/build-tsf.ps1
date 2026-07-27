@@ -1,17 +1,21 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Build and install the TSF text service exactly the way the release MSI
-    does, for local testing before shipping.
+    Build the TSF text service, and optionally install it exactly the way the
+    release MSI does, for local testing before shipping.
 
 .DESCRIPTION
-    Mirrors installers\windows\product.wxs step for step: builds the release
-    profile, stages the same files into the same directory, and writes the
-    same registry keys. What you test is what users get.
+    BUILDS ONLY by default — no admin, nothing touched outside target\. It
+    reports the payload the MSI would ship and the command to install it.
 
-    In particular the registration is REGISTRY-ONLY, matching the MSI — the
-    MSI has no CustomAction, so it never calls the DLL's own
-    DllRegisterServer. That difference is not cosmetic:
+    Add -Install to actually put it on the machine. That step mirrors
+    installers\windows\product.wxs: the same files into the same directory,
+    the same registry keys. What you test is then what users get, and it needs
+    Administrator for the same reason the MSI does (Program Files + HKLM).
+
+    Registration under -Install is REGISTRY-ONLY, matching the MSI — the MSI
+    has no CustomAction, so it never calls the DLL's own DllRegisterServer.
+    That difference is not cosmetic:
 
       MSI (default here)   vi-VN profile only, no TSF category registration
       -SelfRegister        regsvr32 -> DllRegisterServer, which ALSO adds an
@@ -23,47 +27,54 @@
     use -SelfRegister only to isolate whether a bug comes from the missing
     category registration.
 
-    Requires Administrator: the install directory is under Program Files and
-    every registry key lives in HKLM, exactly as in the MSI.
+.PARAMETER Install
+    After building, copy the payload into place and register it. Requires
+    Administrator.
 
 .PARAMETER Uninstall
-    Remove the registration and the installed files, then exit.
+    Remove the registration and the installed files, then exit. Requires
+    Administrator.
 
 .PARAMETER SelfRegister
-    Register through regsvr32 (DllRegisterServer) instead of the MSI's
-    registry writes. See the description for how this differs from a release.
+    With -Install, register through regsvr32 (DllRegisterServer) instead of
+    the MSI's registry writes. See the description for how the two differ.
 
 .PARAMETER Msi
     Build a real .msi via installers\windows\build_installer.ps1 and stop
     without installing it. The most faithful test of all, and the slowest —
-    needs cargo-wix.
+    needs cargo-wix. No admin needed.
 
 .PARAMETER Debug
-    Build and install the DEBUG DLL. The only reason to: TSF logging is
-    compiled at WARN in release and at DEBUG in debug builds (see
-    tsf\logging.rs), so this is the only way to see per-keystroke traces.
-    NOT a shippable build — it is several times larger and slower, and it
-    loads into every application on the machine.
+    Build the DEBUG DLL. The only reason to: TSF logging is compiled at WARN
+    in release and at DEBUG in debug builds (see tsf\logging.rs), so this is
+    the only way to see per-keystroke traces. NOT a shippable build — it is
+    several times larger and slower, and it loads into every application on
+    the machine.
 
 .PARAMETER NoBuild
-    Skip cargo and install whatever is already built.
+    Skip cargo and use whatever is already built.
 
 .PARAMETER InstallDir
     Override the install location. Defaults to the MSI's directory.
 
 .EXAMPLE
-    # Build, install and register like the release does:
+    # Just build (no admin, nothing installed):
     .\scripts\build-tsf.ps1
 
 .EXAMPLE
-    # Iterate on the DLL without rebuilding the world:
-    .\scripts\build-tsf.ps1 -NoBuild
+    # Build and install like the release does (Administrator):
+    .\scripts\build-tsf.ps1 -Install
 
 .EXAMPLE
-    # Clean up:
+    # Reinstall the DLL you already built (Administrator):
+    .\scripts\build-tsf.ps1 -Install -NoBuild
+
+.EXAMPLE
+    # Clean up (Administrator):
     .\scripts\build-tsf.ps1 -Uninstall
 #>
 param(
+    [switch]$Install,
     [switch]$Uninstall,
     [switch]$SelfRegister,
     [switch]$Msi,
@@ -206,8 +217,12 @@ if ($Msi) {
     exit $LASTEXITCODE
 }
 
-Assert-Admin
-Assert-Bitness
+# Elevation is demanded only by the steps that genuinely touch the machine —
+# building never does, so a plain `.\build-tsf.ps1` runs in any shell.
+if ($Install -or $Uninstall) {
+    Assert-Admin
+    Assert-Bitness
+}
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
 if ($Uninstall) {
@@ -232,24 +247,27 @@ if ($Uninstall) {
 
 Push-Location $repoRoot
 try {
-    $mode = if ($SelfRegister) { "regsvr32 (DllRegisterServer — NOT what the MSI does)" }
-            else { "registry writes (same as the release MSI)" }
     $profileDir = if ($Debug) { "debug" } else { "release" }
+    $steps = if ($Install) { 4 } else { 2 }
     Write-Host ""
-    Write-Host "  buttre TSF local install" -ForegroundColor Cyan
-    Write-Host "  Target: $InstallDir" -ForegroundColor Gray
-    Write-Host "  Register via: $mode" -ForegroundColor Gray
+    Write-Host "  buttre TSF $(if ($Install) { 'build + install' } else { 'build' })" -ForegroundColor Cyan
+    if ($Install) {
+        $mode = if ($SelfRegister) { "regsvr32 (DllRegisterServer — NOT what the MSI does)" }
+                else { "registry writes (same as the release MSI)" }
+        Write-Host "  Target: $InstallDir" -ForegroundColor Gray
+        Write-Host "  Register via: $mode" -ForegroundColor Gray
+    }
     if ($Debug) {
         Write-Host "  Profile: DEBUG — for TSF logs only, never ship this" -ForegroundColor Yellow
     }
     Write-Host ""
-    Show-MsiInstallWarning
+    if ($Install) { Show-MsiInstallWarning }
 
     # ── Build ────────────────────────────────────────────────────────────
     if ($NoBuild) {
-        Write-Host "[1/4] Skipped build (-NoBuild)" -ForegroundColor DarkGray
+        Write-Host "[1/$steps] Skipped build (-NoBuild)" -ForegroundColor DarkGray
     } else {
-        Write-Host "[1/4] Building $profileDir..." -ForegroundColor Yellow
+        Write-Host "[1/$steps] Building $profileDir..." -ForegroundColor Yellow
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $buildArgs = @("build", "-p", "buttre-platform")
         if (-not $Debug) { $buildArgs += "--release" }
@@ -274,46 +292,65 @@ try {
         }
     }
 
+    # buttre_nom.db is conditional in the MSI (IncludeNomDb), so it is here too.
+    $nomDb = @(
+        (Join-Path $targetDir "buttre_nom.db"),
+        (Join-Path $repoRoot "buttre_nom.db")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $kbSource = Join-Path $repoRoot "keyboards"
+
+    # ── Report the payload ───────────────────────────────────────────────
+    Write-Host "[2/$steps] Payload the MSI would ship:" -ForegroundColor Yellow
+    Write-Host "      buttre_platform.dll ($([math]::Round((Get-Item $dllSource).Length / 1MB, 1)) MB)" -ForegroundColor Gray
+    Write-Host "      buttre.exe          ($([math]::Round((Get-Item $exeSource).Length / 1MB, 1)) MB)" -ForegroundColor Gray
+    if (Test-Path $kbSource) {
+        Write-Host "      keyboards\          ($((Get-ChildItem "$kbSource\*.toml").Count) layouts)" -ForegroundColor Gray
+    }
+    if ($nomDb) {
+        Write-Host "      buttre_nom.db" -ForegroundColor Gray
+    } else {
+        Write-Host "      buttre_nom.db not found — Nôm unavailable, as in an MSI built without it" -ForegroundColor DarkYellow
+    }
+
+    if (-not $Install) {
+        Write-Host ""
+        Write-Host "  Built. Nothing installed — this step needs no admin." -ForegroundColor Green
+        Write-Host "  From:  $targetDir" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  To install it (Administrator PowerShell):" -ForegroundColor Cyan
+        $installCmd = ".\scripts\build-tsf.ps1 -Install -NoBuild"
+        if ($Debug) { $installCmd += " -Debug" }
+        Write-Host "    $installCmd" -ForegroundColor White
+        Write-Host ""
+        exit 0
+    }
+
     # ── Unregister + free the DLL ────────────────────────────────────────
-    Write-Host "[2/4] Unregistering the previous install..." -ForegroundColor Yellow
+    Write-Host "[3/$steps] Unregistering the previous install..." -ForegroundColor Yellow
     $oldDll = Join-Path $InstallDir "buttre_platform.dll"
     if (Test-Path $oldDll) { & regsvr32.exe /u /s $oldDll 2>$null }
     Remove-Registration
     Stop-TsfHosts
     Write-Host "      Done" -ForegroundColor Gray
 
-    # ── Stage the MSI's payload ──────────────────────────────────────────
-    Write-Host "[3/4] Installing files..." -ForegroundColor Yellow
+    # ── Copy the MSI's payload into place ────────────────────────────────
+    Write-Host "[4/$steps] Installing files..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Force $InstallDir | Out-Null
 
     Copy-OverLockedFile $dllSource (Join-Path $InstallDir "buttre_platform.dll")
-    Write-Host "      buttre_platform.dll ($([math]::Round((Get-Item $dllSource).Length / 1MB, 1)) MB)" -ForegroundColor Gray
     Copy-OverLockedFile $exeSource (Join-Path $InstallDir "buttre.exe")
-    Write-Host "      buttre.exe" -ForegroundColor Gray
 
     # keyboards\*.toml — the MSI ships these as individual components.
-    $kbSource = Join-Path $repoRoot "keyboards"
     if (Test-Path $kbSource) {
         $kbDest = Join-Path $InstallDir "keyboards"
         New-Item -ItemType Directory -Force $kbDest | Out-Null
         Copy-Item "$kbSource\*.toml" $kbDest -Force
-        Write-Host "      keyboards\ ($((Get-ChildItem "$kbDest\*.toml").Count) layouts)" -ForegroundColor Gray
     }
-
-    # buttre_nom.db — conditional in the MSI (IncludeNomDb), so conditional here.
-    $nomDb = @(
-        (Join-Path $targetDir "buttre_nom.db"),
-        (Join-Path $repoRoot "buttre_nom.db")
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($nomDb) {
-        Copy-Item $nomDb (Join-Path $InstallDir "buttre_nom.db") -Force
-        Write-Host "      buttre_nom.db" -ForegroundColor Gray
-    } else {
-        Write-Host "      buttre_nom.db not found — Nôm unavailable, as in an MSI built without it" -ForegroundColor DarkYellow
-    }
+    if ($nomDb) { Copy-Item $nomDb (Join-Path $InstallDir "buttre_nom.db") -Force }
+    Write-Host "      Copied to $InstallDir" -ForegroundColor Gray
 
     # ── Register ─────────────────────────────────────────────────────────
-    Write-Host "[4/4] Registering..." -ForegroundColor Yellow
+    Write-Host "      Registering..." -ForegroundColor Yellow
     $installedDll = Join-Path $InstallDir "buttre_platform.dll"
     if ($SelfRegister) {
         & regsvr32.exe /s $installedDll

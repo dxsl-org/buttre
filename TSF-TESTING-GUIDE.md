@@ -11,7 +11,7 @@
 2. Chạy lệnh sau:
 ```powershell
 cd "C:\Users\Admin\Download\buttre"
-.\scripts\build-tsf.ps1
+.\scripts\build-tsf.ps1 -Install
 ```
 
 Script sẽ tự động:
@@ -149,7 +149,7 @@ notepad $env:TEMP\buttre-tsf.log
 
 **Giải pháp:**
 1. Restart máy
-2. Chạy lại `.\scripts\build-tsf.ps1`
+2. Chạy lại `.\scripts\build-tsf.ps1 -Install`
 3. Kiểm tra Event Viewer:
    - `Win + X` > Event Viewer
    - Windows Logs > Application
@@ -166,7 +166,7 @@ notepad $env:TEMP\buttre-tsf.log
 ```powershell
 # Uninstall và install lại
 .\scripts\build-tsf.ps1 -Uninstall
-.\scripts\build-tsf.ps1
+.\scripts\build-tsf.ps1 -Install
 
 # Check DLL dependencies
 dumpbin /dependents "C:\Program Files\buttre\buttre_platform.dll"

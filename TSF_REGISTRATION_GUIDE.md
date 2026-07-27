@@ -19,7 +19,7 @@
 2. **Chạy script đăng ký:**
    ```powershell
    cd C:\Users\Admin\Download\buttre
-   .\scripts\build-tsf.ps1
+   .\scripts\build-tsf.ps1 -Install
    ```
 
 3. **Kiểm tra kết quả:**

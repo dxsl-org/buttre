@@ -588,13 +588,16 @@ cargo clippy --all-targets --all-features  # Linting
 ### Triển Khai Windows TSF
 
 ```powershell
-# Build + cài + đăng ký giống hệt bản MSI sẽ release (yêu cầu Admin)
+# Chỉ build — không cần Admin, không đụng gì ngoài target/
 ./scripts/build-tsf.ps1
 
-# Bản debug — cách duy nhất thấy log TSF (release chỉ log mức WARN)
-./scripts/build-tsf.ps1 -Debug
+# Cài + đăng ký giống hệt bản MSI sẽ release (yêu cầu Admin)
+./scripts/build-tsf.ps1 -Install
 
-# Gỡ sạch
+# Bản debug — cách duy nhất thấy log TSF (release chỉ log mức WARN)
+./scripts/build-tsf.ps1 -Install -Debug
+
+# Gỡ sạch (yêu cầu Admin)
 ./scripts/build-tsf.ps1 -Uninstall
 
 # Kiểm tra trạng thái đăng ký

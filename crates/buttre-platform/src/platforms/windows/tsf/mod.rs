@@ -21,9 +21,12 @@
 //! ## Build & Installation
 //!
 //! ```bash
-//! # Build, install and register exactly the way the release MSI does
-//! # (run as Administrator)
+//! # Build only (no admin):
 //! .\scripts\build-tsf.ps1
+//!
+//! # Install and register exactly the way the release MSI does
+//! # (Administrator):
+//! .\scripts\build-tsf.ps1 -Install
 //! ```
 //!
 //! ## Important Notes

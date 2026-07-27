@@ -7,7 +7,7 @@
 ```powershell
 # Chuột phải PowerShell → Run as Administrator
 cd <thư mục buttre>
-.\scripts\build-tsf.ps1
+.\scripts\build-tsf.ps1 -Install
 ```
 
 ### Bước 2: Thêm buttre vào Windows
