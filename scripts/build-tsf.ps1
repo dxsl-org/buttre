@@ -38,8 +38,15 @@
     without installing it. The most faithful test of all, and the slowest —
     needs cargo-wix.
 
+.PARAMETER Debug
+    Build and install the DEBUG DLL. The only reason to: TSF logging is
+    compiled at WARN in release and at DEBUG in debug builds (see
+    tsf\logging.rs), so this is the only way to see per-keystroke traces.
+    NOT a shippable build — it is several times larger and slower, and it
+    loads into every application on the machine.
+
 .PARAMETER NoBuild
-    Skip cargo and install whatever is already in target\release.
+    Skip cargo and install whatever is already built.
 
 .PARAMETER InstallDir
     Override the install location. Defaults to the MSI's directory.
@@ -60,6 +67,7 @@ param(
     [switch]$Uninstall,
     [switch]$SelfRegister,
     [switch]$Msi,
+    [switch]$Debug,
     [switch]$NoBuild,
     [string]$InstallDir = "$env:ProgramFiles\buttre"
 )
@@ -178,7 +186,8 @@ function Test-MsiInstalled {
     return $null
 }
 
-function Warn-IfMsiInstalled {
+function Show-MsiInstallWarning {
+    # Name chosen for PSUseApprovedVerbs; it only prints.
     $installed = Test-MsiInstalled
     if ($installed) {
         Write-Host "  WARNING: '$installed' is installed via MSI." -ForegroundColor Yellow
@@ -205,7 +214,7 @@ if ($Uninstall) {
     Write-Host ""
     Write-Host "  Removing buttre TSF" -ForegroundColor Cyan
     Write-Host ""
-    Warn-IfMsiInstalled
+    Show-MsiInstallWarning
 
     $dll = Join-Path $InstallDir "buttre_platform.dll"
     if (Test-Path $dll) { & regsvr32.exe /u /s $dll 2>$null }
@@ -225,20 +234,26 @@ Push-Location $repoRoot
 try {
     $mode = if ($SelfRegister) { "regsvr32 (DllRegisterServer — NOT what the MSI does)" }
             else { "registry writes (same as the release MSI)" }
+    $profileDir = if ($Debug) { "debug" } else { "release" }
     Write-Host ""
     Write-Host "  buttre TSF local install" -ForegroundColor Cyan
     Write-Host "  Target: $InstallDir" -ForegroundColor Gray
     Write-Host "  Register via: $mode" -ForegroundColor Gray
+    if ($Debug) {
+        Write-Host "  Profile: DEBUG — for TSF logs only, never ship this" -ForegroundColor Yellow
+    }
     Write-Host ""
-    Warn-IfMsiInstalled
+    Show-MsiInstallWarning
 
     # ── Build ────────────────────────────────────────────────────────────
     if ($NoBuild) {
         Write-Host "[1/4] Skipped build (-NoBuild)" -ForegroundColor DarkGray
     } else {
-        Write-Host "[1/4] Building release..." -ForegroundColor Yellow
+        Write-Host "[1/4] Building $profileDir..." -ForegroundColor Yellow
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        & cargo build -p buttre-platform --release
+        $buildArgs = @("build", "-p", "buttre-platform")
+        if (-not $Debug) { $buildArgs += "--release" }
+        & cargo @buildArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host "ERROR: cargo build failed." -ForegroundColor Red
             Write-Host "       If it failed writing buttre_platform.dll, an app still has the" -ForegroundColor Gray
@@ -249,7 +264,7 @@ try {
         Write-Host "      OK ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)" -ForegroundColor Green
     }
 
-    $targetDir = Join-Path $repoRoot "target\release"
+    $targetDir = Join-Path $repoRoot "target\$profileDir"
     $dllSource = Join-Path $targetDir "buttre_platform.dll"
     $exeSource = Join-Path $targetDir "buttre.exe"
     foreach ($required in @($dllSource, $exeSource)) {

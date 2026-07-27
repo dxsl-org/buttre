@@ -21,13 +21,9 @@
 //! ## Build & Installation
 //!
 //! ```bash
-//! # Build the DLL
-//! cargo build --package buttre-platform --lib --release
-//!
-//! # Output: target/release/buttre_platform.dll
-//!
-//! # Install (run as Administrator)
-//! .\install-tsf-auto.ps1
+//! # Build, install and register exactly the way the release MSI does
+//! # (run as Administrator)
+//! .\scripts\build-tsf.ps1
 //! ```
 //!
 //! ## Important Notes

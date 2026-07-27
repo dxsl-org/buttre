@@ -588,18 +588,24 @@ cargo clippy --all-targets --all-features  # Linting
 ### Triển Khai Windows TSF
 
 ```powershell
-# Build lại TSF DLL (yêu cầu Admin)
-./rebuild-tsf.ps1
+# Build + cài + đăng ký giống hệt bản MSI sẽ release (yêu cầu Admin)
+./scripts/build-tsf.ps1
 
-# Build lại TSF DLL (chế độ debug)
-./rebuild-tsf-debug.ps1
+# Bản debug — cách duy nhất thấy log TSF (release chỉ log mức WARN)
+./scripts/build-tsf.ps1 -Debug
 
-# Đăng ký DLL (yêu cầu Admin)
-regsvr32 target/release/buttre_platform.dll
+# Gỡ sạch
+./scripts/build-tsf.ps1 -Uninstall
 
-# Hủy đăng ký DLL (yêu cầu Admin)
-regsvr32 /u target/release/buttre_platform.dll
+# Kiểm tra trạng thái đăng ký
+./scripts/check-tsf-status.ps1
 ```
+
+MSI đăng ký bằng **registry thuần**, không có CustomAction nào nên nó không
+bao giờ gọi `DllRegisterServer`. Vì thế `build-tsf.ps1` mặc định cũng ghi
+registry chứ không chạy `regsvr32` — dùng `regsvr32` là đang test một service
+đăng ký đầy đủ hơn bản ship (thêm profile en-US và hai TSF category). Cờ
+`-SelfRegister` giữ đường đó lại để khoanh vùng lỗi.
 
 ---
 

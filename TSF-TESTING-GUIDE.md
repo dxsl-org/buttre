@@ -11,7 +11,7 @@
 2. Chạy lệnh sau:
 ```powershell
 cd "C:\Users\Admin\Download\buttre"
-.\install-tsf-auto.ps1
+.\scripts\build-tsf.ps1
 ```
 
 Script sẽ tự động:
@@ -149,7 +149,7 @@ notepad $env:TEMP\buttre-tsf.log
 
 **Giải pháp:**
 1. Restart máy
-2. Chạy lại `.\install-tsf-auto.ps1`
+2. Chạy lại `.\scripts\build-tsf.ps1`
 3. Kiểm tra Event Viewer:
    - `Win + X` > Event Viewer
    - Windows Logs > Application
@@ -165,8 +165,8 @@ notepad $env:TEMP\buttre-tsf.log
 **Giải pháp:**
 ```powershell
 # Uninstall và install lại
-.\install-tsf-auto.ps1 -Uninstall
-.\install-tsf-auto.ps1
+.\scripts\build-tsf.ps1 -Uninstall
+.\scripts\build-tsf.ps1
 
 # Check DLL dependencies
 dumpbin /dependents "C:\Program Files\buttre\buttre_platform.dll"
@@ -199,7 +199,7 @@ TSF composition yêu cầu:
 
 ### Cách 1: Dùng Script
 ```powershell
-.\install-tsf-auto.ps1 -Uninstall
+.\scripts\build-tsf.ps1 -Uninstall
 ```
 
 ### Cách 2: Manual

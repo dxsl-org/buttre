@@ -113,7 +113,7 @@ if (Test-Path $logPath) {
 Write-Host ""
 Write-Host "=== Next Steps ===" -ForegroundColor Cyan
 Write-Host "If DLL is RELEASE (not DEBUG):" -ForegroundColor Yellow
-Write-Host "  1. Run: .\rebuild-tsf-debug.ps1" -ForegroundColor White
+Write-Host "  1. Run: .\scripts\build-tsf.ps1 -Debug" -ForegroundColor White
 Write-Host ""
 Write-Host "If log file is empty/missing:" -ForegroundColor Yellow
 Write-Host "  1. Restart CTF: taskkill /f /im ctfmon.exe; start ctfmon.exe" -ForegroundColor White

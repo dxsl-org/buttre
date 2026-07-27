@@ -61,7 +61,7 @@ if (Test-Path $debugDll) {
     Write-Host "  Modified: $($dll.LastWriteTime)" -ForegroundColor Gray
 } else {
     Write-Host "  ✗ Debug DLL not found" -ForegroundColor Red
-    Write-Host "  Run: .\rebuild-tsf-debug.ps1" -ForegroundColor Yellow
+    Write-Host "  Run: .\scripts\build-tsf.ps1 -Debug" -ForegroundColor Yellow
 }
 
 Write-Host ""
