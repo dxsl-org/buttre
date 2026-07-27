@@ -606,14 +606,34 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
 }
 
 // Helper functions for key handling
+/// Virtual key of the word-toggle chord's trailing key (`Ctrl+Shift+Z`).
+///
+/// Must stay in sync with `buttre_core::hotkey::manager`'s `Code::KeyZ`
+/// registration. The two are mutually exclusive at runtime, not duplicated:
+/// under TSF the tray process SKIPS registering the global hotkey precisely so
+/// the keystroke reaches this in-process text service (`RegisterHotKey` would
+/// otherwise swallow it before the focused app's IME ever saw it) — see
+/// `WindowsBackend::owns_word_toggle_chord`.
+const VK_WORD_TOGGLE: u16 = 0x5A; // 'Z'
+
 fn is_hotkey(vkey: u16) -> bool {
-    // Toggle key (Ctrl+Space)
-    if vkey == 0x20 {
-        unsafe {
-            use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, VK_CONTROL};
-            let mut key_state = [0u8; 256];
-            if GetKeyboardState(&mut key_state).is_ok() {
-                return key_state[VK_CONTROL.0 as usize] & (1 << 7) != 0;
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetKeyboardState, VK_CONTROL, VK_MENU, VK_SHIFT,
+        };
+        let mut key_state = [0u8; 256];
+        if GetKeyboardState(&mut key_state).is_ok() {
+            let ctrl = key_state[VK_CONTROL.0 as usize] & (1 << 7) != 0;
+            let shift = key_state[VK_SHIFT.0 as usize] & (1 << 7) != 0;
+            let alt = key_state[VK_MENU.0 as usize] & (1 << 7) != 0;
+            // Toggle key (Ctrl+Space)
+            if vkey == 0x20 {
+                return ctrl;
+            }
+            // Word toggle (Ctrl+Shift+Z) — Alt must NOT be held, so
+            // Ctrl+Alt+Shift+Z stays the host app's shortcut.
+            if vkey == VK_WORD_TOGGLE {
+                return ctrl && shift && !alt;
             }
         }
     }
@@ -803,6 +823,35 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             }
 
             return Ok(BOOL(0)); // Pass through if no candidates
+        }
+
+        // Word toggle (Ctrl+Shift+Z): flip the open composition between the
+        // literal keystrokes and the composed form. Handled HERE, in-process,
+        // rather than via the tray's global hotkey — `RegisterHotKey` delivers
+        // to the registering thread and withholds the key from the focused
+        // app, so a TSF text service can only see the chord when the tray
+        // leaves it unregistered (`WindowsBackend::owns_word_toggle_chord`).
+        //
+        // Falls through (BOOL(0)) when there is no composition to act on, so
+        // the host app's own Ctrl+Shift+Z ("redo" in many editors) still works
+        // whenever we have nothing to toggle.
+        if ctrl_pressed && shift_pressed && vkey == VK_WORD_TOGGLE {
+            match self
+                .this
+                .vietnamese_engine
+                .borrow_mut()
+                .toggle_composition()
+            {
+                Some(Action::UpdateComposition { text, cursor }) => {
+                    debug!("Word toggle: {} char(s)", text.chars().count());
+                    if let Err(e) = self.this.write_text(&context, &text, cursor, sink) {
+                        debug!("Failed to write word-toggle text: {:?}", e);
+                        return Ok(BOOL(0));
+                    }
+                    return Ok(BOOL(1));
+                }
+                _ => return Ok(BOOL(0)),
+            }
         }
 
         // Convert vkey to char using ToUnicode

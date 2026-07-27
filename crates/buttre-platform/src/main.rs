@@ -81,13 +81,17 @@ impl StateObserver for BackspaceModeObserver {
 }
 
 /// Route the `ToggleLastWord` hotkey to the Hook backend's delivery path
-/// (event-sourcing-completion Phase 4). Hook multiword backend only — see
-/// `hook.rs` for the focus guard and chord-exemption CRITICALs this depends
-/// on. TSF is deferred (scope note, phase-04-user-controls.md): TSF's own
-/// `Keyboard` instances live inside `vietnamese_engine.rs` and never touch
-/// this `keyboard` handle, so its window is always empty here — this no-ops
-/// safely for that backend too, with no extra branching needed. Also a safe
-/// no-op on non-Windows platforms (not yet implemented there).
+/// (event-sourcing-completion Phase 4). Hook backend only — see `hook.rs` for
+/// the focus guard and chord-exemption CRITICALs this depends on.
+///
+/// Under TSF this is never reached: the chord is not registered as a global
+/// hotkey at all (`PlatformBackend::owns_word_toggle_chord`), so the keystroke
+/// flows to the text service, which calls
+/// `VietnameseEngine::toggle_composition` in-process. Belt and braces, it
+/// would also no-op here anyway — TSF's `Keyboard` instances live inside
+/// `vietnamese_engine.rs` and never touch this `keyboard` handle.
+///
+/// Still a no-op on non-Windows platforms (not yet implemented there).
 #[cfg(platform_windows)]
 fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
     buttre_platform::platforms::windows::hook::dispatch_toggle_last_word(keyboard);
@@ -613,7 +617,13 @@ fn main() -> Result<()> {
     });
 
     // --- Hotkey Setup ---
-    let mut hotkey_manager = ButtreHotkeyManager::new().expect("Failed to create hotkey manager");
+    // The word-toggle chord goes to whichever layer can actually see it: TSF
+    // handles it in-process, so registering it globally here would swallow the
+    // keystroke before the text service ever ran (see
+    // `PlatformBackend::owns_word_toggle_chord`).
+    let mut hotkey_manager =
+        ButtreHotkeyManager::new_with_word_toggle(!backend.owns_word_toggle_chord())
+            .expect("Failed to create hotkey manager");
 
     // Register custom hotkeys (Ctrl+Shift+4..0) based on menu items count
     if let Err(e) = hotkey_manager.register_custom_methods(custom_items.len()) {

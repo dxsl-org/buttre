@@ -178,6 +178,23 @@ impl VietnameseEngine {
         }
     }
 
+    /// Flip the open composition between its literal keystrokes and the
+    /// composed Vietnamese form (`Ctrl+Shift+Z` — see
+    /// `buttre_core::keyboard::Keyboard::toggle_composition` for the full
+    /// contract, including the word freeze that carries the choice through to
+    /// the commit).
+    ///
+    /// # Returns
+    ///
+    /// The composition update to write, or `None` when there is nothing to
+    /// toggle (no composition open, or no keyboard loaded) — the caller then
+    /// lets the keystroke fall through to the application, so a host app that
+    /// uses `Ctrl+Shift+Z` as "redo" keeps working when we have no word to act
+    /// on.
+    pub fn toggle_composition(&mut self) -> Option<Action> {
+        self.keyboard.as_mut()?.toggle_composition()
+    }
+
     /// Reset the engine state
     pub fn reset(&mut self) {
         self.buffer.clear();

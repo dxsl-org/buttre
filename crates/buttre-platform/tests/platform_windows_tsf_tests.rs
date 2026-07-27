@@ -311,3 +311,76 @@ fn test_init_logging() {
 fn test_log_debug() {
     logging::log_debug("test message");
 }
+
+// ── Word toggle (Ctrl+Shift+Z) ───────────────────────────────────────────────
+// The chord itself is intercepted in `text_service_stub::OnKeyDown`, which
+// needs a live TSF context; these cover the engine seam that branch calls.
+
+/// Latest composition text the TSF stub would write for these actions.
+fn composition_text(actions: &[Action]) -> Option<String> {
+    actions.iter().rev().find_map(|a| match a {
+        Action::UpdateComposition { text, .. } => Some(text.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn test_toggle_composition_flips_and_returns_an_update() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    for ch in "dads".chars() {
+        engine.process_key(ch);
+    }
+    assert_eq!(engine.buffer_content(), "đá");
+
+    let action = engine
+        .toggle_composition()
+        .expect("an open composition must be toggleable");
+    match action {
+        Action::UpdateComposition { text, cursor } => {
+            assert_eq!(text, "dads");
+            assert_eq!(cursor, text.chars().count());
+        }
+        other => panic!("expected UpdateComposition, got {other:?}"),
+    }
+
+    engine
+        .toggle_composition()
+        .expect("toggle must be bidirectional");
+    assert_eq!(engine.buffer_content(), "đá");
+}
+
+#[test]
+fn test_toggle_composition_literal_reaches_the_commit() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    for ch in "dads".chars() {
+        engine.process_key(ch);
+    }
+    engine.toggle_composition().expect("toggle acts");
+
+    let actions = engine.process_key(' ');
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::ConfirmComposition(t) if t == "dads")),
+        "the literal choice must be what the text service confirms: {actions:?}"
+    );
+}
+
+#[test]
+fn test_toggle_composition_freezes_continued_typing() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    for ch in "dad".chars() {
+        engine.process_key(ch);
+    }
+    engine.toggle_composition().expect("toggle acts");
+    let actions = engine.process_key('s');
+    assert_eq!(composition_text(&actions).as_deref(), Some("dads"));
+}
+
+#[test]
+fn test_toggle_composition_noop_when_nothing_is_composing() {
+    // The stub relies on `None` here to fall through, leaving the host app's
+    // own Ctrl+Shift+Z ("redo") working when we have no word to act on.
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    assert!(engine.toggle_composition().is_none());
+}
