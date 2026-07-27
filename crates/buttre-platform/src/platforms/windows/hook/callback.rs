@@ -77,7 +77,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-use crate::platforms::windows::common::input::{any_shortcut_modifier_held, BUTTRE_INJECTED};
+use crate::platforms::windows::common::input::{
+    send_replacement_under_held_modifiers, send_string_under_held_modifiers, BUTTRE_INJECTED,
+};
 use crate::platforms::windows::common::{
     hide_candidates, is_buffer_reset_key, is_modifier_key, is_special_key, send_backspaces,
     send_replacement, send_string, show_candidates, VK_BACK,
@@ -230,58 +232,6 @@ fn is_toggle_chord_exempt(mods: ModifierState, vk: u16) -> bool {
 /// handle passed in here, so its window is always empty).
 #[cfg(windows)]
 pub fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
-    // Never inject while the chord is still down (CRITICAL): the application
-    // would see `Ctrl+Shift+Backspace` instead of `Backspace` — delete-previous-
-    // WORD in Word and VS Code, which silently ate text instead of replacing
-    // it — and the Unicode payload would be routed to accelerators. The tray
-    // polls the hotkey up to 50 ms after the keypress, so the chord is
-    // essentially ALWAYS still held here.
-    //
-    // Defer instead of working around it. Synthesizing a keyup/keydown pair
-    // around the injection was tried and reverted: `SendInput` updates the very
-    // async key state the restore step reads, so after releasing Ctrl ourselves
-    // we cannot tell whether the user still holds it — the release stuck, the
-    // system decided the user had let go, and every REPEAT of the chord arrived
-    // as a bare `z`. See `input::any_shortcut_modifier_held`.
-    if any_shortcut_modifier_held() {
-        TOGGLE_PENDING.store(true, Ordering::Release);
-        debug!("ToggleLastWord: chord still held, deferring until release");
-        return;
-    }
-    apply_toggle_last_word(keyboard);
-}
-
-/// Complete a toggle that [`dispatch_toggle_last_word`] deferred, once the
-/// chord is actually released. Called from the tray's event loop on every tick
-/// (~50 ms), so the toggle lands a fraction of a second after the user lets go
-/// — which is also the moment they expect to see the result.
-///
-/// Cheap when idle: one relaxed atomic load and nothing else.
-#[cfg(windows)]
-pub fn poll_pending_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
-    if !TOGGLE_PENDING.load(Ordering::Acquire) {
-        return;
-    }
-    if any_shortcut_modifier_held() {
-        return;
-    }
-    TOGGLE_PENDING.store(false, Ordering::Release);
-    apply_toggle_last_word(keyboard);
-}
-
-/// A toggle whose keystroke arrived while the chord was still held, waiting for
-/// [`poll_pending_toggle_last_word`] to complete it.
-///
-/// Only the DECISION to toggle is deferred — `Keyboard::toggle_last_word` is
-/// still called at injection time, against the buffer as it is THEN, so a
-/// deferred toggle can never apply a stale diff.
-#[cfg(windows)]
-static TOGGLE_PENDING: AtomicBool = AtomicBool::new(false);
-
-/// The focus-guarded toggle + injection itself, shared by the immediate and
-/// deferred paths.
-#[cfg(windows)]
-fn apply_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
     // SAFETY: GetForegroundWindow takes no arguments and cannot fail.
     let current_hwnd = unsafe { GetForegroundWindow() } as isize;
     let recorded_hwnd = LAST_OUTPUT_HWND.load(Ordering::Acquire);
@@ -316,16 +266,22 @@ fn apply_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
         kb_opt.as_mut().and_then(Keyboard::toggle_last_word)
     };
 
+    // The chord is still physically held here — the hotkey is polled from the
+    // event loop up to 50 ms after the keypress, and nobody lets go that fast.
+    // These two variants release it, inject, and restore it in ONE `SendInput`
+    // batch; the plain `send_replacement`/`send_string` used everywhere else
+    // would have the application read `Ctrl+Shift+Backspace` instead of
+    // `Backspace`. See `input::send_replacement_under_held_modifiers`.
     match action {
         Some(Action::Replace {
             backspace_count,
             text,
         }) => {
-            send_replacement(backspace_count, &text);
+            send_replacement_under_held_modifiers(backspace_count, &text);
             record_output_hwnd();
         }
         Some(Action::Commit(text)) if !text.is_empty() => {
-            send_string(&text);
+            send_string_under_held_modifiers(&text);
             record_output_hwnd();
         }
         // `toggle_last_word` only ever returns via `diff_to_action`, which
@@ -338,9 +294,6 @@ fn apply_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
 
 #[cfg(not(windows))]
 pub fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
-
-#[cfg(not(windows))]
-pub fn poll_pending_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
 
 // [rest of struct ModifierState and get_modifier_state]
 
@@ -1472,32 +1425,14 @@ mod toggle_last_word_tests {
     //    `dispatch_toggle_last_word` itself here would require a live HWND
     //    and a real hook installation, which is the P8 manual smoke item.
 
-    // ── Deferred-injection state (chord-still-held CRITICAL) ────────────────
+    // ── Injection under the held chord (chord-still-held CRITICAL) ──────────
     //
-    // The chord's own Ctrl/Shift must never be down while we inject: the app
-    // would read `Ctrl+Shift+Backspace` (delete-previous-WORD) instead of
-    // `Backspace`. The pending flag is what carries the toggle across to the
-    // moment the user lets go. Whether `GetAsyncKeyState` reports the real
-    // chord is not unit-testable (it needs a physical keypress — and a test
-    // that synthesized one could strand a modifier down system-wide); these
-    // pin the flag's transitions instead.
-
-    #[test]
-    fn pending_flag_starts_clear_so_an_idle_poll_does_nothing() {
-        assert!(
-            !TOGGLE_PENDING.load(Ordering::Acquire),
-            "a fresh process must not have a toggle queued — the poll runs on \
-             every event-loop tick and would fire an unrequested edit"
-        );
-    }
-
-    #[test]
-    fn pending_flag_round_trips() {
-        // Ordering matters more than the value: the hotkey thread sets it and
-        // the event loop clears it, so both sides need Acquire/Release.
-        TOGGLE_PENDING.store(true, Ordering::Release);
-        assert!(TOGGLE_PENDING.load(Ordering::Acquire));
-        TOGGLE_PENDING.store(false, Ordering::Release);
-        assert!(!TOGGLE_PENDING.load(Ordering::Acquire));
-    }
+    // The chord's own Ctrl/Shift is ALWAYS still down when this dispatch runs,
+    // so the injection must release and restore it inside ONE `SendInput`
+    // batch — otherwise the app reads `Ctrl+Shift+Backspace`
+    // (delete-previous-WORD) instead of `Backspace`. That batch is built in
+    // `input::send_replacement_under_held_modifiers`, whose own tests pin the
+    // modifier watch-list; the behaviour under a REAL held chord needs a
+    // physical keypress (a test that synthesized one could strand a modifier
+    // down system-wide), so it is the P8 manual smoke item.
 }
