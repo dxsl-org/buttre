@@ -7,11 +7,173 @@ use tracing::debug;
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_BACK, VK_LEFT, VK_LSHIFT, VK_SHIFT,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_BACK, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT,
+    VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 
 /// Extra info flag to identify our own injected keys
 pub const BUTTRE_INJECTED: usize = 0x564B4559; // "VKEY" in hex
+
+/// Modifier keys that turn an injected keystroke into an application shortcut,
+/// in the left/right-specific form `SendInput` needs. Both variants of each are
+/// listed because only the one actually held may be released — releasing the
+/// other would be a keyup for a key that was never down.
+#[cfg(windows)]
+const SHORTCUT_MODIFIER_VKS: [u16; 8] = [
+    VK_LCONTROL,
+    VK_RCONTROL,
+    VK_LSHIFT,
+    VK_RSHIFT,
+    VK_LMENU,
+    VK_RMENU,
+    VK_LWIN,
+    VK_RWIN,
+];
+
+/// Temporarily lifts the user's physically-held modifier keys for the duration
+/// of an injection, restoring them on drop.
+///
+/// ## Why this exists
+///
+/// Injected input composes with whatever modifiers are ACTUALLY down. The
+/// ordinary typing path never has any (a Ctrl/Alt chord never reaches the
+/// engine as text), but the `Ctrl+Shift+Z` word toggle injects while the user
+/// is still holding the chord — the tray polls the hotkey every 50 ms and
+/// nobody releases a key that fast. Without this guard the application sees
+/// `Ctrl+Shift+Backspace` instead of `Backspace` (delete-previous-WORD in Word
+/// and VS Code, silently destroying text) and the `KEYEVENTF_UNICODE` payload
+/// gets routed to accelerators instead of inserted.
+///
+/// ## Restore is conditional, and that asymmetry is deliberate
+///
+/// On drop, a modifier is re-pressed ONLY if it is still physically held at
+/// that instant. Getting it wrong in that direction leaves the application
+/// believing a held key is up — harmless, self-correcting on the next
+/// keystroke. Re-pressing unconditionally could leave a modifier stuck DOWN
+/// from the application's point of view, which breaks all subsequent typing;
+/// never trade toward that failure.
+///
+/// Every synthetic event carries [`BUTTRE_INJECTED`], so our own low-level
+/// hook skips them and no engine state is touched.
+#[cfg(windows)]
+pub struct ModifiersReleased {
+    /// The VKs this guard actually released, in release order.
+    released: Vec<u16>,
+}
+
+#[cfg(windows)]
+impl ModifiersReleased {
+    /// Release every currently-held shortcut modifier. Cheap no-op (no
+    /// `SendInput` at all) when none is held — the normal case for every
+    /// caller other than the word toggle.
+    ///
+    /// Deliberately not named `new`/`default`: constructing this value INJECTS
+    /// input as a side effect, which neither of those names would lead a reader
+    /// to expect.
+    pub fn release_held() -> Self {
+        let released = held_shortcut_modifiers(is_physically_down);
+        if !released.is_empty() {
+            debug!(
+                "Releasing {} held modifier(s) for injection",
+                released.len()
+            );
+            send_modifier_batch(&released, KEYEVENTF_KEYUP);
+        }
+        Self { released }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ModifiersReleased {
+    fn drop(&mut self) {
+        // Re-check: the user may have let go during the injection, and
+        // re-pressing then would strand the modifier down (see the type doc).
+        let still_held = filter_still_held(&self.released, is_physically_down);
+        if !still_held.is_empty() {
+            send_modifier_batch(&still_held, 0);
+        }
+    }
+}
+
+/// Which shortcut modifiers to release, given a "is this VK down" oracle.
+///
+/// Split out from [`ModifiersReleased::release_held`] so the left/right
+/// selection is unit-testable without injecting real keystrokes into the
+/// developer's session (a test that pressed a real Ctrl and then failed could
+/// strand it down system-wide).
+#[cfg(windows)]
+fn held_shortcut_modifiers(is_down: impl Fn(u16) -> bool) -> Vec<u16> {
+    SHORTCUT_MODIFIER_VKS
+        .into_iter()
+        .filter(|&vk| is_down(vk))
+        .collect()
+}
+
+/// Which of the previously-released modifiers to press back. Same
+/// testability rationale as [`held_shortcut_modifiers`].
+#[cfg(windows)]
+fn filter_still_held(released: &[u16], is_down: impl Fn(u16) -> bool) -> Vec<u16> {
+    released.iter().copied().filter(|&vk| is_down(vk)).collect()
+}
+
+/// True when `vk` is down according to the async (physical) key state.
+///
+/// `SendInput` updates this state, so after [`ModifiersReleased::release_held`]
+/// a released modifier reads as up here — which is exactly what the
+/// `shift_already_held` probe in [`send_replacement_via_selection`] needs to
+/// see.
+#[cfg(windows)]
+fn is_physically_down(vk: u16) -> bool {
+    // SAFETY: GetAsyncKeyState takes a plain VK code and cannot fail; the high
+    // bit of the result indicates the key is currently down.
+    let state = unsafe { GetAsyncKeyState(vk as i32) };
+    state as u16 & 0x8000 != 0
+}
+
+/// Send one keyup-or-keydown event per VK in a single batch.
+///
+/// `flags` is [`KEYEVENTF_KEYUP`] to release or `0` to press. Win keys get
+/// [`KEYEVENTF_EXTENDEDKEY`] — they are extended-scancode keys and some
+/// applications ignore the event without it.
+#[cfg(windows)]
+fn send_modifier_batch(vks: &[u16], flags: u32) {
+    let mut inputs: Vec<INPUT> = vks
+        .iter()
+        .map(|&vk| {
+            let extended = if vk == VK_LWIN || vk == VK_RWIN {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                0
+            };
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: vk,
+                        wScan: 0,
+                        dwFlags: flags | extended,
+                        time: 0,
+                        dwExtraInfo: BUTTRE_INJECTED,
+                    },
+                },
+            }
+        })
+        .collect();
+
+    // SAFETY: `inputs` is a live Vec of properly initialized INPUT structs;
+    // the count matches its length and the size argument matches the struct.
+    unsafe {
+        let expected = inputs.len() as u32;
+        let sent = SendInput(
+            expected,
+            inputs.as_mut_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        );
+        if sent != expected {
+            tracing::error!("SendInput (modifiers) failed: expected {expected}, sent {sent}");
+        }
+    }
+}
 
 /// Send backspace keys (optimized with batching)
 #[cfg(windows)]
@@ -166,7 +328,10 @@ pub fn send_replacement(backspace_count: usize, text: &str) {
 /// Modifier note: transforms only ever fire on plain character keystrokes
 /// (Ctrl/Alt chords never reach the engine as text), so injecting an
 /// LSHIFT-down/LEFT/LSHIFT-up sandwich cannot compose with a held Ctrl/Alt
-/// into a word-selection chord. When Shift is ALREADY physically held (e.g.
+/// into a word-selection chord. The ONE caller for which that does not hold —
+/// the `Ctrl+Shift+Z` word toggle, which injects while the chord is still down
+/// — wraps its call in [`ModifiersReleased`], so by the time this runs the
+/// modifiers are already lifted. When Shift is ALREADY physically held (e.g.
 /// typing an all-caps word), the synthetic down/up is skipped — pressing it
 /// anyway would still select correctly, but the synthetic keyup would lift
 /// Shift out from under the user's still-held key, un-capitalizing whatever
@@ -399,3 +564,58 @@ pub fn send_unicode_char(ch: char) {
 
 #[cfg(not(windows))]
 pub fn send_unicode_char(_ch: char) {}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// Only the variant actually held is released — emitting a keyup for a key
+    /// that was never down would tell the application a key was let go that it
+    /// never saw pressed.
+    #[test]
+    fn releases_only_the_held_variant_of_each_modifier() {
+        let held = held_shortcut_modifiers(|vk| vk == VK_LCONTROL || vk == VK_RSHIFT);
+        assert_eq!(held, vec![VK_LCONTROL, VK_RSHIFT]);
+    }
+
+    #[test]
+    fn nothing_held_releases_nothing() {
+        assert!(held_shortcut_modifiers(|_| false).is_empty());
+    }
+
+    #[test]
+    fn covers_every_shortcut_modifier() {
+        // Ctrl and Alt turn Backspace into delete-word; Shift turns it into a
+        // selection extend; Win opens the shell. All four must be lifted, in
+        // both left and right form.
+        let held = held_shortcut_modifiers(|_| true);
+        assert_eq!(held.len(), SHORTCUT_MODIFIER_VKS.len());
+        for vk in [
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_LSHIFT,
+            VK_RSHIFT,
+            VK_LMENU,
+            VK_RMENU,
+            VK_LWIN,
+            VK_RWIN,
+        ] {
+            assert!(held.contains(&vk), "missing modifier {vk:#x}");
+        }
+    }
+
+    /// The restore step re-presses a SUBSET of what was released, never
+    /// anything else — a modifier the user let go of during the injection must
+    /// stay up (stranding one DOWN breaks all subsequent typing).
+    #[test]
+    fn restore_skips_modifiers_released_during_the_injection() {
+        let released = vec![VK_LCONTROL, VK_LSHIFT];
+        let still = filter_still_held(&released, |vk| vk == VK_LCONTROL);
+        assert_eq!(still, vec![VK_LCONTROL]);
+    }
+
+    #[test]
+    fn restore_presses_nothing_when_everything_was_let_go() {
+        assert!(filter_still_held(&[VK_LCONTROL, VK_LSHIFT], |_| false).is_empty());
+    }
+}

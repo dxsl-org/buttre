@@ -77,7 +77,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-use crate::platforms::windows::common::input::BUTTRE_INJECTED;
+use crate::platforms::windows::common::input::{ModifiersReleased, BUTTRE_INJECTED};
 use crate::platforms::windows::common::{
     hide_candidates, is_buffer_reset_key, is_modifier_key, is_special_key, send_backspaces,
     send_replacement, send_string, show_candidates, VK_BACK,
@@ -264,15 +264,24 @@ pub fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
         kb_opt.as_mut().and_then(Keyboard::toggle_last_word)
     };
 
+    // Lift the chord's own modifiers for the injection (CRITICAL): the hotkey
+    // is polled from the event loop up to 50 ms after the keypress, so Ctrl and
+    // Shift are still physically held here — the ONLY injection path in the
+    // whole hook where that is true. Without this, the application receives
+    // `Ctrl+Shift+Backspace` (delete previous WORD in Word and VS Code, which
+    // silently ate text instead of replacing it) and the Unicode payload gets
+    // routed to accelerators. See `ModifiersReleased`.
     match action {
         Some(Action::Replace {
             backspace_count,
             text,
         }) => {
+            let _modifiers = ModifiersReleased::release_held();
             send_replacement(backspace_count, &text);
             record_output_hwnd();
         }
         Some(Action::Commit(text)) if !text.is_empty() => {
+            let _modifiers = ModifiersReleased::release_held();
             send_string(&text);
             record_output_hwnd();
         }
