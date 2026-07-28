@@ -85,7 +85,55 @@ if (-not $buttreExe) {
 }
 
 Write-Host ""
-Write-Host "4. Windows layout-switch hotkey:" -ForegroundColor Yellow
+Write-Host "4. Do your input-method entries still resolve:" -ForegroundColor Yellow
+# A Preload value of the form d<index><langid> is a text service, and <index>
+# has to name a subkey under CTF\SortOrder\AssemblyItem\0x0000<langid>. Our
+# install flow unregisters and re-registers, which can leave HKCU pointing at an
+# index that no longer exists. Windows then falls back through Substitutes to
+# the plain keyboard layout — so the entry is still listed, still selectable,
+# and silently gives you "Vietnamese - US" every time you pick it.
+$assemblyRoot = "HKCU:\Software\Microsoft\CTF\SortOrder\AssemblyItem"
+$dangling = @()
+if (Test-Path "HKCU:\Keyboard Layout\Preload") {
+    $preload = Get-ItemProperty "HKCU:\Keyboard Layout\Preload"
+    foreach ($name in (Get-Item "HKCU:\Keyboard Layout\Preload").GetValueNames()) {
+        $value = $preload.$name
+        if ($value -notmatch '^[dD](?<idx>[0-9a-fA-F]{3})(?<lang>[0-9a-fA-F]{4})$') { continue }
+        $index = '{0:x8}' -f [Convert]::ToInt32($Matches.idx, 16)
+        $langKey = "0x0000{0}" -f $Matches.lang.ToLower()
+        $resolved = Get-ChildItem (Join-Path $assemblyRoot $langKey) -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSChildName -eq $index } |
+            ForEach-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).CLSID } |
+            Select-Object -First 1
+
+        if (-not $resolved) {
+            Write-Host "  BROKEN  $value ($langKey, assembly $index) resolves to nothing." -ForegroundColor Red
+            $dangling += $value
+        } elseif ($resolved -eq $clsid) {
+            Write-Host "  OK      $value -> buttre" -ForegroundColor Green
+        } else {
+            Write-Host "  (other) $value -> $resolved" -ForegroundColor Gray
+        }
+    }
+}
+
+if ($dangling) {
+    $sub = Get-ItemProperty "HKCU:\Keyboard Layout\Substitutes" -ErrorAction SilentlyContinue
+    foreach ($value in $dangling) {
+        if ($sub.$value) {
+            Write-Host "          Windows substitutes it with layout $($sub.$value)" -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
+    Write-Host "  This is why picking that entry lands on the plain layout instead" -ForegroundColor Yellow
+    Write-Host "  of buttre. Remove it and add buttre again:" -ForegroundColor Gray
+    Write-Host "    Settings > Time and language > Language and region >" -ForegroundColor Cyan
+    Write-Host "    (that language) > Options > Keyboards > remove the buttre entry," -ForegroundColor Cyan
+    Write-Host "    then Add a keyboard > buttre. Sign out and back in to be sure." -ForegroundColor Cyan
+}
+
+Write-Host ""
+Write-Host "5. Windows layout-switch hotkey:" -ForegroundColor Yellow
 # Ctrl+Shift is Windows' own "Switch Keyboard Layout" chord by default, and it
 # cycles through every Preload entry. buttre puts Ctrl+Shift+Z (word toggle) and
 # Ctrl+Shift+1/2/3 (method switch) on top of it, and Ctrl+Shift+Left/Right is how
@@ -120,7 +168,7 @@ if ($layoutHotkey -eq 3) {
 }
 
 Write-Host ""
-Write-Host "5. Debug DLL Check:" -ForegroundColor Yellow
+Write-Host "6. Debug DLL Check:" -ForegroundColor Yellow
 $debugDll = "target\debug\buttre_platform.dll"
 if (Test-Path $debugDll) {
     $dll = Get-Item $debugDll
@@ -133,7 +181,7 @@ if (Test-Path $debugDll) {
 }
 
 Write-Host ""
-Write-Host "6. Processes:" -ForegroundColor Yellow
+Write-Host "7. Processes:" -ForegroundColor Yellow
 $processes = @("TextInputHost", "ctfmon")
 foreach ($proc in $processes) {
     $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
