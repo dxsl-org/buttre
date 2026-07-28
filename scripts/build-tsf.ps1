@@ -13,19 +13,18 @@
     the same registry keys. What you test is then what users get, and it needs
     Administrator for the same reason the MSI does (Program Files + HKLM).
 
-    Registration under -Install is REGISTRY-ONLY, matching the MSI — the MSI
-    has no CustomAction, so it never calls the DLL's own DllRegisterServer.
-    That difference is not cosmetic:
+    Registration under -Install runs `buttre.exe --register-tsf`, which is
+    literally what the MSI's custom action runs:
 
-      MSI (default here)   vi-VN profile only, no TSF category registration
-      -SelfRegister        regsvr32 -> DllRegisterServer, which ALSO adds an
-                           en-US profile and registers the TIP_KEYBOARD and
-                           DISPLAYATTRIBUTEPROVIDER categories
+      default              buttre.exe --register-tsf (what the MSI runs)
+      -SelfRegister        the same work, reached through regsvr32 ->
+                           DllRegisterServer instead of the exe
 
-    Testing with regsvr32 therefore tests a MORE registered service than the
-    one you ship. Use the default to reproduce what users will actually have;
-    use -SelfRegister only to isolate whether a bug comes from the missing
-    category registration.
+    Both now run the SAME code (`registration::register_server`), so the two
+    agree by construction. They used to differ badly: the MSI hand-wrote
+    registry rows that omitted the TSF category registration, and shipped a
+    text service Windows would not name or drive. -SelfRegister remains for
+    checking that the DLL's own export still works.
 
 .PARAMETER Install
     After building, copy the payload into place and register it. Requires
@@ -36,8 +35,8 @@
     Administrator.
 
 .PARAMETER SelfRegister
-    With -Install, register through regsvr32 (DllRegisterServer) instead of
-    the MSI's registry writes. See the description for how the two differ.
+    With -Install, register through regsvr32 (the DLL export) instead of
+    `buttre.exe --register-tsf` (what the MSI runs). Same code either way.
 
 .PARAMETER Msi
     Build a real .msi via installers\windows\build_installer.ps1 and stop
@@ -92,7 +91,6 @@ $repoRoot = Resolve-Path "$PSScriptRoot\.."
 # fails to load.
 $CLSID      = "{E6B8A6C0-1234-5678-9ABC-DEF012345678}"
 $ProfileGuid = "{B7447743-7652-4AB6-8D82-250D935EBCC0}"
-$LangId     = "0x0000042A"  # vi-VN
 $ClsidKey   = "HKLM:\SOFTWARE\Classes\CLSID\$CLSID"
 $TipKey     = "HKLM:\SOFTWARE\Microsoft\CTF\TIP\$CLSID"
 
@@ -136,25 +134,20 @@ function Remove-Registration {
     Remove-Item $ClsidKey -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-<# Write exactly the keys installers\windows\product.wxs writes. #>
-function Add-MsiRegistration([string]$dllPath) {
-    New-Item -Path $ClsidKey -Force | Out-Null
-    New-ItemProperty -Path $ClsidKey -Name "(default)" -Value "buttre Text Service" `
-        -PropertyType String -Force | Out-Null
+<# Register the way the MSI does: run the product's own registration code.
 
-    $inproc = "$ClsidKey\InProcServer32"
-    New-Item -Path $inproc -Force | Out-Null
-    New-ItemProperty -Path $inproc -Name "(default)" -Value $dllPath `
-        -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $inproc -Name "ThreadingModel" -Value "Apartment" `
-        -PropertyType String -Force | Out-Null
-
-    $profileKey = "$TipKey\LanguageProfile\$LangId\$ProfileGuid"
-    New-Item -Path $profileKey -Force | Out-Null
-    New-ItemProperty -Path $profileKey -Name "Description" -Value "buttre Vietnamese IME" `
-        -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $profileKey -Name "Enable" -Value 1 `
-        -PropertyType DWord -Force | Out-Null
+`product.wxs` invokes `buttre.exe --register-tsf` from a deferred custom
+action, so this reproduces the release exactly. It used to hand-write the
+registry rows to match a hand-written MSI — two copies that drifted, and both
+were missing the TSF category registration a working text service needs
+(`ITfCategoryMgr`, a COM call no registry row can express). #>
+function Invoke-ProductRegistration([string]$exePath, [switch]$Remove) {
+    $flag = if ($Remove) { "--unregister-tsf" } else { "--register-tsf" }
+    & $exePath $flag
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: $exePath $flag failed (code $LASTEXITCODE)." -ForegroundColor Red
+        exit 1
+    }
 }
 
 <# Copy over a DLL that may still be mapped by a running process.
@@ -231,8 +224,8 @@ if ($Uninstall) {
     Write-Host ""
     Show-MsiInstallWarning
 
-    $dll = Join-Path $InstallDir "buttre_platform.dll"
-    if (Test-Path $dll) { & regsvr32.exe /u /s $dll 2>$null }
+    $exe = Join-Path $InstallDir "buttre.exe"
+    if (Test-Path $exe) { Invoke-ProductRegistration $exe -Remove }
     Remove-Registration
     Stop-TsfHosts
     if (Test-Path $InstallDir) {
@@ -252,8 +245,8 @@ try {
     Write-Host ""
     Write-Host "  buttre TSF $(if ($Install) { 'build + install' } else { 'build' })" -ForegroundColor Cyan
     if ($Install) {
-        $mode = if ($SelfRegister) { "regsvr32 (DllRegisterServer — NOT what the MSI does)" }
-                else { "registry writes (same as the release MSI)" }
+        $mode = if ($SelfRegister) { "regsvr32 -> DllRegisterServer" }
+                else { "buttre.exe --register-tsf (what the MSI runs)" }
         Write-Host "  Target: $InstallDir" -ForegroundColor Gray
         Write-Host "  Register via: $mode" -ForegroundColor Gray
     }
@@ -359,7 +352,7 @@ try {
             exit 1
         }
     } else {
-        Add-MsiRegistration $installedDll
+        Invoke-ProductRegistration (Join-Path $InstallDir "buttre.exe")
     }
 
     # Report what actually landed, rather than trusting the writes above.

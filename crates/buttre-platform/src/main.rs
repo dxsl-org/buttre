@@ -100,6 +100,51 @@ fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
 #[cfg(not(platform_windows))]
 fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
 
+/// `buttre --register-tsf` / `--unregister-tsf`: install or remove the TSF
+/// text-service registration for the DLL sitting next to this executable.
+///
+/// The installer calls this instead of writing the registry itself. Those keys
+/// are not a flat list — a working text service also needs its TSF CATEGORIES
+/// registered, and that goes through `ITfCategoryMgr`, a COM call an MSI
+/// cannot express as registry rows. The MSI's hand-written approximation was
+/// missing exactly that, plus the icon, and it shipped a service Windows
+/// refused to name or drive. Keeping ONE implementation
+/// (`registration::register_server`, the same one `regsvr32` reaches through
+/// `DllRegisterServer`) is what stops the copies drifting again.
+#[cfg(platform_windows)]
+fn run_tsf_registration(unregister: bool) -> Result<()> {
+    use anyhow::Context;
+    use buttre_platform::platforms::windows::tsf::registration::{
+        register_server, unregister_server,
+    };
+
+    if unregister {
+        unregister_server()?;
+        println!("buttre TSF unregistered");
+        return Ok(());
+    }
+
+    let dll = std::env::current_exe()
+        .context("cannot locate buttre.exe")?
+        .parent()
+        .context("buttre.exe has no parent directory")?
+        .join("buttre_platform.dll");
+    anyhow::ensure!(
+        dll.exists(),
+        "buttre_platform.dll not found next to buttre.exe ({})",
+        dll.display()
+    );
+
+    register_server(&dll)?;
+    println!("buttre TSF registered: {}", dll.display());
+    Ok(())
+}
+
+#[cfg(not(platform_windows))]
+fn run_tsf_registration(_unregister: bool) -> Result<()> {
+    anyhow::bail!("--register-tsf is Windows-only")
+}
+
 /// Debounce successive personal-learning save requests down to the LATEST
 /// snapshot only (event-sourcing-completion Phase 5, red-team C3): a
 /// snapshot is the full current store state, not a delta, so replaying every
@@ -319,11 +364,22 @@ fn main() -> Result<()> {
              --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
              --config    Open the settings window\n  \
              --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \
+             --register-tsf    Register the Windows TSF text service (needs Administrator)\n  \
+             --unregister-tsf  Remove that registration (needs Administrator)\n  \
              --version   Print version and exit\n  \
              --help      Print this help and exit",
             ver = env!("CARGO_PKG_VERSION")
         );
         return Ok(());
+    }
+    // Installer hooks: run before any backend or UI setup — they must work in
+    // the MSI's non-interactive, elevated context where there is no session to
+    // put a tray icon in.
+    if args.iter().any(|a| a == "--register-tsf") {
+        return run_tsf_registration(false);
+    }
+    if args.iter().any(|a| a == "--unregister-tsf") {
+        return run_tsf_registration(true);
     }
     if args.iter().any(|a| a == "--doctor") {
         run_doctor();

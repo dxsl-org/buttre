@@ -31,7 +31,6 @@
     <Feature Id="MainFeature" Title="buttre" Level="1">
       <ComponentRef Id="CoreBinary" />
       <ComponentRef Id="TsfDll" />
-      <ComponentRef Id="TsfProfile" />
       <ComponentGroupRef Id="KeyboardConfigs" />
       <?ifdef IncludeNomDb ?>
         <ComponentRef Id="NomDb" />
@@ -52,29 +51,18 @@
             <File Id="ButtrePlatformDll"
                   Source="$(var.CargoTargetBinDir)\buttre_platform.dll"
                   KeyPath="yes" />
-
-            <!-- COM InprocServer32 registration so Windows can load the TSF DLL -->
-            <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{E6B8A6C0-1234-5678-9ABC-DEF012345678}">
-              <RegistryValue Type="string" Value="buttre Text Service" />
-              <RegistryKey Key="InProcServer32">
-                <RegistryValue Type="string" Value="[INSTALLDIR]buttre_platform.dll" />
-                <RegistryValue Type="string" Name="ThreadingModel" Value="Apartment" />
-              </RegistryKey>
-            </RegistryKey>
           </Component>
 
-          <!-- TsfProfile: registry-only component, KeyPath on first value -->
-          <Component Id="TsfProfile" Guid="*">
-            <RegistryKey Root="HKLM"
-                         Key="SOFTWARE\Microsoft\CTF\TIP\{E6B8A6C0-1234-5678-9ABC-DEF012345678}">
-              <RegistryValue Type="string" Value="" KeyPath="yes" />
-              <!-- Language profile for vi-VN (LCID 0x042A) -->
-              <RegistryKey Key="LanguageProfile\0x0000042A\{B7447743-7652-4AB6-8D82-250D935EBCC0}">
-                <RegistryValue Type="string" Name="Description" Value="buttre Vietnamese IME" />
-                <RegistryValue Type="integer" Name="Enable" Value="1" />
-              </RegistryKey>
-            </RegistryKey>
-          </Component>
+          <!--
+            The TSF registration itself is NOT written here — see the
+            RegisterTsf custom action below. It used to be hand-written
+            registry rows, and that shipped a broken text service: a working
+            TIP also needs its TSF CATEGORIES registered, which goes through
+            ITfCategoryMgr (a COM call, not expressible as registry rows).
+            Without them Windows showed the language instead of the IME's
+            name and would not drive the service. The rows were also missing
+            IconFile/IconIndex and had drifted from the code's own values.
+          -->
 
           <Directory Id="KeyboardsDir" Name="keyboards">
             <Component Id="Kb_Cham" Guid="*">
@@ -121,6 +109,43 @@
       <ComponentRef Id="Kb_TayNguyen" />
       <ComponentRef Id="Kb_Thai" />
     </ComponentGroup>
+
+    <!--
+      TSF registration, delegated to the product's own code
+      (`registration::register_server`, the same path regsvr32 reaches through
+      DllRegisterServer). One implementation, so the MSI can no longer drift
+      from what the DLL expects — which is how it came to ship a text service
+      registered without its categories.
+
+      Deferred + Impersonate="no": these write HKLM, so they need the
+      installer's elevated context, and deferred is the only phase where the
+      files are already on disk.
+    -->
+    <CustomAction Id="RegisterTsf"
+                  FileKey="ButtreExe"
+                  ExeCommand="--register-tsf"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!--
+      Return="ignore" on the way out, unlike install: a registration that
+      cannot be removed must never leave the user unable to uninstall. The
+      leftover keys are inert once the DLL is gone.
+    -->
+    <CustomAction Id="UnregisterTsf"
+                  FileKey="ButtreExe"
+                  ExeCommand="--unregister-tsf"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- After the DLL exists on disk; skipped when only removing. -->
+      <Custom Action="RegisterTsf" After="InstallFiles">NOT REMOVE</Custom>
+      <!-- Before the DLL is deleted, so the COM server is still loadable. -->
+      <Custom Action="UnregisterTsf" Before="RemoveFiles">REMOVE="ALL"</Custom>
+    </InstallExecuteSequence>
 
   </Product>
 </Wix>
