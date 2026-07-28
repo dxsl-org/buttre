@@ -41,6 +41,56 @@ fn set_selection(
     result
 }
 
+/// Edit Session 0: Where is the composition on screen?
+///
+/// `ITfContextView::GetTextExt` needs a REAL edit cookie. Calling it with a
+/// made-up one (a literal `0` was here before) fails in every application, so
+/// the candidate panel silently fell back to a fixed screen position and
+/// appeared far away from the text being typed.
+///
+/// Run this with `TF_ES_SYNC | TF_ES_READ`: the answer is needed before the
+/// panel can be placed, and a deferred session would place it a frame late,
+/// at the previous caret.
+#[implement(ITfEditSession)]
+pub struct QueryTextExt {
+    context: ITfContext,
+    range: ITfRange,
+    /// Filled in by [`ITfEditSession_Impl::DoEditSession`]; left `None` when
+    /// the view cannot report an extent (some hosts return a clipped or empty
+    /// rect while scrolling).
+    out: Rc<Cell<Option<RECT>>>,
+}
+
+impl QueryTextExt {
+    pub fn new(context: ITfContext, range: ITfRange, out: Rc<Cell<Option<RECT>>>) -> Self {
+        Self {
+            context,
+            range,
+            out,
+        }
+    }
+}
+
+impl ITfEditSession_Impl for QueryTextExt_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        // SAFETY: `ec` is the cookie TSF granted for this session, and
+        // `context`/`range` are the interfaces handed to the constructor.
+        unsafe {
+            let view: ITfContextView = self.context.cast()?;
+            let mut rect = RECT::default();
+            let mut clipped = BOOL(0);
+            view.GetTextExt(ec, &self.range, &mut rect, &mut clipped)?;
+            // An all-zero rect means the host had nothing to report (caret
+            // scrolled out of view). Treat it as "unknown" so the caller keeps
+            // its previous position instead of jumping to the screen corner.
+            if rect.left != 0 || rect.top != 0 || rect.right != 0 || rect.bottom != 0 {
+                self.out.set(Some(rect));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Edit Session 1: Insert Text at Selection
 ///
 /// Simple text insertion without composition

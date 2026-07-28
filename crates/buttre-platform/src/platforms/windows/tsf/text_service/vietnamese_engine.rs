@@ -3,8 +3,8 @@
 //
 // **Tests**: Integration tests for this module are located in `crates/buttre-platform/tests/platform_windows_tsf_tests.rs`.
 
-use super::candidate_ui::CandidateItem;
 use super::macro_reload::spawn_reload_watcher;
+use crate::shared::candidates::{CandidateState, CandidateView};
 use buttre_core::state::macros::MacroStore;
 use buttre_core::Action;
 use buttre_core::InputBuffer;
@@ -82,6 +82,11 @@ pub struct VietnameseEngine {
     /// Method id last applied to the live `Keyboard`, so the per-keystroke
     /// check is a string compare rather than an unconditional rebuild.
     method_applied: String,
+    /// Nôm candidates offered for the open composition, plus the highlight.
+    /// Absorbed from `Action::ShowCandidates` by [`Self::process_key`] — see
+    /// that method's contract for why the caller renders from HERE and not
+    /// from the action's own payload. Always empty for Telex/VNI.
+    candidates: CandidateState,
     /// Live-reload watcher, kept alive only to hold the watch open for this
     /// engine's lifetime — dropped (stopping the watch) when the engine
     /// drops, i.e. on TSF `Deactivate`. `None` when the watch could not be
@@ -145,6 +150,7 @@ impl VietnameseEngine {
             strict_applied: false,
             input_method: Arc::new(Mutex::new(String::new())),
             method_applied: String::new(),
+            candidates: CandidateState::default(),
             _macros_watcher: None,
         }
     }
@@ -205,20 +211,121 @@ impl VietnameseEngine {
     /// separator (e.g. `"xin."`) yields `[ConfirmComposition("xin"),
     /// Commit(".")]`; dropping the trailing action silently swallows the
     /// separator (issue #4).
+    ///
+    /// `ShowCandidates`/`HideCandidates` are ABSORBED into [`Self::candidates`]
+    /// on the way out and then handed to the caller as a repaint SIGNAL. Render
+    /// from `candidates()`, never from the action's own payload: only the
+    /// stored state carries the highlight, and only it survives the cursor keys
+    /// the caller may feed in afterwards.
     pub fn process_key(&mut self, ch: char) -> Vec<Action> {
         self.sync_method();
         self.sync_strict_spelling();
-        if let Some(ref mut kb) = self.keyboard {
-            match kb.process(ch) {
-                Ok(actions) => actions,
-                Err(e) => {
-                    tracing::warn!("Keyboard process error: {}", e);
-                    vec![Action::DoNothing]
-                }
+        let Some(kb) = self.keyboard.as_mut() else {
+            return vec![Action::DoNothing];
+        };
+        let actions = match kb.process(ch) {
+            Ok(actions) => actions,
+            Err(e) => {
+                tracing::warn!("Keyboard process error: {}", e);
+                return vec![Action::DoNothing];
             }
-        } else {
-            vec![Action::DoNothing]
+        };
+        self.absorb_candidate_actions(&actions);
+        actions
+    }
+
+    /// Mirror the engine's candidate actions into [`Self::candidates`].
+    ///
+    /// A commit with no candidate action of its own leaves the previous word's
+    /// list live — the punctuation pass-through path emits
+    /// `[ConfirmComposition, Commit(sep)]` and says nothing about candidates —
+    /// and a stale list would let the next digit key commit a character chosen
+    /// for a word that is already gone.
+    fn absorb_candidate_actions(&mut self, actions: &[Action]) {
+        let mut refreshed = false;
+        let mut committed = false;
+        for action in actions {
+            match action {
+                Action::ShowCandidates { candidates, .. } => {
+                    self.candidates.set(
+                        candidates
+                            .iter()
+                            .map(|c| CandidateView {
+                                display: c.text.clone(),
+                                value: c.get_value().to_string(),
+                            })
+                            .collect(),
+                    );
+                    refreshed = true;
+                }
+                Action::HideCandidates => {
+                    self.candidates.clear();
+                    refreshed = true;
+                }
+                Action::ConfirmComposition(_) | Action::Commit(_) => committed = true,
+                _ => {}
+            }
         }
+        if committed && !refreshed {
+            self.candidates.clear();
+        }
+    }
+
+    /// The candidates currently offered, for rendering and for deciding
+    /// whether selection keys belong to the popup or to the composition.
+    pub fn candidates(&self) -> &CandidateState {
+        &self.candidates
+    }
+
+    /// Commit the candidate at `page_index` (0-based) on the page currently
+    /// holding the highlight — the mapping for number keys 1..=9, which are
+    /// page-relative, not global. `None` (no state change) when out of range,
+    /// so a stray digit does not dismiss the list.
+    pub fn select_candidate_at_page(&mut self, page_index: usize, page: usize) -> Option<String> {
+        let value = self.candidates.take_at_page(page_index, page)?;
+        self.reset_after_selection();
+        Some(value)
+    }
+
+    /// Commit the highlighted candidate (Space/Enter).
+    pub fn select_current_candidate(&mut self) -> Option<String> {
+        let value = self.candidates.take_current()?;
+        self.reset_after_selection();
+        Some(value)
+    }
+
+    /// A chosen candidate REPLACES the word that was being composed, so the
+    /// keystrokes behind it must go too — otherwise the next key would compose
+    /// against the old raw buffer and resurrect the discarded reading.
+    fn reset_after_selection(&mut self) {
+        if let Some(kb) = self.keyboard.as_mut() {
+            kb.reset();
+        }
+        self.buffer.clear();
+    }
+
+    /// Move the candidate highlight. `page` is the renderer's page size.
+    /// Returns whether a list was showing at all — the caller consumes the key
+    /// only then, so arrows and Page Up/Down keep their normal meaning when no
+    /// popup is open.
+    pub fn move_candidate_cursor(&mut self, motion: CandidateMotion, page: usize) -> bool {
+        if self.candidates.is_empty() {
+            return false;
+        }
+        match motion {
+            CandidateMotion::Next => self.candidates.move_next(),
+            CandidateMotion::Prev => self.candidates.move_prev(),
+            CandidateMotion::PageDown => self.candidates.page_down(page),
+            CandidateMotion::PageUp => self.candidates.page_up(page),
+        };
+        true
+    }
+
+    /// Dismiss the list WITHOUT touching the composition (Escape): the reading
+    /// stays on screen so the user can keep typing or commit it as Quốc ngữ.
+    /// Returns whether anything was showing.
+    pub fn dismiss_candidates(&mut self) -> bool {
+        self.candidates.clear()
     }
 
     /// Process backspace
@@ -253,9 +360,11 @@ impl VietnameseEngine {
         self.keyboard.as_mut()?.toggle_composition()
     }
 
-    /// Reset the engine state
+    /// Reset the engine state, including any candidate list — a reset means
+    /// the composed word is gone, and candidates only ever describe a word.
     pub fn reset(&mut self) {
         self.buffer.clear();
+        self.candidates.clear();
         if let Some(ref mut kb) = self.keyboard {
             kb.reset();
         }
@@ -329,10 +438,13 @@ impl VietnameseEngine {
             self.strict_applied = strict;
         }
     }
+}
 
-    /// Generate candidate list (stub for Nom support)
-    pub fn generate_candidates(&self, _input: &str) -> Vec<CandidateItem> {
-        // TODO: Implement Nom candidate generation when needed
-        Vec::new()
-    }
+/// Which way a candidate-navigation key moves the highlight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateMotion {
+    Next,
+    Prev,
+    PageDown,
+    PageUp,
 }

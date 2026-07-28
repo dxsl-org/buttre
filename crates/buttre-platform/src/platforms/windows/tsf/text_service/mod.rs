@@ -3,6 +3,7 @@
 //
 // Main TextService implementation for buttre TSF
 
+pub mod candidate_render;
 pub mod candidate_ui;
 pub mod composition;
 pub mod display_attribute;

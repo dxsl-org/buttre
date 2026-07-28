@@ -4,9 +4,6 @@
 
 use buttre_core::state::macros::{MacroEntry, MacroFile, MacroStore};
 use buttre_core::Action;
-use buttre_platform::platforms::windows::tsf::text_service::candidate_ui::{
-    CandidateItem, NomCandidateUI,
-};
 use buttre_platform::platforms::windows::tsf::text_service::composition::{
     Composition, PendingComposition,
 };
@@ -14,12 +11,18 @@ use buttre_platform::platforms::windows::tsf::text_service::display_attribute::{
     DisplayAttributeInfo, GUID_DISPLAY_ATTRIBUTE_CONVERTED, GUID_DISPLAY_ATTRIBUTE_INPUT,
 };
 use buttre_platform::platforms::windows::tsf::text_service::vietnamese_engine::{
-    VietnameseEngine, VietnameseMode,
+    CandidateMotion, VietnameseEngine, VietnameseMode,
 };
 use buttre_platform::platforms::windows::tsf::{com, logging, CLSID_BUTTRE_TEXT_SERVICE};
 use std::sync::{Arc, Mutex};
 use windows::core::{GUID, HSTRING};
 use windows::Win32::UI::TextServices::ITfDisplayAttributeInfo;
+
+/// An in-memory store with no entries — for tests about something other than
+/// shorthand, so they never read the developer's real `macros.toml`.
+fn empty_macro_store() -> Arc<Mutex<MacroStore>> {
+    Arc::new(Mutex::new(MacroStore::default()))
+}
 
 /// An in-memory store with `vn` -> "Việt Nam" — never touches
 /// `%APPDATA%`/`macros.toml`, unlike `MacroStore::load`/`load_gated`.
@@ -231,59 +234,57 @@ fn test_pending_composition_defaults() {
     assert_eq!(pending.cursor, 0);
 }
 
-fn create_test_candidates() -> Vec<CandidateItem> {
-    vec![
-        CandidateItem {
-            character: '𡦂',
-            reading: "người".to_string(),
-            meaning: Some("person".to_string()),
-            frequency: 1000,
-        },
-        CandidateItem {
-            character: '𠊛',
-            reading: "người".to_string(),
-            meaning: Some("person (variant)".to_string()),
-            frequency: 500,
-        },
-    ]
+// ── Nôm candidates ───────────────────────────────────────────────────────────
+// Paging, wrapping and page-relative selection are covered where that logic
+// lives, in `shared::candidates`. What matters HERE is the seam
+// `text_service_stub::handle_candidate_key` leans on: with no list showing,
+// every candidate operation must decline, because the key sink reads that
+// refusal as "let the application have this key". A method that quietly
+// succeeded on an empty list would swallow Escape, Space and the digits
+// whenever Nôm was merely selected.
+
+#[test]
+fn candidate_ops_decline_when_no_list_is_showing() {
+    // Telex offers no candidates ever — the same state Nôm is in before a
+    // lookup hits.
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, empty_macro_store());
+    assert!(engine.candidates().is_empty());
+
+    assert!(
+        !engine.dismiss_candidates(),
+        "Escape must reach the application when no popup is up"
+    );
+    assert!(
+        !engine.move_candidate_cursor(CandidateMotion::Next, 9),
+        "arrow keys must keep their normal meaning"
+    );
+    assert_eq!(
+        engine.select_candidate_at_page(0, 9),
+        None,
+        "digit 1 must type a 1"
+    );
+    assert_eq!(engine.select_current_candidate(), None);
 }
 
 #[test]
-fn test_candidate_ui_creation() {
-    let candidates = create_test_candidates();
-    let ui = NomCandidateUI::new(candidates);
-
-    // Test basic page info
-    assert_eq!(ui.page_count(), 1);
-}
-
-#[test]
-fn test_page_navigation() {
-    let mut candidates = Vec::new();
-    for i in 0..20 {
-        candidates.push(CandidateItem {
-            character: '𡦂',
-            reading: format!("test{}", i),
-            meaning: None,
-            frequency: 100,
-        });
+fn typing_a_word_leaves_no_candidates_in_telex() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, empty_macro_store());
+    for ch in "tieengs".chars() {
+        engine.process_key(ch);
     }
-
-    let ui = NomCandidateUI::new(candidates);
-    assert_eq!(ui.page_count(), 3); // 20 candidates, 9 per page = 3 pages
-
-    assert!(ui.next_page());
-    assert!(ui.prev_page());
+    assert_eq!(engine.buffer_content(), "tiếng");
+    assert!(
+        engine.candidates().is_empty(),
+        "only Nôm produces candidates; a stray list here would hijack digits"
+    );
 }
 
 #[test]
-fn test_candidate_selection() {
-    let candidates = create_test_candidates();
-    let ui = NomCandidateUI::new(candidates);
-
-    let selected = ui.select(0);
-    assert!(selected.is_some());
-    assert_eq!(selected.unwrap().character, '𡦂');
+fn reset_drops_the_candidate_list() {
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Nom, empty_macro_store());
+    engine.process_key('t');
+    engine.reset();
+    assert!(engine.candidates().is_empty());
 }
 
 #[test]
