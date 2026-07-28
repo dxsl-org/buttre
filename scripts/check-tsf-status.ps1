@@ -45,11 +45,38 @@ if (Test-Path $tipPath) {
 }
 
 Write-Host ""
-Write-Host "3. Current Input Method:" -ForegroundColor Yellow
-# This requires additional APIs, showing alternative
-Write-Host "  Check manually:" -ForegroundColor Gray
-Write-Host "  - Press Win+Space to see keyboard list" -ForegroundColor White
-Write-Host "  - Look for 'buttre - Vietnamese Input'" -ForegroundColor White
+Write-Host "3. Added as one of YOUR input methods:" -ForegroundColor Yellow
+# The decisive check, and the one this script used to punt on ("requires
+# additional APIs"). Registration only makes the IME available in Windows'
+# picker; until the user ADDS it, no application activates the text service and
+# buttre.exe falls back to the global-hook backend — which looks like a bug in
+# TSF but is the tray correctly refusing a backend that cannot receive keys.
+$enabled = @()
+Get-ChildItem "HKCU:\Software\Microsoft\CTF\SortOrder\AssemblyItem" -Recurse -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        $item = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+        if ($item.CLSID -eq $clsid) {
+            # .../AssemblyItem\<langid>\<category>\<index>
+            $enabled += ($_.Name -split '\\')[-3]
+        }
+    }
+
+if ($enabled) {
+    foreach ($langId in ($enabled | Select-Object -Unique)) {
+        Write-Host "  OK  added under $langId" -ForegroundColor Green
+    }
+    Write-Host "  buttre.exe will use the TSF backend." -ForegroundColor Gray
+} else {
+    Write-Host "  NO  buttre is registered but NOT added to your input methods." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  buttre.exe therefore runs the HOOK backend, not TSF." -ForegroundColor Yellow
+    Write-Host "  Everything you type goes through the hook, so TSF-only features" -ForegroundColor Gray
+    Write-Host "  (the Nom candidate window) never appear." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Fix: Settings > Time and language > Language and region >" -ForegroundColor Cyan
+    Write-Host "       (a language) > Options > Add a keyboard > buttre" -ForegroundColor Cyan
+    Write-Host "       Then Win+Space to switch to it, and RESTART buttre.exe." -ForegroundColor Cyan
+}
 
 Write-Host ""
 Write-Host "4. Debug DLL Check:" -ForegroundColor Yellow

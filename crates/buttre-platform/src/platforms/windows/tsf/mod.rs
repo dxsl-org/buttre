@@ -77,11 +77,19 @@ impl TsfBackend {
         // Check 2: Ensure we can get DLL path (sanity check)
         get_dll_path()?;
 
-        // Check 3: Verify Vietnamese language is installed in Windows
-        // TSF only works if the user has added Vietnamese to their language list
-        // If not installed, we should fallback to Hook backend
-        if !lang_check::is_vietnamese_language_installed() {
-            anyhow::bail!("Vietnamese language not installed in Windows. TSF requires Vietnamese language to be added in Settings > Language & Region.");
+        // Check 3: the user must have ADDED buttre as an input method.
+        //
+        // Registration only makes it available in Windows' picker. Until it is
+        // selected there, no application ever activates the text service, so
+        // choosing this backend would leave the user unable to type at all —
+        // and choosing Hook while it IS selected means both layers run, with
+        // the hook winning because it sees keys first.
+        if !lang_check::is_buttre_text_service_enabled() {
+            anyhow::bail!(
+                "buttre is registered but not added as a Windows input method. \
+                 Add it under Settings > Time & language > Language & region > \
+                 (language) > Keyboards, then restart buttre."
+            );
         }
 
         Ok(Self { _keyboard: None })
