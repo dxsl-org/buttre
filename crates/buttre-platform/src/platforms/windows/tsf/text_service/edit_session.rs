@@ -12,7 +12,7 @@ use std::ops::Deref;
 use std::ptr;
 use std::rc::Rc;
 
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Variant::VARIANT;
@@ -240,8 +240,22 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                     pending.text, pending.cursor
                 );
 
-                // Get composition range
-                let range = composition.GetRange()?;
+                // Get composition range.
+                //
+                // Failure here means the composition is DEAD — ended by the
+                // application, or by us without clearing the slot. Drop it so
+                // the next keystroke starts a fresh one instead of retrying a
+                // corpse forever: that exact state once silenced the text
+                // service after its first word, and because this was a bare
+                // `?` it did so without logging a single line.
+                let range = match composition.GetRange() {
+                    Ok(range) => range,
+                    Err(error) => {
+                        warn!("Composition is stale ({error}) — dropping it so the next key restarts one");
+                        self.this.composition.clear();
+                        return Err(error);
+                    }
+                };
 
                 // Set composition text
                 if let Err(error) = range.SetText(ec, 0, &pending.text) {
@@ -250,23 +264,37 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                 }
 
                 // Set display attribute (underline, etc.)
-                let disp_attr_prop = self.this.context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
-                if let Err(error) = disp_attr_prop.SetValue(ec, &range, &self.this.da_atom) {
-                    error!("Failed to set display attribute: {}", error);
-                    // Non-fatal, continue
+                match self.this.context.GetProperty(&GUID_PROP_ATTRIBUTE) {
+                    Ok(disp_attr_prop) => {
+                        if let Err(error) = disp_attr_prop.SetValue(ec, &range, &self.this.da_atom)
+                        {
+                            error!("Failed to set display attribute: {}", error);
+                            // Non-fatal, continue
+                        }
+                    }
+                    Err(error) => error!("Failed to get display-attribute property: {}", error),
                 }
 
                 // Set cursor position: collapse to start, shift end forward by cursor chars,
                 // then shift start to match end so we get a zero-width range at the cursor.
                 // Use the actual 'moved' value from ShiftEnd so ShiftStart never overshoots.
-                let cursor_range = range.Clone()?;
-                let mut moved = 0;
-                cursor_range.Collapse(ec, TF_ANCHOR_START)?;
-                cursor_range.ShiftEnd(ec, pending.cursor as i32, &mut moved, ptr::null())?;
-                let end_offset = moved;
-                cursor_range.ShiftStart(ec, end_offset, &mut moved, ptr::null())?;
-
-                set_selection(&self.this.context, ec, cursor_range, TF_AE_END)?;
+                //
+                // Every step is logged on failure: the text is already in the
+                // document by now, so a silent bail here leaves the caret
+                // wrong with nothing to explain it.
+                let place_cursor = || -> Result<()> {
+                    let cursor_range = range.Clone()?;
+                    let mut moved = 0;
+                    cursor_range.Collapse(ec, TF_ANCHOR_START)?;
+                    cursor_range.ShiftEnd(ec, pending.cursor as i32, &mut moved, ptr::null())?;
+                    let end_offset = moved;
+                    cursor_range.ShiftStart(ec, end_offset, &mut moved, ptr::null())?;
+                    set_selection(&self.this.context, ec, cursor_range, TF_AE_END)
+                };
+                if let Err(error) = place_cursor() {
+                    error!("Failed to place the caret after the composition: {}", error);
+                    return Err(error);
+                }
 
                 debug!("Composition updated successfully");
             }

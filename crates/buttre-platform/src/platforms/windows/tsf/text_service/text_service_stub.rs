@@ -200,6 +200,22 @@ impl TextService {
                     TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
                 )?;
             }
+
+            // Forget the composition we just ended (CRITICAL). Nothing else
+            // will: `OnCompositionTerminated` fires only when the APPLICATION
+            // terminates a composition, never for one we end ourselves. Left
+            // behind, the dead `ITfComposition` made `is_started()` keep
+            // answering true, so every later keystroke skipped
+            // `StartComposition` and called `GetRange` on a terminated
+            // composition — which fails, aborting the edit session. The
+            // symptom was a text service that composed the first word and
+            // then went silent forever, with no error anywhere.
+            //
+            // Safe to clear now even though the session above is async: it
+            // was handed its own reference to the composition when it was
+            // built, so it does not read this slot.
+            self.composition.clear();
+            self.last_text_len.set(0);
         }
 
         Ok(())
