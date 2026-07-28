@@ -32,6 +32,7 @@ use windows::Win32::UI::TextServices::{CLSID_TF_CategoryMgr, ITfCategoryMgr};
     ITfCompositionSink,
     ITfDisplayAttributeProvider,
     ITfKeyEventSink,
+    ITfTextEditSink,
     ITfThreadMgrEventSink,
     ITfThreadFocusSink,
     ITfCompartmentEventSink,
@@ -56,6 +57,13 @@ pub struct TextService {
     /// Last screen position the panel was placed at, reused when the host
     /// cannot report a fresh text extent (see `composition_screen_pos`).
     last_panel_pos: Cell<(i32, i32)>,
+    /// `ITfTextEditSink` advise cookies, one per context we are watching.
+    ///
+    /// This is how the caret moving is detected WITHOUT eating the key that
+    /// moved it — see `ITfTextEditSink_Impl::OnEndEdit`. Keyed by the context
+    /// itself so a context pushed twice is not advised twice, and so
+    /// `Deactivate` can unadvise every one.
+    edit_cookies: RefCell<Vec<(ITfContext, u32)>>,
 }
 // ...
 // ... existing impls ...
@@ -135,6 +143,55 @@ impl TextService {
             vietnamese_engine: Rc::new(RefCell::new(VietnameseEngine::new())),
             candidate_panel: RefCell::new(None),
             last_panel_pos: Cell::new((100, 100)),
+            edit_cookies: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Is `selection` outside the open composition?
+    ///
+    /// The question that separates "the user moved the caret away" from "our own
+    /// composition update moved it", and it is asked by POSITION rather than by
+    /// timing on purpose: our edit sessions are `TF_ES_ASYNCDONTCARE`, so they
+    /// can land after the keystroke that queued them has finished. Any flag
+    /// meant to mark "this edit is ours" would already be cleared by then, and
+    /// we would tear down our own composition mid-word.
+    ///
+    /// Returns `None` when the comparison cannot be made (no composition, or a
+    /// range the host refuses to compare) — callers then leave the composition
+    /// alone rather than guessing.
+    fn selection_left_composition(
+        &self,
+        context: &ITfContext,
+        ec: u32,
+        composition_range: &ITfRange,
+    ) -> Option<bool> {
+        // SAFETY: `ec` is the read cookie TSF handed to `OnEndEdit`, valid for
+        // the duration of that callback; `context` is the context it named.
+        unsafe {
+            let mut selection = [TF_SELECTION::default(); 1];
+            let mut fetched = 0u32;
+            context
+                .GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched)
+                .ok()?;
+            if fetched == 0 {
+                return None;
+            }
+            // Take the range out of the ManuallyDrop wrapper so it is released
+            // when this scope ends.
+            let [TF_SELECTION { range, .. }] = selection;
+            let selected = std::mem::ManuallyDrop::into_inner(range)?;
+
+            let before = composition_range
+                .CompareStart(ec, &selected, TF_ANCHOR_START)
+                .ok()?;
+            let after = composition_range
+                .CompareEnd(ec, &selected, TF_ANCHOR_END)
+                .ok()?;
+
+            // `before > 0`: the composition starts after the selection does, so
+            // the caret sits before our text. `after < 0`: the composition ends
+            // before the selection does, so the caret ran past it.
+            Some(before > 0 || after < 0)
         }
     }
 
@@ -571,6 +628,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             }
         }
         self.this.keyboard_openclose_cookie.set(TF_INVALID_COOKIE);
+        self.unadvise_all_edit_sinks();
 
         self.this.composition.clear();
         // Destroy the panel outright, not just hide it: Deactivate means this
@@ -581,6 +639,139 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         self.this.da_atom_input.set(0);
         self.this.da_atom_converted.set(0);
         self.this.keystroke_tid.set(0);
+        Ok(())
+    }
+}
+
+impl TextService_Impl {
+    /// Start watching `context` for edits, unless we already are.
+    ///
+    /// Advised per context rather than once per thread because
+    /// `ITfTextEditSink` lives on `ITfContext` — a thread can hold several
+    /// (a document plus its find bar, say) and each needs its own advise.
+    fn advise_edit_sink(&self, context: &ITfContext) {
+        if self
+            .this
+            .edit_cookies
+            .borrow()
+            .iter()
+            .any(|(watched, _)| watched == context)
+        {
+            return;
+        }
+        // SAFETY: `context` is a live ITfContext from TSF; the sink reference is
+        // this object, which outlives the advise (Deactivate unadvises).
+        unsafe {
+            let Ok(source) = context.cast::<ITfSource>() else {
+                return;
+            };
+            let sink: ITfTextEditSink = {
+                let r: InterfaceRef<'_, ITfTextEditSink> = self.as_interface_ref();
+                r.to_owned()
+            };
+            match source.AdviseSink(&ITfTextEditSink::IID, &sink) {
+                Ok(cookie) => {
+                    self.this
+                        .edit_cookies
+                        .borrow_mut()
+                        .push((context.clone(), cookie));
+                }
+                // Not fatal: without the sink we simply lose the caret-move
+                // detection in this context, and the composition is still ended
+                // on focus change and on commit.
+                Err(e) => debug!("AdviseSink(ITfTextEditSink) failed: {:?}", e),
+            }
+        }
+    }
+
+    /// Stop watching `context`.
+    fn unadvise_edit_sink(&self, context: &ITfContext) {
+        let cookie = {
+            let mut cookies = self.this.edit_cookies.borrow_mut();
+            let Some(index) = cookies.iter().position(|(watched, _)| watched == context) else {
+                return;
+            };
+            cookies.remove(index).1
+        };
+        // SAFETY: cookie came from AdviseSink on this same context.
+        unsafe {
+            if let Ok(source) = context.cast::<ITfSource>() {
+                let _ = source.UnadviseSink(cookie);
+            }
+        }
+    }
+
+    /// Release every edit-sink advise. Called from `Deactivate`, where the
+    /// borrow is taken and released before any COM call — `UnadviseSink` can
+    /// re-enter this object.
+    fn unadvise_all_edit_sinks(&self) {
+        let watched: Vec<(ITfContext, u32)> =
+            self.this.edit_cookies.borrow_mut().drain(..).collect();
+        // SAFETY: each cookie came from AdviseSink on its paired context.
+        unsafe {
+            for (context, cookie) in watched {
+                if let Ok(source) = context.cast::<ITfSource>() {
+                    let _ = source.UnadviseSink(cookie);
+                }
+            }
+        }
+    }
+}
+
+impl ITfTextEditSink_Impl for TextService_Impl {
+    /// The caret moved, or the document changed — decide whether our
+    /// composition still belongs where it is.
+    ///
+    /// This exists so navigation keys never have to be EATEN. `OnTestKeyDown`
+    /// can only answer "will you consume this key", so the old way of noticing
+    /// an arrow press was to consume it, which stopped the caret from moving at
+    /// all. Here the app moves the caret normally and TSF tells us afterwards.
+    fn OnEndEdit(
+        &self,
+        pic: Ref<'_, ITfContext>,
+        ec: u32,
+        peditrecord: Ref<'_, ITfEditRecord>,
+    ) -> Result<()> {
+        if !self.this.composition.is_started() {
+            return Ok(());
+        }
+        let (Some(context), Some(record)) = ((*pic).clone(), (*peditrecord).clone()) else {
+            return Ok(());
+        };
+
+        // SAFETY: both interfaces come from TSF and are valid for this callback;
+        // `ec` is its read cookie.
+        let moved = unsafe { record.GetSelectionStatus() };
+        if !matches!(moved, Ok(status) if status.as_bool()) {
+            return Ok(());
+        }
+
+        // SAFETY: the composition is open (checked above), so GetRange has a
+        // live range to hand back. It takes no edit cookie.
+        let range = unsafe {
+            let Some(composition) = self.this.composition.get() else {
+                return Ok(());
+            };
+            match composition.GetRange() {
+                Ok(range) => range,
+                Err(e) => {
+                    debug!("OnEndEdit: composition range unavailable: {:?}", e);
+                    return Ok(());
+                }
+            }
+        };
+
+        // Anything other than a definite "left it" — inside the composition (our
+        // own update, or a click within the word), or not comparable — leaves
+        // the composition alone.
+        if self.this.selection_left_composition(&context, ec, &range) == Some(true) {
+            debug!("OnEndEdit: caret left the composition, closing it");
+            if let Err(e) = self.this.end_composition(&context) {
+                debug!("Failed to end composition after caret move: {:?}", e);
+            }
+            self.this.vietnamese_engine.borrow_mut().reset();
+            self.this.hide_candidates();
+        }
         Ok(())
     }
 }
@@ -620,6 +811,18 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
         pdimfocus: Ref<'_, ITfDocumentMgr>,
         pdimprevfocus: Ref<'_, ITfDocumentMgr>,
     ) -> Result<()> {
+        // Watch the newly focused document's context. `OnPushContext` covers
+        // contexts pushed while we are active, but a document that already
+        // existed when the user switched TO buttre never fires it — and that is
+        // the common case, so without this the very first document typed in
+        // would have no caret-move detection.
+        if let Ok(focused) = pdimfocus.ok() {
+            // SAFETY: `focused` is the document manager TSF just gave us.
+            if let Ok(context) = unsafe { focused.GetBase() } {
+                self.advise_edit_sink(&context);
+            }
+        }
+
         if self.this.key_busy.get() {
             return Ok(());
         }
@@ -639,10 +842,17 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
         Ok(())
     }
 
-    fn OnPushContext(&self, _pic: Ref<'_, ITfContext>) -> Result<()> {
+    fn OnPushContext(&self, pic: Ref<'_, ITfContext>) -> Result<()> {
+        if let Some(context) = (*pic).clone() {
+            self.advise_edit_sink(&context);
+        }
         Ok(())
     }
-    fn OnPopContext(&self, _pic: Ref<'_, ITfContext>) -> Result<()> {
+
+    fn OnPopContext(&self, pic: Ref<'_, ITfContext>) -> Result<()> {
+        if let Some(context) = (*pic).clone() {
+            self.unadvise_edit_sink(&context);
+        }
         Ok(())
     }
 }
@@ -883,19 +1093,22 @@ fn is_printable_key(vkey: u16) -> bool {
 ///
 /// * Buffer-reset keys were claimed unconditionally, so the ARROW KEYS stopped
 ///   moving the caret anywhere in the editor. `OnKeyDown` returned `BOOL(0)`
-///   for them, but that came too late to hand the key back. They are now
-///   claimed only while a composition is open, which is the standard IME
-///   bargain: the key closes the composition instead of moving, and a second
-///   press moves.
+///   for them, but that came too late to hand the key back.
 /// * With no keyboard loaded (the tray's "english", or a custom layout that
 ///   failed to load) `OnKeyDown` declines EVERY key — so claiming any of them
 ///   would swallow the user's typing outright.
+///
+/// Navigation and editing keys are now claimed by NOTHING: the caret moves in
+/// the application, and `ITfTextEditSink::OnEndEdit` tells us about it
+/// afterwards. Escape is the one exception — cancelling the composition without
+/// passing the key on is what every IME does, and what the candidate popup
+/// needs.
 fn claims_key(vkey: u16, engine_active: bool, composing: bool, candidates_open: bool) -> bool {
     if !engine_active {
         return false;
     }
     is_printable_key(vkey)
-        || (composing && is_buffer_reset_key(vkey))
+        || (composing && vkey == VK_ESCAPE)
         || (candidates_open && is_candidate_key(vkey))
 }
 
@@ -1372,13 +1585,34 @@ mod tests {
     }
 
     #[test]
-    fn navigation_keys_close_an_open_composition_instead() {
-        for vkey in ARROWS {
+    fn navigation_keys_move_the_caret_even_mid_word() {
+        // The composition is closed by `ITfTextEditSink::OnEndEdit` after the
+        // app has moved the caret, so the key itself is never consumed — no
+        // "press the arrow twice" surprise.
+        for vkey in ARROWS.into_iter().chain([0x23, 0x24, VK_PRIOR, VK_NEXT]) {
             assert!(
-                claims_key(vkey, true, true, false),
-                "vkey {vkey:#x} should close the composition while one is open"
+                !claims_key(vkey, true, true, false),
+                "vkey {vkey:#x} must reach the app even with a composition open"
             );
         }
+    }
+
+    #[test]
+    fn editing_keys_are_never_claimed() {
+        // Delete, Insert, Tab, F-keys: whatever they do to the document, the
+        // edit sink reports it. Eating them broke the editor.
+        for vkey in [0x2Eu16, 0x2D, 0x09, 0x70, 0x7B] {
+            assert!(!claims_key(vkey, true, true, false), "vkey {vkey:#x}");
+        }
+    }
+
+    #[test]
+    fn escape_is_the_one_key_a_composition_consumes() {
+        assert!(claims_key(VK_ESCAPE, true, true, false));
+        assert!(
+            !claims_key(VK_ESCAPE, true, false, false),
+            "with nothing composing, Escape belongs to the application"
+        );
     }
 
     #[test]
@@ -1414,13 +1648,15 @@ mod tests {
     }
 
     #[test]
-    fn every_navigation_key_that_is_also_a_reset_key_is_claimed() {
-        // Escape, Page Up and Page Down are buffer-reset keys. If the popup did
-        // not claim them first, they would throw the composed word away instead
-        // of dismissing or paginating.
+    fn the_popup_wins_over_the_reset_meaning_of_its_keys() {
+        // Escape, Page Up and Page Down are also buffer-reset keys. While a
+        // candidate list is up they must dismiss and paginate instead — so they
+        // have to be claimed, and `handle_candidate_key` has to run before
+        // OnKeyDown's reset branch.
         for vkey in [VK_ESCAPE, VK_PRIOR, VK_NEXT] {
             assert!(is_buffer_reset_key(vkey));
             assert!(is_candidate_key(vkey));
+            assert!(claims_key(vkey, true, true, true), "vkey {vkey:#x}");
         }
     }
 }
