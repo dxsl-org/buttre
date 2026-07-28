@@ -159,11 +159,22 @@ fn run_tsf_status() -> Result<()> {
     use buttre_platform::platforms::windows::tsf::{lang_check, registration};
 
     let registered = registration::is_tsf_registered();
-    let enabled = lang_check::is_buttre_text_service_enabled();
-    println!("registered (COM/TIP keys): {registered}");
-    println!("added as an input method:  {enabled}");
+    let langids = lang_check::enabled_langids();
+    let enabled = !langids.is_empty();
+    let under = if enabled {
+        langids
+            .iter()
+            .map(|id| format!("0x{id:04X}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        "(none — add it in Windows keyboard settings)".to_string()
+    };
+
+    println!("registered (HKLM, available):   {registered}");
+    println!("added by you (HKCU, languages): {under}");
     println!(
-        "tray will use:             {}",
+        "tray will use:                  {}",
         if registered && enabled { "TSF" } else { "Hook" }
     );
     if registered && enabled {

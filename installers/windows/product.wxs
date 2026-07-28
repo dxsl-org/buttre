@@ -143,8 +143,18 @@
     <InstallExecuteSequence>
       <!-- After the DLL exists on disk; skipped when only removing. -->
       <Custom Action="RegisterTsf" After="InstallFiles">NOT REMOVE</Custom>
-      <!-- Before the DLL is deleted, so the COM server is still loadable. -->
-      <Custom Action="UnregisterTsf" Before="RemoveFiles">REMOVE="ALL"</Custom>
+      <!--
+        Before the DLL is deleted, so the COM server is still loadable.
+
+        NOT UPGRADINGPRODUCTCODE is what keeps an UPGRADE from unregistering.
+        A major upgrade uninstalls the old product, and that pass has
+        REMOVE="ALL" like any other removal — so without this guard every
+        update deleted HKLM\...\CTF\TIP\<clsid>, Windows pruned the user's own
+        HKCU entry for the profile, and the IME disappeared from their keyboard
+        list. The new install then re-registered it as something they had never
+        added. Registration is idempotent, so an upgrade needs no removal at all.
+      -->
+      <Custom Action="UnregisterTsf" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
     </InstallExecuteSequence>
 
   </Product>

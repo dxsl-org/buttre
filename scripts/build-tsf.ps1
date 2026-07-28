@@ -318,11 +318,18 @@ try {
         exit 0
     }
 
-    # ── Unregister + free the DLL ────────────────────────────────────────
-    Write-Host "[3/$steps] Unregistering the previous install..." -ForegroundColor Yellow
-    $oldDll = Join-Path $InstallDir "buttre_platform.dll"
-    if (Test-Path $oldDll) { & regsvr32.exe /u /s $oldDll 2>$null }
-    Remove-Registration
+    # ── Free the DLL (but KEEP the registration) ─────────────────────────
+    #
+    # This used to run `regsvr32 /u` + Remove-Registration first. Deleting
+    # HKLM\...\CTF\TIP\<clsid> makes the profile vanish, and Windows then prunes
+    # the user's own HKCU entry for it — so every reinstall silently removed
+    # buttre from the user's keyboard list. It stayed listed under a language as
+    # a dangling Preload entry that resolved to the plain layout, which is why
+    # picking "Vietnamese - buttre" landed on "Vietnamese - US".
+    #
+    # Registration is idempotent (create-or-open plus set_value), so writing over
+    # the old keys is enough. Only the file lock has to go.
+    Write-Host "[3/$steps] Releasing the old DLL (registration kept)..." -ForegroundColor Yellow
     Stop-TsfHosts
     Write-Host "      Done" -ForegroundColor Gray
 
