@@ -145,6 +145,39 @@ fn run_tsf_registration(_unregister: bool) -> Result<()> {
     anyhow::bail!("--register-tsf is Windows-only")
 }
 
+/// `buttre --tsf-status`: report which backend the tray will pick, and why.
+///
+/// Exists so diagnostics ask the AUTHORITY instead of guessing. A shell script
+/// reading `HKCU\...\CTF\SortOrder` to infer "is buttre added as an input
+/// method" answered NO while the text service was demonstrably running — the
+/// same wrong-proxy mistake that made the backend gate test the language list.
+/// Here the script calls the very function the tray decides with.
+///
+/// Exit code 0 = TSF, 1 = Hook, so a caller can branch without parsing text.
+#[cfg(platform_windows)]
+fn run_tsf_status() -> Result<()> {
+    use buttre_platform::platforms::windows::tsf::{lang_check, registration};
+
+    let registered = registration::is_tsf_registered();
+    let enabled = lang_check::is_buttre_text_service_enabled();
+    println!("registered (COM/TIP keys): {registered}");
+    println!("added as an input method:  {enabled}");
+    println!(
+        "tray will use:             {}",
+        if registered && enabled { "TSF" } else { "Hook" }
+    );
+    if registered && enabled {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
+}
+
+#[cfg(not(platform_windows))]
+fn run_tsf_status() -> Result<()> {
+    anyhow::bail!("--tsf-status is Windows-only")
+}
+
 /// Debounce successive personal-learning save requests down to the LATEST
 /// snapshot only (event-sourcing-completion Phase 5, red-team C3): a
 /// snapshot is the full current store state, not a delta, so replaying every
@@ -366,6 +399,7 @@ fn main() -> Result<()> {
              --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \
              --register-tsf    Register the Windows TSF text service (needs Administrator)\n  \
              --unregister-tsf  Remove that registration (needs Administrator)\n  \
+             --tsf-status      Report whether the tray will use TSF or the hook\n  \
              --version   Print version and exit\n  \
              --help      Print this help and exit",
             ver = env!("CARGO_PKG_VERSION")
@@ -380,6 +414,9 @@ fn main() -> Result<()> {
     }
     if args.iter().any(|a| a == "--unregister-tsf") {
         return run_tsf_registration(true);
+    }
+    if args.iter().any(|a| a == "--tsf-status") {
+        return run_tsf_status();
     }
     if args.iter().any(|a| a == "--doctor") {
         run_doctor();

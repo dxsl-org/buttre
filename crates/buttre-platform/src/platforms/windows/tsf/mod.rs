@@ -49,7 +49,7 @@ pub mod com;
 pub mod factory; // Public for COM exports
 pub mod ipc;
 // Note: key_event_sink is integrated into text_service module
-mod lang_check;
+pub mod lang_check; // Public so `buttre --tsf-status` reports the same verdict
 pub mod logging;
 pub mod registration; // Public for COM exports
 mod text_ops;
