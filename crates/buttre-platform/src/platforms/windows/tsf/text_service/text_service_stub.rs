@@ -110,6 +110,12 @@ impl Drop for TextService {
 
 impl TextService {
     pub fn new() -> Self {
+        // BEFORE anything reads a data file. `VietnameseEngine::new` below
+        // resolves `buttre_nom.db` and `keyboards/*.toml`, and the default
+        // resolver searches next to `current_exe()` — which in this process is
+        // Word, Notepad or Chrome, not buttre. See `set_resource_dir`.
+        pin_resource_dir();
+
         // Increment DLL refcount: Windows should not unload the DLL while a
         // TextService instance exists. Balanced by Drop above.
         dll_add_ref();
@@ -719,6 +725,24 @@ const VK_UP: u16 = 0x26;
 const VK_DOWN: u16 = 0x28;
 const VK_DIGIT_1: u16 = 0x31;
 const VK_DIGIT_9: u16 = 0x39;
+
+/// Tell buttre-core that its data files sit next to THIS DLL, not next to the
+/// host application's executable.
+///
+/// Idempotent (`set_resource_dir` keeps the first value), so every
+/// `TextService` may call it. A failure to locate our own module is logged and
+/// ignored: the default `current_exe()` search then applies, which is what
+/// happened before this existed.
+fn pin_resource_dir() {
+    match crate::platforms::windows::tsf::registration::get_dll_path() {
+        Ok(dll) => {
+            if let Some(dir) = dll.parent() {
+                buttre_core::vietnamese::set_resource_dir(dir.to_path_buf());
+            }
+        }
+        Err(e) => tracing::warn!("could not locate the buttre DLL, data files may be missing: {e}"),
+    }
+}
 
 /// Screen position under the system caret, as a fallback anchor for the
 /// candidate panel.

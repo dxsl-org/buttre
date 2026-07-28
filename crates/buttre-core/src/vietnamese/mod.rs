@@ -47,8 +47,37 @@ pub mod config_loader {
     }
 }
 
+/// Directory holding buttre's shipped data files, when the caller had to say
+/// so explicitly. See [`set_resource_dir`].
+static RESOURCE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Pin the directory that ships buttre's data files (`buttre_nom.db`,
+/// `keyboards/*.toml`), overriding the `current_exe()` search below.
+///
+/// Required by any host where buttre is NOT the executable. The Windows TSF
+/// text service is a DLL loaded into Word, Notepad, Chrome — there
+/// `current_exe()` is the HOST application, so the search looked for
+/// `buttre_nom.db` inside the Office install directory and of course never
+/// found it. The symptom was silent: Nôm loaded with no dictionary and typed
+/// plain Quốc ngữ, and custom keyboards vanished, with nothing but a `warn!`
+/// in a log nobody was reading.
+///
+/// First call wins; later calls are ignored, so a host can call it
+/// unconditionally on every activation.
+pub fn set_resource_dir(dir: std::path::PathBuf) {
+    let _ = RESOURCE_DIR.set(dir);
+}
+
 /// Get custom keyboards directory
 pub fn get_custom_dir() -> std::path::PathBuf {
+    // 0. Host-supplied resource directory (see `set_resource_dir`)
+    if let Some(dir) = RESOURCE_DIR.get() {
+        let keyboards = dir.join("keyboards");
+        if keyboards.exists() {
+            return keyboards;
+        }
+    }
+
     // 1. Check folder "keyboards" next to executable (Priority 1 - Release/Portable)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
@@ -78,6 +107,21 @@ pub fn get_nom_db_path() -> Option<std::path::PathBuf> {
     let filename = "buttre_nom.db";
 
     tracing::info!("Searching for Nôm dictionary: {}", filename);
+
+    // 0. Host-supplied resource directory (see `set_resource_dir`) — the only
+    //    location that works when buttre is a DLL inside someone else's process.
+    if let Some(dir) = RESOURCE_DIR.get() {
+        for path in [
+            dir.join(filename),
+            dir.join("resources").join("nom").join(filename),
+        ] {
+            tracing::debug!("Checking resource dir: {:?}", path);
+            if path.exists() {
+                tracing::info!("✓ Found Nôm dictionary at: {:?}", path);
+                return Some(path);
+            }
+        }
+    }
 
     // 1. Check next to executable
     if let Ok(exe_path) = std::env::current_exe() {
