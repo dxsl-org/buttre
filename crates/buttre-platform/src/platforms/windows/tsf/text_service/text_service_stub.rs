@@ -122,7 +122,7 @@ impl TextService {
             thread_cookies: RefCell::new(Vec::new()),
             keyboard_openclose_cookie: Cell::new(TF_INVALID_COOKIE),
             key_busy: Cell::new(false),
-            vietnamese_engine: Rc::new(RefCell::new(VietnameseEngine::new(VietnameseMode::Telex))),
+            vietnamese_engine: Rc::new(RefCell::new(VietnameseEngine::new())),
             candidate_ui: RefCell::new(None),
         }
     }

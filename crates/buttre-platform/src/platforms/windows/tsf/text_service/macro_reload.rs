@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 pub fn spawn_reload_watcher(
     store: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
+    method: Arc<Mutex<String>>,
 ) -> Option<RecommendedWatcher> {
     let dir = match MacroStore::get_path() {
         Ok(path) => path.parent()?.to_path_buf(),
@@ -75,6 +76,10 @@ pub fn spawn_reload_watcher(
             let next = MacroStore::load_gated(settings.shorthand);
             *store.lock().unwrap_or_else(PoisonError::into_inner) = next;
             strict.store(settings.strict_spelling, Ordering::Relaxed);
+            // `settings.toml` is also how the tray's method choice reaches
+            // this process — the text service lives inside the host
+            // application and shares no state with the tray.
+            *method.lock().unwrap_or_else(PoisonError::into_inner) = settings.input_method;
         }) {
             Ok(w) => w,
             Err(e) => {
@@ -102,6 +107,10 @@ mod tests {
         // resolve/watch a real data dir) is not asserted, only that calling
         // it is safe.
         let store = Arc::new(Mutex::new(MacroStore::default()));
-        let _ = spawn_reload_watcher(store, Arc::new(AtomicBool::new(false)));
+        let _ = spawn_reload_watcher(
+            store,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(String::new())),
+        );
     }
 }

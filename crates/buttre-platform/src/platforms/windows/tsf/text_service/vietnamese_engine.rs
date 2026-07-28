@@ -14,7 +14,7 @@ use buttre_core::Settings;
 use notify::RecommendedWatcher;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Vietnamese input mode
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +24,27 @@ pub enum VietnameseMode {
     VNI,
     Nom,
     Custom(String), // Custom config with method ID
+    /// Pass every key through untouched — the tray's "english" choice.
+    English,
+}
+
+impl VietnameseMode {
+    /// Parse a `Settings::input_method` id ("telex", "vni", "nom",
+    /// "english", or a custom method id).
+    ///
+    /// Unknown ids become [`VietnameseMode::Custom`], which looks for a
+    /// matching `<id>.toml`; if that is missing the engine loads no keyboard
+    /// and passes keys through, so a stale or misspelt id degrades to plain
+    /// typing rather than to the wrong language.
+    pub fn from_settings_id(id: &str) -> Self {
+        match id {
+            "telex" => Self::Telex,
+            "vni" => Self::VNI,
+            "nom" => Self::Nom,
+            "english" => Self::English,
+            other => Self::Custom(other.to_string()),
+        }
+    }
 }
 
 /// Vietnamese Engine for TSF
@@ -47,6 +68,20 @@ pub struct VietnameseEngine {
     /// per-keystroke check be a cheap atomic load + compare instead of an
     /// unconditional `set_strict_spelling` write.
     strict_applied: bool,
+    /// `Settings::input_method` mirror — how the TRAY's method choice reaches
+    /// this process at all.
+    ///
+    /// The text service runs inside the host application and shares no state
+    /// with the tray, so picking VNI in the tray menu changed nothing here:
+    /// the service was constructed with a hard-coded Telex and `set_mode` had
+    /// no caller anywhere. Written by `_macros_watcher` (notify's thread) on
+    /// any `settings.toml` change, consumed lazily on the keystroke path —
+    /// same contract as `strict_spelling`, for the same reason: a TSF text
+    /// service has no event loop to deliver the change on.
+    input_method: Arc<Mutex<String>>,
+    /// Method id last applied to the live `Keyboard`, so the per-keystroke
+    /// check is a string compare rather than an unconditional rebuild.
+    method_applied: String,
     /// Live-reload watcher, kept alive only to hold the watch open for this
     /// engine's lifetime — dropped (stopping the watch) when the engine
     /// drops, i.e. on TSF `Deactivate`. `None` when the watch could not be
@@ -63,14 +98,31 @@ impl VietnameseEngine {
     /// and `MacroStore::load_gated` degrade to safe defaults on any IO/parse
     /// failure rather than erroring, which matters because this DLL runs
     /// in-process inside an arbitrary host app under `panic = abort`.
-    pub fn new(mode: VietnameseMode) -> Self {
+    /// Starts in the SAVED method (`Settings::input_method`), not a fixed
+    /// default — that is how the tray's choice reaches a text service running
+    /// in someone else's process.
+    ///
+    /// No `Default` impl on purpose: this reads `settings.toml` and spawns a
+    /// filesystem watcher, which is not what `default()` should mean.
+    #[allow(clippy::new_without_default)] // reason: constructing this does real I/O
+    pub fn new() -> Self {
         let settings = Settings::load();
         let macros = Arc::new(Mutex::new(MacroStore::load_gated(settings.shorthand)));
-        let mut engine = Self::new_with_macros(mode, macros.clone());
+        let saved = VietnameseMode::from_settings_id(&settings.input_method);
+        let mut engine = Self::new_with_macros(saved, macros.clone());
+        engine.method_applied = settings.input_method.clone();
         engine
             .strict_spelling
             .store(settings.strict_spelling, Ordering::Relaxed);
-        engine._macros_watcher = spawn_reload_watcher(macros, engine.strict_spelling.clone());
+        *engine
+            .input_method
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = settings.input_method;
+        engine._macros_watcher = spawn_reload_watcher(
+            macros,
+            engine.strict_spelling.clone(),
+            engine.input_method.clone(),
+        );
         engine
     }
 
@@ -91,6 +143,8 @@ impl VietnameseEngine {
             // `process_key`'s lazy sync then pushes it into the keyboard.
             strict_spelling: Arc::new(AtomicBool::new(false)),
             strict_applied: false,
+            input_method: Arc::new(Mutex::new(String::new())),
+            method_applied: String::new(),
             _macros_watcher: None,
         }
     }
@@ -101,6 +155,9 @@ impl VietnameseEngine {
     /// is a no-op, byte-identical to shorthand being unwired entirely.
     fn load_keyboard(mode: &VietnameseMode, macros: &Arc<Mutex<MacroStore>>) -> Option<Keyboard> {
         let mut kb = match mode {
+            // No keyboard at all: `process_key` then returns DoNothing and the
+            // host application sees the raw keystroke.
+            VietnameseMode::English => None,
             VietnameseMode::Telex => KeyboardBuilder::telex_with_composition(true).ok(),
             VietnameseMode::VNI => KeyboardBuilder::vni_with_composition(true).ok(),
             VietnameseMode::Nom => {
@@ -149,6 +206,7 @@ impl VietnameseEngine {
     /// Commit(".")]`; dropping the trailing action silently swallows the
     /// separator (issue #4).
     pub fn process_key(&mut self, ch: char) -> Vec<Action> {
+        self.sync_method();
         self.sync_strict_spelling();
         if let Some(ref mut kb) = self.keyboard {
             match kb.process(ch) {
@@ -235,6 +293,28 @@ impl VietnameseEngine {
             self.mode = mode;
             self.reset();
         }
+    }
+
+    /// Adopt a method the tray switched to since the last keystroke (see the
+    /// `input_method` field).
+    ///
+    /// Cheap when nothing changed: one lock and a string compare. Rebuilding
+    /// the keyboard is the expensive branch, and it only runs on an actual
+    /// switch.
+    fn sync_method(&mut self) {
+        let wanted = {
+            let guard = self
+                .input_method
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.clone()
+        };
+        if wanted.is_empty() || wanted == self.method_applied {
+            return;
+        }
+        tracing::info!("TSF: switching input method to '{wanted}'");
+        self.set_mode(VietnameseMode::from_settings_id(&wanted));
+        self.method_applied = wanted;
     }
 
     /// Push a changed `Settings::strict_spelling` into the live `Keyboard`

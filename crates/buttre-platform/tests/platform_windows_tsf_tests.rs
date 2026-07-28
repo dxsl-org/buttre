@@ -37,7 +37,7 @@ fn vn_macro_store() -> Arc<Mutex<MacroStore>> {
 
 #[test]
 fn test_engine_basic() {
-    let mut engine = VietnameseEngine::new(VietnameseMode::Telex);
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
 
     // Test basic transformation
     let actions = engine.process_key('a');
@@ -50,7 +50,7 @@ fn test_engine_basic() {
 
 #[test]
 fn test_mode_switch() {
-    let mut engine = VietnameseEngine::new(VietnameseMode::Telex);
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
 
     // Test Telex: a + s -> á
     engine.process_key('a');
@@ -80,7 +80,7 @@ fn test_mode_switch() {
 /// dropping the second is exactly how "xin." lost its trailing dot.
 #[test]
 fn test_process_key_surfaces_confirm_and_trailing_separator() {
-    let mut engine = VietnameseEngine::new(VietnameseMode::Telex);
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
     engine.process_key('x');
     engine.process_key('i');
     engine.process_key('n');
@@ -182,7 +182,7 @@ fn test_tsf_no_macro_store_passes_through() {
 
 #[test]
 fn test_reset() {
-    let mut engine = VietnameseEngine::new(VietnameseMode::Telex);
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
     engine.process_key('a');
     engine.reset();
     assert_eq!(engine.buffer_content(), "");
@@ -434,4 +434,54 @@ fn test_backspacing_the_only_char_empties_the_buffer() {
     engine.process_key('t');
     engine.process_backspace();
     assert!(engine.buffer_content().is_empty());
+}
+
+// ── Method selection reaches the text service ───────────────────────────────
+
+use buttre_platform::platforms::windows::tsf::text_service::vietnamese_engine::VietnameseMode as Mode;
+
+/// The tray writes `Settings::input_method`; the text service parses it. A
+/// mismatch here is invisible at runtime — the service just keeps typing the
+/// wrong method, which is exactly what happened when nothing parsed it at all.
+#[test]
+fn test_settings_ids_map_to_modes() {
+    assert_eq!(Mode::from_settings_id("telex"), Mode::Telex);
+    assert_eq!(Mode::from_settings_id("vni"), Mode::VNI);
+    assert_eq!(Mode::from_settings_id("nom"), Mode::Nom);
+    assert_eq!(Mode::from_settings_id("english"), Mode::English);
+}
+
+#[test]
+fn test_unknown_method_id_becomes_a_custom_lookup() {
+    assert_eq!(
+        Mode::from_settings_id("taynguyen"),
+        Mode::Custom("taynguyen".to_string())
+    );
+}
+
+#[test]
+fn test_english_mode_passes_keys_through() {
+    // No keyboard is loaded, so the host application receives the raw key.
+    let mut engine = VietnameseEngine::new_with_macros(Mode::English, vn_macro_store());
+    let actions = engine.process_key('a');
+    assert!(
+        actions.iter().all(|a| matches!(a, Action::DoNothing)),
+        "english mode must not compose: {actions:?}"
+    );
+    assert!(engine.buffer_content().is_empty());
+}
+
+#[test]
+fn test_switching_mode_rebuilds_the_keyboard() {
+    // Telex 'as' -> "á"; VNI needs 'a1' for the same. Proves the switch
+    // actually replaced the keyboard rather than relabelling it.
+    let mut engine = VietnameseEngine::new_with_macros(Mode::Telex, vn_macro_store());
+    engine.process_key('a');
+    engine.process_key('s');
+    assert_eq!(engine.buffer_content(), "á");
+
+    engine.set_mode(Mode::VNI);
+    engine.process_key('a');
+    engine.process_key('1');
+    assert_eq!(engine.buffer_content(), "á");
 }
