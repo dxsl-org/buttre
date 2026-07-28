@@ -332,6 +332,10 @@ impl TextService {
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32) -> Result<()> {
+        // First point in the DLL's life where file I/O is safe — `DllMain`
+        // runs under the loader lock and must not touch the filesystem.
+        // Idempotent, so the per-activation cost is one atomic load.
+        crate::platforms::windows::tsf::logging::init_logging();
         debug!("TextService::Activate");
 
         let tm: ITfThreadMgr = ptim.ok()?.clone();
