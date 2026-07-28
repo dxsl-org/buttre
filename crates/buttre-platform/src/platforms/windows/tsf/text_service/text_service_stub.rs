@@ -942,29 +942,49 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         if let Some(ch) = ch {
             // Handle backspace specially
             if ch == '\x08' {
+                // `Replace`'s payload is a DELTA — "delete N, then insert this
+                // tail" — which is the hook backend's contract, not this one.
+                // A composition is rewritten whole, so the delta's `text` is
+                // the wrong thing to write: deleting the last letter of "Tie"
+                // yields `Replace { backspace_count: 1, text: "" }`, and
+                // writing that emptied the composition. An empty composition
+                // makes the application terminate it (Notepad does, reliably),
+                // which fires `OnCompositionTerminated` and RESETS THE ENGINE
+                // mid-word — after which a tone key composed against the
+                // leftover keystrokes only, losing the letters before it.
+                //
+                // The engine's buffer already holds the full post-backspace
+                // text. Use that.
                 let action = self.this.vietnamese_engine.borrow_mut().process_backspace();
-
-                match action {
-                    Action::Replace {
-                        backspace_count,
-                        text,
-                    } => {
-                        debug!("Backspace: backspace={}, text={}", backspace_count, text);
-
-                        if let Err(e) = self.this.write_text(
-                            &context,
-                            &text,
-                            text.chars().count(),
-                            sink.clone(),
-                        ) {
-                            debug!("Failed to write text: {:?}", e);
-                            return Ok(BOOL(0));
-                        }
-
-                        Ok(BOOL(1))
-                    }
-                    _ => Ok(BOOL(0)),
+                if !matches!(action, Action::Replace { .. }) {
+                    return Ok(BOOL(0));
                 }
+                let text = self.this.vietnamese_engine.borrow().buffer_content();
+                debug!(
+                    "Backspace: composition now {} char(s)",
+                    text.chars().count()
+                );
+
+                if text.is_empty() {
+                    // Nothing left to compose. End the composition rather than
+                    // setting it empty — same trigger as above, and there is
+                    // genuinely nothing to display any more.
+                    if self.this.composition.is_started() {
+                        if let Err(e) = self.this.end_composition(&context) {
+                            debug!("Failed to end emptied composition: {:?}", e);
+                        }
+                    }
+                    return Ok(BOOL(1));
+                }
+
+                if let Err(e) =
+                    self.this
+                        .write_text(&context, &text, text.chars().count(), sink.clone())
+                {
+                    debug!("Failed to write text: {:?}", e);
+                    return Ok(BOOL(0));
+                }
+                Ok(BOOL(1))
             }
             // Handle space/enter - finalize composition
             // Note: We might want engine to handle punctuation too, so we pass punctuation through

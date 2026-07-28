@@ -384,3 +384,54 @@ fn test_toggle_composition_noop_when_nothing_is_composing() {
     let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
     assert!(engine.toggle_composition().is_none());
 }
+
+// ── Backspace: the composition is rewritten whole, never from the delta ──────
+
+#[test]
+fn test_backspace_leaves_the_full_text_in_the_buffer() {
+    // What the text service must write after a backspace is the WHOLE new
+    // composition, and `buffer_content` is where that lives.
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    for ch in "tie".chars() {
+        engine.process_key(ch);
+    }
+    assert_eq!(engine.buffer_content(), "tie");
+
+    let action = engine.process_backspace();
+    assert!(matches!(action, Action::Replace { .. }));
+    assert_eq!(
+        engine.buffer_content(),
+        "ti",
+        "the buffer holds the full post-backspace text"
+    );
+}
+
+#[test]
+fn test_backspace_action_is_a_delta_not_the_composition() {
+    // Pins the mistake that broke Notepad: `Replace` means "delete N, insert
+    // this tail". Deleting one plain letter carries NO text at all, so writing
+    // the action's payload as the composition emptied it — and an empty
+    // composition makes the application terminate it, resetting the engine
+    // mid-word.
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    for ch in "tie".chars() {
+        engine.process_key(ch);
+    }
+    match engine.process_backspace() {
+        Action::Replace { text, .. } => assert!(
+            text.is_empty(),
+            "delta text was '{text}' — if this ever becomes the full string, \
+             the stub's use of buffer_content() should be revisited"
+        ),
+        other => panic!("expected Replace, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_backspacing_the_only_char_empties_the_buffer() {
+    // The stub ends the composition instead of writing "" for this case.
+    let mut engine = VietnameseEngine::new_with_macros(VietnameseMode::Telex, vn_macro_store());
+    engine.process_key('t');
+    engine.process_backspace();
+    assert!(engine.buffer_content().is_empty());
+}
