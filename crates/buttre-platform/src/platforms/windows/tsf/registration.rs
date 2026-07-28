@@ -99,31 +99,36 @@ fn register_tsf_language_profile(tip_key: &RegKey, dll_path: &Path, langid: u32)
     Ok(())
 }
 
-/// Get installed language IDs from Windows
-/// Only registers TSF for languages that are actually installed/active on the system
+/// Language IDs to register the text service under, given the machine's
+/// default UI language.
+///
+/// Vietnamese is unconditional. This is a Vietnamese IME: a user who adds a
+/// keyboard does it under the Vietnamese language, and a profile that is not
+/// registered there simply cannot be picked — no error, the entry is just
+/// absent. Deriving the list from `GetUserDefaultLangID` alone (the previous
+/// behavior) meant that on an English Windows — the common case for a
+/// developer machine, and plenty of user machines — the IME registered under
+/// en-US only and was unreachable from the Vietnamese language it exists to
+/// serve. `LANGID_VIETNAMESE` was declared for this and never used.
+///
+/// English (US) stays in the list so the service is also reachable on a
+/// machine with no Vietnamese language installed yet, and the user's own
+/// default is kept for the same reason.
+fn language_ids_for(user_default: u32) -> Vec<u32> {
+    let mut languages = vec![LANGID_VIETNAMESE, LANGID_ENGLISH_US, user_default];
+    languages.sort_unstable();
+    languages.dedup();
+    languages
+}
+
+/// [`language_ids_for`] against this machine's default UI language.
 fn get_installed_languages() -> Vec<u32> {
     use windows::Win32::Globalization::GetUserDefaultLangID;
 
-    let mut languages = Vec::new();
-
-    // SAFETY: GetUserDefaultLangID is a safe Windows API call
-    // that returns language identifier with no side effects
-    unsafe {
-        // Get user's current language
-        let user_lang = GetUserDefaultLangID();
-        languages.push(user_lang as u32);
-    }
-
-    // Always include English (US) as fallback - most systems have it
-    if !languages.contains(&LANGID_ENGLISH_US) {
-        languages.push(LANGID_ENGLISH_US);
-    }
-
-    // Deduplicate
-    languages.sort_unstable();
-    languages.dedup();
-
-    languages
+    // SAFETY: GetUserDefaultLangID takes no arguments, cannot fail, and has no
+    // side effects — it returns the current user's default UI language id.
+    let user_lang = unsafe { GetUserDefaultLangID() } as u32;
+    language_ids_for(user_lang)
 }
 
 /// Register TSF service for installed languages only
@@ -341,5 +346,42 @@ pub fn get_dll_path() -> Result<PathBuf> {
 
         let path = String::from_utf16_lossy(&buffer[..len as usize]);
         Ok(PathBuf::from(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug this pins: the IME shipped registered under en-US only on an
+    /// English Windows, so it never appeared under the Vietnamese language —
+    /// the one place a user goes to add it.
+    #[test]
+    fn vietnamese_is_registered_whatever_the_system_language_is() {
+        for user_default in [
+            LANGID_ENGLISH_US,
+            0x0411, /* ja-JP */
+            0x0409,
+            LANGID_VIETNAMESE,
+        ] {
+            assert!(
+                language_ids_for(user_default).contains(&LANGID_VIETNAMESE),
+                "vi-VN missing for user default {user_default:#06X}"
+            );
+        }
+    }
+
+    #[test]
+    fn english_stays_available_as_a_fallback() {
+        assert!(language_ids_for(LANGID_VIETNAMESE).contains(&LANGID_ENGLISH_US));
+    }
+
+    /// A duplicate would create the same profile key twice — harmless but it
+    /// makes the registry read as if two profiles exist.
+    #[test]
+    fn the_users_own_language_is_included_exactly_once() {
+        let ids = language_ids_for(LANGID_VIETNAMESE);
+        assert_eq!(ids.iter().filter(|&&id| id == LANGID_VIETNAMESE).count(), 1);
+        assert_eq!(ids, vec![LANGID_ENGLISH_US, LANGID_VIETNAMESE]);
     }
 }

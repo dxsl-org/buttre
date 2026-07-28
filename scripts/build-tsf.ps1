@@ -362,23 +362,63 @@ try {
         Add-MsiRegistration $installedDll
     }
 
-    # Verify what actually landed, rather than trusting the writes above.
+    # Report what actually landed, rather than trusting the writes above.
+    #
+    # Enumerated, never assumed: the two registration paths disagree about WHICH
+    # language the profile goes under. The MSI hard-codes vi-VN; the DLL's own
+    # register_tsf_service uses GetUserDefaultLangID plus en-US, so on an
+    # English Windows it registers under en-US and vi-VN is absent. Checking a
+    # fixed LCID reported a failure for a registration that had in fact
+    # succeeded — under a language the check never looked at.
     $inprocValue = (Get-ItemProperty "$ClsidKey\InProcServer32" -ErrorAction SilentlyContinue).'(default)'
-    $enabled = (Get-ItemProperty "$TipKey\LanguageProfile\$LangId\$ProfileGuid" `
-        -Name Enable -ErrorAction SilentlyContinue).Enable
-    if (-not $inprocValue -or $enabled -ne 1) {
-        Write-Host "ERROR: registration did not take." -ForegroundColor Red
-        Write-Host "       InProcServer32='$inprocValue' Enable='$enabled'" -ForegroundColor Gray
+    if (-not $inprocValue) {
+        Write-Host "ERROR: the COM server did not register — CLSID\InProcServer32 is empty." -ForegroundColor Red
         exit 1
     }
     Write-Host "      CLSID -> $inprocValue" -ForegroundColor Gray
-    Write-Host "      vi-VN profile enabled" -ForegroundColor Gray
+
+    $profiles = @()
+    Get-ChildItem "$TipKey\LanguageProfile" -ErrorAction SilentlyContinue | ForEach-Object {
+        $lcid = Split-Path $_.Name -Leaf
+        $p = Get-ItemProperty "$($_.PSPath)\$ProfileGuid" -ErrorAction SilentlyContinue
+        if ($p -and $p.Enable -eq 1) {
+            $profiles += [pscustomobject]@{ Lcid = $lcid; Description = $p.Description }
+        }
+    }
+    if (-not $profiles) {
+        Write-Host "ERROR: no enabled language profile — the IME cannot be added to any language." -ForegroundColor Red
+        exit 1
+    }
+    foreach ($p in $profiles) {
+        $lang = switch ($p.Lcid) {
+            "0x0000042A" { "vi-VN" }
+            "0x00000409" { "en-US" }
+            default      { $p.Lcid }
+        }
+        Write-Host "      profile $lang enabled — '$($p.Description)'" -ForegroundColor Gray
+    }
+
+    # The TIP_KEYBOARD category is what makes Windows treat this as a named
+    # keyboard IME rather than a bare COM object; without it the language
+    # switcher shows the LANGUAGE instead of the service. RegisterCategory
+    # writes it, the MSI's registry-only path does not.
+    $catKey = "$TipKey\Category\Category"
+    if (Test-Path $catKey) {
+        Write-Host "      categories registered" -ForegroundColor Gray
+    } else {
+        Write-Host "      WARNING: no TSF category registered." -ForegroundColor Yellow
+        Write-Host "               Windows will not show this as a named IME." -ForegroundColor Gray
+    }
+
+    $addUnder = ($profiles | ForEach-Object {
+        switch ($_.Lcid) { "0x0000042A" { "Vietnamese" } "0x00000409" { "English (United States)" } default { $_.Lcid } }
+    }) -join " or "
 
     Write-Host ""
     Write-Host "  Installed." -ForegroundColor Green
     Write-Host ""
     Write-Host "  1. Settings > Time & Language > Language & Region >" -ForegroundColor White
-    Write-Host "     Vietnamese > Options > Add a keyboard > buttre Vietnamese IME" -ForegroundColor White
+    Write-Host "     $addUnder > Options > Add a keyboard" -ForegroundColor White
     Write-Host "  2. Switch to it with Win+Space" -ForegroundColor White
     Write-Host "  3. Start the tray app:  $InstallDir\buttre.exe" -ForegroundColor White
     Write-Host "  4. RESTART the app you test in — Word, VS Code and browsers keep the" -ForegroundColor White
