@@ -10,7 +10,7 @@ use super::display_attribute::{
     DisplayAttributeEnum, DisplayAttributeInfo, GUID_DISPLAY_ATTRIBUTE_CONVERTED,
     GUID_DISPLAY_ATTRIBUTE_INPUT,
 };
-use super::edit_session::{EndComposition, SetCompositionString};
+use super::edit_session::{EndComposition, InsertText, SetCompositionString};
 use super::vietnamese_engine::VietnameseEngine;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -163,6 +163,38 @@ impl TextService {
         let session =
             SetCompositionString::new(context.clone(), self.composition.clone(), sink, da, pending);
         let session_interface: ITfEditSession = session.into();
+        unsafe {
+            context.RequestEditSession(
+                self.client_id.get(),
+                &session_interface,
+                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Insert finished text straight into the document, with no composition.
+    ///
+    /// The right shape for `Action::Commit` — a separator or a passthrough
+    /// character is FINISHED text, not something the user is still editing.
+    ///
+    /// Routing it through [`Self::write_text`] instead was a race: that starts
+    /// a composition, and the caller then had to end it by testing
+    /// `composition.is_started()` on the very next line. When TSF ran the
+    /// composition's edit session synchronously the test passed; when TSF
+    /// DEFERRED it — measured at ~800 µs on Word against ~4 µs when inline —
+    /// the test ran first, saw no composition, and skipped the end. The space
+    /// was then left as an open composition, and the next keystroke's
+    /// `SetText` overwrote it: the space visibly disappeared as the next word
+    /// began.
+    pub fn insert_text(&self, context: &ITfContext, text: &str) -> Result<()> {
+        debug!("TextService::insert_text: {} char(s)", text.chars().count());
+
+        let session = InsertText::new(context.clone(), HSTRING::from(text));
+        let session_interface: ITfEditSession = session.into();
+
+        // SAFETY: `context` and `session_interface` are valid COM interfaces;
+        // client_id is the id TSF handed us at Activate.
         unsafe {
             context.RequestEditSession(
                 self.client_id.get(),
@@ -1030,19 +1062,18 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                             handled = BOOL(1);
                         }
                         Action::Commit(text) => {
-                            debug!("Commit: text={}", text);
-                            if let Err(e) = self.this.write_text(
-                                &context,
-                                &text,
-                                text.chars().count(),
-                                sink.clone(),
-                            ) {
-                                debug!("Failed to write text: {:?}", e);
-                            }
+                            debug!("Commit: {} char(s)", text.chars().count());
+                            // Close any composition FIRST — inserting at the
+                            // selection while one is open would land inside it.
                             if self.this.composition.is_started() {
                                 if let Err(e) = self.this.end_composition(&context) {
                                     debug!("Failed to end composition: {:?}", e);
                                 }
+                            }
+                            // Insert directly, never as a composition: see
+                            // `insert_text` for the race this avoids.
+                            if let Err(e) = self.this.insert_text(&context, &text) {
+                                debug!("Failed to insert committed text: {:?}", e);
                             }
                             self.this.vietnamese_engine.borrow_mut().reset();
                             handled = BOOL(1);
