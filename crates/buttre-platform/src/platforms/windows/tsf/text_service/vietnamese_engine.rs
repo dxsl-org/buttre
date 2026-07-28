@@ -271,6 +271,18 @@ impl VietnameseEngine {
         }
     }
 
+    /// Whether a keyboard is loaded, i.e. whether this engine transforms
+    /// anything at all.
+    ///
+    /// `false` for [`VietnameseMode::English`] and for a custom layout whose
+    /// TOML was missing or unparseable. The key sink MUST consult this before
+    /// claiming a key: with no keyboard, `process_key` returns `DoNothing` for
+    /// everything, and a key claimed but then declined is swallowed rather than
+    /// passed on.
+    pub fn is_active(&self) -> bool {
+        self.keyboard.is_some()
+    }
+
     /// The candidates currently offered, for rendering and for deciding
     /// whether selection keys belong to the popup or to the composition.
     pub fn candidates(&self) -> &CandidateState {

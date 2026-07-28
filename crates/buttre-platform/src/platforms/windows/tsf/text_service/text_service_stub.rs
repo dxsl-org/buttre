@@ -861,6 +861,44 @@ fn is_buffer_reset_key(vkey: u16) -> bool {
     )
 }
 
+/// Printable keys the engine transforms.
+fn is_printable_key(vkey: u16) -> bool {
+    matches!(vkey,
+        0x41..=0x5A |  // A-Z
+        0x30..=0x39 |  // 0-9
+        0x20 |         // Space
+        0xBA..=0xC0 |  // OEM punctuation
+        0xDB..=0xDF    // More OEM keys
+    )
+}
+
+/// Will the text service EAT this key?
+///
+/// That is the only question `OnTestKeyDown` answers — NOT "would the text
+/// service like to look at it". A key claimed here never reaches the
+/// application, whatever `OnKeyDown` decides afterwards, so the two must agree.
+///
+/// Kept pure and separate because getting it wrong is invisible in review and
+/// obvious only to whoever is typing:
+///
+/// * Buffer-reset keys were claimed unconditionally, so the ARROW KEYS stopped
+///   moving the caret anywhere in the editor. `OnKeyDown` returned `BOOL(0)`
+///   for them, but that came too late to hand the key back. They are now
+///   claimed only while a composition is open, which is the standard IME
+///   bargain: the key closes the composition instead of moving, and a second
+///   press moves.
+/// * With no keyboard loaded (the tray's "english", or a custom layout that
+///   failed to load) `OnKeyDown` declines EVERY key — so claiming any of them
+///   would swallow the user's typing outright.
+fn claims_key(vkey: u16, engine_active: bool, composing: bool, candidates_open: bool) -> bool {
+    if !engine_active {
+        return false;
+    }
+    is_printable_key(vkey)
+        || (composing && is_buffer_reset_key(vkey))
+        || (candidates_open && is_candidate_key(vkey))
+}
+
 impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnSetFocus(&self, _foreground: BOOL) -> Result<()> {
         debug!("ITfKeyEventSink::OnSetFocus");
@@ -880,29 +918,17 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             return Ok(BOOL(0));
         }
 
-        // Inline key handling logic: handle printable keys (a-z, 0-9, space, punctuation)
-        let should_handle = matches!(vkey,
-            0x41..=0x5A |  // A-Z
-            0x30..=0x39 |  // 0-9
-            0x20 |         // Space
-            0xBA..=0xC0 |  // OEM punctuation
-            0xDB..=0xDF    // More OEM keys
-        );
-
-        // Also intercept buffer reset keys so we can reset the engine, and
-        // everything the candidate popup claims while it is open.
+        let engine_active = self.this.vietnamese_engine.borrow().is_active();
+        let composing = self.this.composition.is_started();
         let candidates_open = !self.this.vietnamese_engine.borrow().candidates().is_empty();
-        let should_intercept = should_handle
-            || is_buffer_reset_key(vkey)
-            || (candidates_open && is_candidate_key(vkey));
+        let eaten = claims_key(vkey, engine_active, composing, candidates_open);
 
         debug!(
-            "OnTestKeyDown: vkey={:?}, handle={}, intercept={}",
-            vkey, should_handle, should_intercept
+            "OnTestKeyDown: vkey={:?}, active={}, composing={}, eaten={}",
+            vkey, engine_active, composing, eaten
         );
 
-        // Return TRUE if we want to handle this key
-        Ok(BOOL(should_intercept as i32))
+        Ok(BOOL(eaten as i32))
     }
 
     fn OnTestKeyUp(
@@ -1324,6 +1350,67 @@ mod tests {
         for vkey in [0x41u16, 0x5A, VK_WORD_TOGGLE] {
             assert!(!is_candidate_key(vkey), "vkey {vkey:#x} must fall through");
         }
+    }
+
+    // ── What the text service eats ───────────────────────────────────────────
+    // The regression these pin: arrow keys stopped moving the caret ANYWHERE in
+    // the editor, because a claimed key is gone whatever OnKeyDown answers.
+
+    const ARROWS: [u16; 4] = [0x25, 0x26, 0x27, 0x28];
+
+    #[test]
+    fn navigation_keys_reach_the_application_when_nothing_is_composing() {
+        for vkey in ARROWS
+            .into_iter()
+            .chain([0x23, 0x24, VK_PRIOR, VK_NEXT, 0x2E])
+        {
+            assert!(
+                !claims_key(vkey, true, false, false),
+                "vkey {vkey:#x} must move the caret when no composition is open"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_keys_close_an_open_composition_instead() {
+        for vkey in ARROWS {
+            assert!(
+                claims_key(vkey, true, true, false),
+                "vkey {vkey:#x} should close the composition while one is open"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inactive_engine_claims_nothing() {
+        // English, or a custom layout that failed to load: OnKeyDown declines
+        // every key, so claiming any would swallow the user's typing.
+        for vkey in [0x41u16, 0x30, VK_SPACE, VK_ESCAPE]
+            .into_iter()
+            .chain(ARROWS)
+        {
+            assert!(
+                !claims_key(vkey, false, true, true),
+                "vkey {vkey:#x} must pass through when no keyboard is loaded"
+            );
+        }
+    }
+
+    #[test]
+    fn letters_are_always_claimed_while_active() {
+        for vkey in [0x41u16, 0x5A, 0x30, 0x39, VK_SPACE] {
+            assert!(claims_key(vkey, true, false, false));
+        }
+    }
+
+    #[test]
+    fn the_popup_claims_its_keys_even_with_no_composition() {
+        // Defensive: candidates should never outlive the composition, but if
+        // they somehow do, the digits must still pick from the list rather than
+        // type themselves into the document.
+        assert!(claims_key(VK_DIGIT_1, true, false, true));
+        assert!(claims_key(VK_ESCAPE, true, false, true));
+        assert!(!claims_key(VK_ESCAPE, true, false, false));
     }
 
     #[test]
