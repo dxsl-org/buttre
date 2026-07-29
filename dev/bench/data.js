@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785318157570,
+  "lastUpdate": 1785318248909,
   "repoUrl": "https://github.com/dxsl-org/buttre",
   "entries": {
     "buttre Benchmarks": [
@@ -4255,6 +4255,310 @@ window.BENCHMARK_DATA = {
           {
             "name": "lookup_method/Match/uw",
             "value": 1.7579944979818962,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tpquoc@gmail.com",
+            "name": "lungmat8",
+            "username": "lungmat8"
+          },
+          "committer": {
+            "email": "tpquoc@gmail.com",
+            "name": "lungmat8",
+            "username": "lungmat8"
+          },
+          "distinct": true,
+          "id": "6230ce6a509106674cd681521bc16b3d584a2dca",
+          "message": "docs(adr): fcitx5 không còn là giả định trong ADR-0003\n\nADR-0003 ghi fcitx5 là \"giả định có menu — chưa xác minh\", vì lúc viết tôi\nkhông biết addon đã làm được điều đó. PR #17 là bằng chứng ngược lại:\naddons/fcitx5-buttre dựng menu kiểu gõ phẳng ở StatusGroup::InputMethod, kèm\nicon riêng từng kiểu và lối vào cửa sổ Cấu hình — cùng mô hình IBus dùng, addon\nsở hữu danh sách và panel của OS vẽ nó.\n\nmacOS IMKit vẫn là giả định, giữ nguyên footnote riêng cho nó.",
+          "timestamp": "2026-07-29T16:30:29+07:00",
+          "tree_id": "0649fa027a3feb32ef99579779b2bd99760c125b",
+          "url": "https://github.com/dxsl-org/buttre/commit/6230ce6a509106674cd681521bc16b3d584a2dca"
+        },
+        "date": 1785318248372,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "compose_telex/nguwowif",
+            "value": 1828.2315884112863,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/tuongwf",
+            "value": 1297.7404254008666,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/dduwowcj",
+            "value": 1928.231467742514,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/thuongwf",
+            "value": 1425.564320298288,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/aa",
+            "value": 613.1818706700543,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/awf",
+            "value": 885.4911158174593,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/a",
+            "value": 64.95087500018447,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/ngu7o72i",
+            "value": 1612.4365544640818,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/tuo7ng1",
+            "value": 994.4999458214119,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/ddu7o7c5",
+            "value": 6917.839142692685,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/thu7o7ng1",
+            "value": 1662.7281899625402,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/a6",
+            "value": 544.1441014435229,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/a8f",
+            "value": 1539.978148138841,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/a",
+            "value": 63.425176302670145,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_telex_word/nguwowif",
+            "value": 17947.92892704089,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_telex_word/tuongwf",
+            "value": 14239.814106356478,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_telex_word/thuowngf",
+            "value": 15286.383053328655,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/plain_letter",
+            "value": 955.5275310236644,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/transform_trigger",
+            "value": 948.3174685249293,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/tone_trigger",
+            "value": 792.4582830927163,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/space_passthrough",
+            "value": 269.59797350850096,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/viet",
+            "value": 10273.15812071621,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/nguoi",
+            "value": 12873.200603578482,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/thuong",
+            "value": 12430.733095167725,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/truong",
+            "value": 15153.27837576295,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/ban",
+            "value": 7230.6313281608145,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/toi",
+            "value": 7478.546019081989,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/co",
+            "value": 6648.425695504139,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/la",
+            "value": 6661.598048504239,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/mot",
+            "value": 8893.437182783044,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/khong",
+            "value": 8474.389207731336,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/letter_a",
+            "value": 183.02831071894528,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/transform_6",
+            "value": 90.45772701990613,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/tone_1",
+            "value": 90.84285194416215,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/already_transformed",
+            "value": 251.76988979800961,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/space",
+            "value": 107.99649338505368,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_sentence/simple_sentence",
+            "value": 26166.481426971448,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_sentence/learning_sentence",
+            "value": 24038.18248298817,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_worst_case/complex_word",
+            "value": 9995.478324693366,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_worst_case/windows_10",
+            "value": 9078.860831790642,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_allocations/new_executor",
+            "value": 5425.0338763090895,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_allocations/reset_executor",
+            "value": 25.290551113747398,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/aa",
+            "value": 237.28626856320525,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/aa",
+            "value": 1.7358925351204553,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/aw",
+            "value": 237.43642709751825,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/aw",
+            "value": 1.743386437588473,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/dd",
+            "value": 237.41921599921187,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/dd",
+            "value": 1.5731752454046632,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/ee",
+            "value": 237.58434796646603,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/ee",
+            "value": 1.57254308602034,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/oo",
+            "value": 237.66525069746424,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/oo",
+            "value": 1.688747640344053,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/ow",
+            "value": 237.7196816050493,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/ow",
+            "value": 1.6875679315745464,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/uw",
+            "value": 238.14319400580246,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/uw",
+            "value": 1.6260256658701795,
             "unit": "ns"
           }
         ]
