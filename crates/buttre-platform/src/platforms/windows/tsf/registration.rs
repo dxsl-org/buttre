@@ -99,36 +99,114 @@ fn register_tsf_language_profile(tip_key: &RegKey, dll_path: &Path, langid: u32)
     Ok(())
 }
 
-/// Language IDs to register the text service under, given the machine's
-/// default UI language.
+/// Language IDs to register the text service under.
 ///
-/// Vietnamese is unconditional. This is a Vietnamese IME: a user who adds a
-/// keyboard does it under the Vietnamese language, and a profile that is not
-/// registered there simply cannot be picked — no error, the entry is just
-/// absent. Deriving the list from `GetUserDefaultLangID` alone (the previous
-/// behavior) meant that on an English Windows — the common case for a
-/// developer machine, and plenty of user machines — the IME registered under
-/// en-US only and was unreachable from the Vietnamese language it exists to
-/// serve. `LANGID_VIETNAMESE` was declared for this and never used.
+/// Only languages the machine ACTUALLY HAS. Registering under a language that
+/// is not installed produces a keyboard entry the user can see and select but
+/// which can never work: Windows resolves it through `Substitutes` to the plain
+/// layout, so picking "Vietnamese - buttre" silently types with
+/// "Vietnamese - US". That entry cost days of debugging, on both sides of this
+/// conversation, and it exists for no one — a Windows user does not care whether
+/// the Vietnamese language pack is present, they just want buttre in the list.
 ///
-/// English (US) stays in the list so the service is also reachable on a
-/// machine with no Vietnamese language installed yet, and the user's own
-/// default is kept for the same reason.
-fn language_ids_for(user_default: u32) -> Vec<u32> {
-    let mut languages = vec![LANGID_VIETNAMESE, LANGID_ENGLISH_US, user_default];
+/// So: Vietnamese when Vietnamese is installed, and the machine's default
+/// language always (it is installed by definition). `en-US` is no longer added
+/// unconditionally — on an English machine it IS the default, and on a Japanese
+/// one an en-US entry was never wanted.
+///
+/// Both the user and system defaults go in. Under the MSI these are the same
+/// thing, and that matters: the deferred custom action runs as SYSTEM
+/// (`Impersonate="no"`, required to write HKLM), so "the user's" default there
+/// is SYSTEM's. Including the system default keeps the answer sane in that
+/// context instead of depending on which account the installer happened to use.
+fn language_ids_for(user_default: u32, system_default: u32, vietnamese: bool) -> Vec<u32> {
+    let mut languages = vec![user_default, system_default];
+    if vietnamese {
+        languages.push(LANGID_VIETNAMESE);
+    }
+    languages.retain(|&langid| langid != 0);
     languages.sort_unstable();
     languages.dedup();
     languages
 }
 
-/// [`language_ids_for`] against this machine's default UI language.
-fn get_installed_languages() -> Vec<u32> {
-    use windows::Win32::Globalization::GetUserDefaultLangID;
+/// Is a Vietnamese language installed for this user?
+///
+/// Read from the language list Windows itself maintains, matching on the BCP-47
+/// prefix so `vi`, `vi-VN` and any future regional variant all count.
+///
+/// `false` when the list cannot be read — the conservative direction. A missing
+/// Vietnamese profile means the user must add the language before buttre appears
+/// under it; a spurious one means an entry that looks available and is not.
+fn is_vietnamese_installed() -> bool {
+    let Ok(profile) =
+        RegKey::predef(HKEY_CURRENT_USER).open_subkey("Control Panel\\International\\User Profile")
+    else {
+        return false;
+    };
+    let Ok(languages) = profile.get_value::<Vec<String>, _>("Languages") else {
+        return false;
+    };
+    languages
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case("vi") || tag.to_ascii_lowercase().starts_with("vi-"))
+}
 
-    // SAFETY: GetUserDefaultLangID takes no arguments, cannot fail, and has no
-    // side effects — it returns the current user's default UI language id.
-    let user_lang = unsafe { GetUserDefaultLangID() } as u32;
-    language_ids_for(user_lang)
+/// [`language_ids_for`] against this machine's real language configuration.
+fn get_installed_languages() -> Vec<u32> {
+    use windows::Win32::Globalization::{GetSystemDefaultLangID, GetUserDefaultLangID};
+
+    // SAFETY: both take no arguments, cannot fail, and have no side effects —
+    // they return the current user's and the system's default UI language ids.
+    let (user_lang, system_lang) = unsafe {
+        (
+            GetUserDefaultLangID() as u32,
+            GetSystemDefaultLangID() as u32,
+        )
+    };
+    language_ids_for(user_lang, system_lang, is_vietnamese_installed())
+}
+
+/// Delete language profiles that are no longer wanted.
+///
+/// Needed because registration no longer unregisters first — deleting the TIP
+/// key made Windows prune the user's own keyboard choice, so the install writes
+/// over the existing keys instead. Without this, a profile registered by an
+/// older build under a language the machine does not have would survive every
+/// upgrade forever, which is precisely the phantom "Vietnamese - buttre" entry
+/// that silently typed with the plain layout.
+///
+/// Only languages absent from `wanted` are removed, and `wanted` contains
+/// exactly the installed ones — so this can never delete a profile the user is
+/// actually able to use. Failures are logged, not fatal: a leftover profile is a
+/// cosmetic wart, while aborting the install over one would be worse.
+fn prune_stale_language_profiles(tip_key: &RegKey, wanted: &[u32]) {
+    let Ok(profiles) = tip_key.open_subkey_with_flags("LanguageProfile", KEY_ALL_ACCESS) else {
+        return;
+    };
+    let stale: Vec<String> = profiles
+        .enum_keys()
+        .filter_map(|name| name.ok())
+        .filter(|name| match parse_profile_langid(name) {
+            Some(langid) => !wanted.contains(&langid),
+            // An unparseable name is not ours to interpret; leave it alone.
+            None => false,
+        })
+        .collect();
+
+    for name in stale {
+        match profiles.delete_subkey_all(&name) {
+            Ok(()) => tracing::info!("removed stale TSF language profile {name}"),
+            Err(e) => tracing::warn!("could not remove stale language profile {name}: {e}"),
+        }
+    }
+}
+
+/// `"0x0000042A"` → `0x042A`, matching how [`register_tsf_language_profile`]
+/// writes the key.
+fn parse_profile_langid(key: &str) -> Option<u32> {
+    let digits = key.strip_prefix("0x").or_else(|| key.strip_prefix("0X"))?;
+    u32::from_str_radix(digits, 16).ok()
 }
 
 /// Register TSF service for installed languages only
@@ -145,6 +223,14 @@ pub fn register_tsf_service(dll_path: &Path) -> Result<()> {
 
     // Get installed languages (only those active on system)
     let languages = get_installed_languages();
+    // A text service with no language profile is invisible everywhere, with no
+    // error to show for it. Refuse rather than "succeed" into that state.
+    anyhow::ensure!(
+        !languages.is_empty(),
+        "no language to register the text service under (Windows reported no default language)"
+    );
+
+    prune_stale_language_profiles(&tip_key, &languages);
 
     // Register for each supported language
     for &langid in &languages {
@@ -353,35 +439,79 @@ pub fn get_dll_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    /// The bug this pins: the IME shipped registered under en-US only on an
-    /// English Windows, so it never appeared under the Vietnamese language —
-    /// the one place a user goes to add it.
+    const JA_JP: u32 = 0x0411;
+
+    /// The bug this pins, and it took days to find: registering under a language
+    /// the machine does not have produces an entry the user can SEE and SELECT
+    /// and which silently types with the plain layout instead.
     #[test]
-    fn vietnamese_is_registered_whatever_the_system_language_is() {
-        for user_default in [
-            LANGID_ENGLISH_US,
-            0x0411, /* ja-JP */
-            0x0409,
-            LANGID_VIETNAMESE,
-        ] {
+    fn no_vietnamese_profile_when_vietnamese_is_not_installed() {
+        for default in [LANGID_ENGLISH_US, JA_JP] {
+            let ids = language_ids_for(default, default, false);
             assert!(
-                language_ids_for(user_default).contains(&LANGID_VIETNAMESE),
-                "vi-VN missing for user default {user_default:#06X}"
+                !ids.contains(&LANGID_VIETNAMESE),
+                "phantom vi-VN entry for default {default:#06X}"
+            );
+            assert_eq!(ids, vec![default]);
+        }
+    }
+
+    /// The reason the IME exists: once Vietnamese IS installed, buttre has to be
+    /// offerable under it, whatever the system language is.
+    #[test]
+    fn vietnamese_is_registered_once_installed() {
+        for default in [LANGID_ENGLISH_US, JA_JP, LANGID_VIETNAMESE] {
+            assert!(
+                language_ids_for(default, default, true).contains(&LANGID_VIETNAMESE),
+                "vi-VN missing for default {default:#06X}"
             );
         }
     }
 
+    /// The MSI's custom action runs as SYSTEM, so the two defaults can differ.
+    /// Both must be covered, and neither may be dropped in favour of the other.
     #[test]
-    fn english_stays_available_as_a_fallback() {
-        assert!(language_ids_for(LANGID_VIETNAMESE).contains(&LANGID_ENGLISH_US));
+    fn user_and_system_defaults_are_both_registered() {
+        let ids = language_ids_for(JA_JP, LANGID_ENGLISH_US, false);
+        assert!(ids.contains(&JA_JP));
+        assert!(ids.contains(&LANGID_ENGLISH_US));
     }
 
     /// A duplicate would create the same profile key twice — harmless but it
     /// makes the registry read as if two profiles exist.
     #[test]
-    fn the_users_own_language_is_included_exactly_once() {
-        let ids = language_ids_for(LANGID_VIETNAMESE);
-        assert_eq!(ids.iter().filter(|&&id| id == LANGID_VIETNAMESE).count(), 1);
-        assert_eq!(ids, vec![LANGID_ENGLISH_US, LANGID_VIETNAMESE]);
+    fn each_language_is_included_exactly_once() {
+        let ids = language_ids_for(LANGID_VIETNAMESE, LANGID_VIETNAMESE, true);
+        assert_eq!(ids, vec![LANGID_VIETNAMESE]);
+    }
+
+    /// A zero langid is not a language. Windows can report 0 in odd service
+    /// contexts, and a `LanguageProfile\0x00000000` key would be pure noise.
+    #[test]
+    fn zero_is_never_registered() {
+        assert_eq!(
+            language_ids_for(0, LANGID_ENGLISH_US, false),
+            vec![LANGID_ENGLISH_US]
+        );
+        assert!(language_ids_for(0, 0, false).is_empty());
+    }
+
+    #[test]
+    fn profile_key_names_round_trip() {
+        // Must match `register_tsf_language_profile`'s `0x{:08X}`, or pruning
+        // would silently skip every profile it is supposed to clean up.
+        for langid in [LANGID_ENGLISH_US, LANGID_VIETNAMESE, JA_JP] {
+            let key = format!("0x{langid:08X}");
+            assert_eq!(parse_profile_langid(&key), Some(langid));
+        }
+    }
+
+    #[test]
+    fn unparseable_profile_names_are_left_alone() {
+        // Anything we cannot read is something we did not write — pruning it
+        // would mean deleting a stranger's registry key.
+        assert_eq!(parse_profile_langid("Category"), None);
+        assert_eq!(parse_profile_langid("0409"), None, "missing 0x prefix");
+        assert_eq!(parse_profile_langid(""), None);
     }
 }
