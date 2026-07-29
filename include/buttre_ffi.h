@@ -68,6 +68,19 @@ const char *bt_engine_candidate_display(uint64_t engine_id, uint32_t index);
 const char *bt_engine_candidate_value(uint64_t engine_id, uint32_t index);
 BtKeyResult bt_engine_select_candidate(uint64_t engine_id, uint32_t index);
 
+/* Candidate navigation — the bridge owns the cursor; the host renders the
+ * highlight from bt_engine_candidate_cursor and routes keys here while
+ * bt_engine_candidate_count() > 0 (mirror of the IBus engine's routing:
+ * Return/Space = select_current, Up/Left = prev, Down/Right = next,
+ * PgUp/PgDn = page, digits 1..9 = select_at_page(digit-1, page)). */
+uint32_t bt_engine_candidate_cursor(uint64_t engine_id);
+BtKeyResult bt_engine_cursor_next(uint64_t engine_id);
+BtKeyResult bt_engine_cursor_prev(uint64_t engine_id);
+BtKeyResult bt_engine_cursor_page_down(uint64_t engine_id, uint32_t page);
+BtKeyResult bt_engine_cursor_page_up(uint64_t engine_id, uint32_t page);
+BtKeyResult bt_engine_select_current(uint64_t engine_id);
+BtKeyResult bt_engine_select_at_page(uint64_t engine_id, uint32_t index, uint32_t page);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

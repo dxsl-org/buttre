@@ -3,15 +3,19 @@
  * semantics live behind bt_engine_process_keysym (the same EngineBridge the
  * IBus and Wayland paths use), so the three Linux paths cannot drift.
  *
- * Tri-surface sync: the shared method file (~/.config/buttre/method) is the
- * source of truth for the active method. It is re-checked (one stat) per
- * key event and on activate — a switch made in the tray or config window
- * applies on the next keystroke, mirroring the IBus engine's per-keystroke
- * generation check. This addon never WRITES the file (fcitx5 v1 registers a
- * single "Buttre" input method; there is no per-method radio to click).
+ * Tri-surface sync — BOTH directions:
+ *  - read: the shared method file (~/.config/buttre/method) is re-checked
+ *    (one stat) per key event and on activate, mirroring the IBus engine's
+ *    per-keystroke generation check — a switch made in the tray or config
+ *    window applies on the next keystroke and re-checks the panel menu.
+ *  - write: picking a method from this addon's status-area menu writes the
+ *    same file (atomic temp+rename, mirroring method_sync::write_method_to)
+ *    so the tray and config window follow, exactly like an IBus-panel radio
+ *    click.
  */
 
-#include <fcitx-utils/utf8.h>
+#include <fcitx-utils/misc.h>
+#include <fcitx/action.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addoninstance.h>
 #include <fcitx/addonmanager.h>
@@ -20,15 +24,37 @@
 #include <fcitx/inputmethodengine.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
+#include <fcitx/statusarea.h>
+#include <fcitx/userinterfacemanager.h>
 
 #include <buttre_ffi.h>
 
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 
 namespace {
+
+/* The four built-in methods, in tray-menu order. Custom keyboard TOMLs are
+ * accepted through the shared file (read side) but not listed here yet. */
+struct MethodEntry {
+    const char *id;
+    const char *label;
+    const char *icon; /* icon-theme name; PNGs installed by this addon's CMake */
+};
+constexpr std::array<MethodEntry, 4> kMethods{{
+    {"english", "English", "buttre-english"},
+    {"telex", "Telex", "buttre-telex"},
+    {"vni", "VNI", "buttre-vni"},
+    {"nom", "Chữ Nôm", "buttre-nom"},
+}};
+
+/* Candidate page size — matches ibus_props::LOOKUP_PAGE_SIZE so digit keys
+ * and paging behave identically on both panels. */
+constexpr uint32_t kPageSize = 9;
 
 /* ~/.config/buttre/method (XDG_CONFIG_HOME honored, like dirs::config_dir). */
 std::filesystem::path sharedMethodPath() {
@@ -49,13 +75,38 @@ std::string readTrimmed(const std::filesystem::path &path) {
     return last == std::string::npos ? std::string() : content.substr(0, last + 1);
 }
 
+/* Atomic write, mirroring the Rust side (method_sync::write_method_to):
+ * temp file + rename in the same directory so no reader sees a torn file. */
+bool writeSharedMethod(const std::string &method) {
+    const auto path = sharedMethodPath();
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return false;
+    }
+    const auto tmp = path.parent_path() / ".method.tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) {
+            return false;
+        }
+        out << method;
+    }
+    std::filesystem::rename(tmp, path, ec);
+    return !ec;
+}
+
 } // namespace
 
 class ButtreEngine final : public fcitx::InputMethodEngineV2 {
 public:
     explicit ButtreEngine(fcitx::Instance *instance) : instance_(instance) {
         engine_ = bt_engine_new(nullptr);
-        refreshMethodFromSharedFile();
+        setupActions();
+        refreshMethodFromSharedFile(nullptr);
     }
 
     ~ButtreEngine() override { bt_engine_free(engine_); }
@@ -65,21 +116,67 @@ public:
         if (keyEvent.isRelease() || engine_ == 0) {
             return;
         }
-        refreshMethodFromSharedFile();
+        auto *ic = keyEvent.inputContext();
+        refreshMethodFromSharedFile(ic);
         /* Ctrl/Alt/Super combos (copy, paste, save, window shortcuts) carry
          * no modifier info through bt_engine_process_keysym (keysym-only
          * ABI), so process_keysym would compose the bare letter and this
          * addon would swallow every shortcut. Commit whatever is pending —
          * same rule the ibus/wayland backends apply
          * (ibus.rs::is_control_combo) — then let the combo reach the
-         * client untouched. */
+         * client untouched.
+         *
+         * BEFORE the candidate routing below, not after: with a Nôm list
+         * open, Ctrl+Space's keysym IS space, so the router would read it as
+         * "select the highlighted candidate" and eat the shortcut. Same
+         * ordering the Windows text service uses (`should_ignore` ahead of
+         * `handle_candidate_key`). */
         if (keyEvent.rawKey().states().testAny(fcitx::KeyState::Ctrl_Alt_Super)) {
-            applyResult(keyEvent.inputContext(), bt_engine_flush(engine_));
+            applyResult(ic, bt_engine_flush(engine_));
             return;
         }
-        const BtKeyResult result = bt_engine_process_keysym(
-            engine_, static_cast<uint32_t>(keyEvent.rawKey().sym()));
-        applyResult(keyEvent.inputContext(), result);
+        const auto sym = static_cast<uint32_t>(keyEvent.rawKey().sym());
+        /* Candidate navigation next (mirror of ibus.rs): while the Nôm
+         * list is showing, digits/arrows/paging/Return-Space drive the
+         * BRIDGE's cursor instead of composing — otherwise digit keys
+         * would type into the word and PgUp/PgDn would flush it. */
+        if (bt_engine_candidate_count(engine_) > 0) {
+            bool routed = true;
+            BtKeyResult navResult;
+            switch (sym) {
+            case 0xFF0D /*Return*/:
+            case 0x0020 /*space*/:
+                navResult = bt_engine_select_current(engine_);
+                break;
+            case 0xFF54 /*Down*/:
+            case 0xFF53 /*Right*/:
+                navResult = bt_engine_cursor_next(engine_);
+                break;
+            case 0xFF52 /*Up*/:
+            case 0xFF51 /*Left*/:
+                navResult = bt_engine_cursor_prev(engine_);
+                break;
+            case 0xFF56 /*Page_Down*/:
+                navResult = bt_engine_cursor_page_down(engine_, kPageSize);
+                break;
+            case 0xFF55 /*Page_Up*/:
+                navResult = bt_engine_cursor_page_up(engine_, kPageSize);
+                break;
+            default:
+                if (sym >= '1' && sym <= '9') {
+                    navResult = bt_engine_select_at_page(engine_, sym - '1', kPageSize);
+                } else {
+                    routed = false;
+                }
+            }
+            if (routed) {
+                applyResult(ic, navResult);
+                keyEvent.filterAndAccept();
+                return;
+            }
+        }
+        const BtKeyResult result = bt_engine_process_keysym(engine_, sym);
+        applyResult(ic, result);
         if (result.handled) {
             keyEvent.filterAndAccept();
         }
@@ -89,14 +186,24 @@ public:
     }
 
     void activate(const fcitx::InputMethodEntry & /*entry*/,
-                  fcitx::InputContextEvent & /*event*/) override {
-        refreshMethodFromSharedFile();
+                  fcitx::InputContextEvent &event) override {
+        auto *ic = event.inputContext();
+        refreshMethodFromSharedFile(ic);
         /* One engine_ handle serves every input context (fcitx5 creates one
          * engine instance per addon, not per IC) — without this, a
          * composition left pending when a window closed without
          * deactivate() (or reset() not delivered) would leak into the next
          * focused window's first keystroke. */
         bt_engine_reset(engine_);
+        /* (Re)attach the panel entries for this input context — the status
+         * area is per-IC and cleared when the input method changes. The
+         * method actions sit FLAT at the top level (checked = current),
+         * matching the IBus panel's radio layout. */
+        auto &statusArea = ic->statusArea();
+        for (auto &action : methodActions_) {
+            statusArea.addAction(fcitx::StatusGroup::InputMethod, action.get());
+        }
+        statusArea.addAction(fcitx::StatusGroup::InputMethod, &configAction_);
     }
 
     /* Focus is leaving: commit the pending word (never drop typed text). */
@@ -108,7 +215,7 @@ public:
         applyResult(event.inputContext(), bt_engine_flush(engine_));
     }
 
-    /* Hard reset (Escape at the fcitx level, IC reset): discard, no commit. */
+    /* Hard reset (IC reset): discard, no commit. */
     void reset(const fcitx::InputMethodEntry & /*entry*/,
                fcitx::InputContextEvent &event) override {
         if (engine_ == 0) {
@@ -136,6 +243,53 @@ private:
         ButtreEngine *engine_;
         uint32_t index_;
     };
+
+    /* Build the status-area UI once: one checkable action per built-in
+     * method, added FLAT to the status area on activate (fcitx has no radio
+     * group primitive — checked state is maintained by hand in
+     * syncActionStates), plus a "Cấu hình…" launcher. */
+    void setupActions() {
+        auto &ui = instance_->userInterfaceManager();
+        for (const auto &entry : kMethods) {
+            auto action = std::make_unique<fcitx::SimpleAction>();
+            action->setShortText(entry.label);
+            action->setIcon(entry.icon);
+            action->setCheckable(true);
+            const std::string id = entry.id;
+            connections_.emplace_back(action->connect<fcitx::SimpleAction::Activated>(
+                [this, id](fcitx::InputContext *ic) { switchMethod(id, ic); }));
+            ui.registerAction(std::string("buttre-method-") + entry.id, action.get());
+            methodActions_.push_back(std::move(action));
+        }
+        configAction_.setShortText("Cấu hình…");
+        configAction_.setIcon("configure");
+        configAction_.setLongText("Mở cửa sổ cấu hình buttre");
+        connections_.emplace_back(configAction_.connect<fcitx::SimpleAction::Activated>(
+            [](fcitx::InputContext * /*ic*/) {
+                fcitx::startProcess({"buttre", "--config"});
+            }));
+        ui.registerAction("buttre-config", &configAction_);
+    }
+
+    /* Panel-menu click: switch the engine AND persist to the shared file so
+     * the tray and config window follow (the write half of tri-surface). */
+    void switchMethod(const std::string &id, fcitx::InputContext *ic) {
+        if (id == method_ || !bt_engine_set_method(engine_, id.c_str())) {
+            return;
+        }
+        method_ = id;
+        if (writeSharedMethod(id)) {
+            /* Remember the mtime WE created so the per-keystroke check does
+             * not immediately re-read our own write (echo suppression). */
+            std::error_code ec;
+            const auto mtime = std::filesystem::last_write_time(sharedMethodPath(), ec);
+            if (!ec) {
+                methodMtime_ = mtime;
+            }
+        }
+        syncActionStates(ic);
+        clearPanel(ic); /* a method switch resets any live composition */
+    }
 
     /* Map one ABI result onto the input context. Order is the bridge's
      * contract: commit FIRST (the committed word must land before any
@@ -167,15 +321,18 @@ private:
             return;
         }
         auto list = std::make_unique<fcitx::CommonCandidateList>();
-        list->setPageSize(9);
+        list->setPageSize(static_cast<int>(kPageSize));
         for (uint32_t i = 0; i < count; ++i) {
             const char *display = bt_engine_candidate_display(engine_, i);
             if (display == nullptr) {
                 break; /* list changed under us — stop at the ABI's edge */
             }
-            list->append<ButtreCandidateWord>(const_cast<ButtreEngine *>(this), i,
-                                              fcitx::Text(display));
+            list->append<ButtreCandidateWord>(this, i, fcitx::Text(display));
         }
+        /* The bridge owns the cursor; render its highlight (this also puts
+         * the visible page where the cursor is). */
+        list->setGlobalCursorIndex(
+            static_cast<int>(bt_engine_candidate_cursor(engine_)));
         ic->inputPanel().setCandidateList(std::move(list));
     }
 
@@ -188,19 +345,34 @@ private:
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
     }
 
+    /* Push method_ into the panel UI: exactly one method action is checked.
+     * `ic` non-null → repaint that context's panel. */
+    void syncActionStates(fcitx::InputContext *ic) {
+        for (size_t i = 0; i < methodActions_.size(); ++i) {
+            methodActions_[i]->setChecked(method_ == kMethods[i].id);
+        }
+        if (ic != nullptr) {
+            for (auto &action : methodActions_) {
+                action->update(ic);
+            }
+        }
+    }
+
     /* One stat per call; reload only on mtime change. Unknown/empty file
      * falls back to telex — same normalization the Rust reader applies. */
-    void refreshMethodFromSharedFile() {
+    void refreshMethodFromSharedFile(fcitx::InputContext *ic) {
         const auto path = sharedMethodPath();
         if (path.empty()) {
             return;
         }
         std::error_code ec;
         const auto mtime = std::filesystem::last_write_time(path, ec);
-        if (ec || mtime == methodMtime_) {
+        if (!ec && mtime == methodMtime_) {
             return;
         }
-        methodMtime_ = mtime;
+        if (!ec) {
+            methodMtime_ = mtime;
+        }
         std::string method = readTrimmed(path);
         if (method.empty()) {
             method = "telex";
@@ -208,12 +380,17 @@ private:
         if (method != method_ && bt_engine_set_method(engine_, method.c_str())) {
             method_ = method;
         }
+        syncActionStates(ic);
     }
 
     fcitx::Instance *instance_;
     uint64_t engine_ = 0;
     std::string method_ = "telex";
     std::filesystem::file_time_type methodMtime_{};
+
+    fcitx::SimpleAction configAction_;
+    std::vector<std::unique_ptr<fcitx::SimpleAction>> methodActions_;
+    std::vector<fcitx::ScopedConnection> connections_;
 };
 
 class ButtreEngineFactory final : public fcitx::AddonFactory {

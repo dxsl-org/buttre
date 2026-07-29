@@ -82,6 +82,9 @@ struct EngineState {
     /// Current candidate list (Nôm), refreshed by every marshal; display
     /// and value share an index. Cleared on `HideCandidates`.
     candidates: Vec<(CString, CString)>,
+    /// Global cursor into `candidates` — the bridge owns candidate
+    /// navigation (hosts render the highlight, never move it themselves).
+    cursor: u32,
 }
 
 static ENGINES: Mutex<Option<HashMap<u64, EngineState>>> = Mutex::new(None);
@@ -106,15 +109,19 @@ fn marshal(state: &mut EngineState, outcome: KeyOutcome, force_pass: bool) -> Bt
                 Some(existing) => existing.push_str(&text),
                 None => commit_text = Some(text),
             },
-            ImeOp::Candidates { items, .. } => {
+            ImeOp::Candidates { items, cursor } => {
                 state.candidates = items
                     .into_iter()
                     .filter_map(|c| {
                         Some((CString::new(c.display).ok()?, CString::new(c.value).ok()?))
                     })
                     .collect();
+                state.cursor = cursor as u32;
             }
-            ImeOp::HideCandidates => state.candidates.clear(),
+            ImeOp::HideCandidates => {
+                state.candidates.clear();
+                state.cursor = 0;
+            }
             // Preedit is read back from the bridge below; DeleteSurrounding
             // is unreachable (no-preedit mode is never enabled through this
             // ABI — module docs).
@@ -221,6 +228,7 @@ pub unsafe extern "C" fn bt_engine_new(method: *const c_char) -> u64 {
             commit_c: None,
             preedit_c: CString::default(),
             candidates: Vec::new(),
+            cursor: 0,
         },
     );
     id
@@ -361,6 +369,78 @@ pub extern "C" fn bt_engine_candidate_value(engine_id: u64, index: u32) -> *cons
             .map_or(std::ptr::null(), |(_, value)| value.as_ptr())
     })
     .unwrap_or(std::ptr::null())
+}
+
+/// Global cursor (highlight) into the current candidate list. The bridge
+/// owns candidate navigation — hosts render this, never move it themselves.
+#[no_mangle]
+pub extern "C" fn bt_engine_candidate_cursor(engine_id: u64) -> u32 {
+    with_engine(engine_id, |state| state.cursor).unwrap_or(0)
+}
+
+/// Candidate navigation, mirroring the IBus engine's key routing (call only
+/// while `bt_engine_candidate_count() > 0`; no-ops otherwise). Each returns
+/// the refreshed panel state, with the moved cursor readable via
+/// [`bt_engine_candidate_cursor`].
+#[no_mangle]
+pub extern "C" fn bt_engine_cursor_next(engine_id: u64) -> BtKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.cursor_next();
+        marshal(state, outcome, false)
+    })
+    .unwrap_or(BtKeyResult::pass())
+}
+
+/// See [`bt_engine_cursor_next`].
+#[no_mangle]
+pub extern "C" fn bt_engine_cursor_prev(engine_id: u64) -> BtKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.cursor_prev();
+        marshal(state, outcome, false)
+    })
+    .unwrap_or(BtKeyResult::pass())
+}
+
+/// See [`bt_engine_cursor_next`]. `page` is the host's page size.
+#[no_mangle]
+pub extern "C" fn bt_engine_cursor_page_down(engine_id: u64, page: u32) -> BtKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.cursor_page_down(page as usize);
+        marshal(state, outcome, false)
+    })
+    .unwrap_or(BtKeyResult::pass())
+}
+
+/// See [`bt_engine_cursor_next`]. `page` is the host's page size.
+#[no_mangle]
+pub extern "C" fn bt_engine_cursor_page_up(engine_id: u64, page: u32) -> BtKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.cursor_page_up(page as usize);
+        marshal(state, outcome, false)
+    })
+    .unwrap_or(BtKeyResult::pass())
+}
+
+/// Commit the candidate under the cursor (Return/Space while the list is
+/// showing).
+#[no_mangle]
+pub extern "C" fn bt_engine_select_current(engine_id: u64) -> BtKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.select_current();
+        marshal(state, outcome, false)
+    })
+    .unwrap_or(BtKeyResult::pass())
+}
+
+/// Commit candidate number `index` (0-based) ON THE PAGE the cursor is in —
+/// the digit-key contract (`page` = host page size).
+#[no_mangle]
+pub extern "C" fn bt_engine_select_at_page(engine_id: u64, index: u32, page: u32) -> BtKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = state.bridge.select_at_page(index as usize, page as usize);
+        marshal(state, outcome, false)
+    })
+    .unwrap_or(BtKeyResult::pass())
 }
 
 /// Commit candidate `index` from the current list. Out-of-range indexes
