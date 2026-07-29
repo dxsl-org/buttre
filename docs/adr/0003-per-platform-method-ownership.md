@@ -33,13 +33,17 @@ Ba phương án được xét. Chi tiết lập luận trong plan; đây là k�
 | Nền tảng | Đường truyền | Menu của OS | Ai sở hữu kiểu gõ | Tray |
 |---|---|---|---|---|
 | Linux IBus | 1 | có (IBus properties) | **OS** | không |
-| Linux fcitx5 | 1 | giả định có¹ | **OS** | không |
-| macOS IMKit | 1 | giả định có¹ | **OS** | không |
+| Linux fcitx5 | 1 | có (panel status area)¹ | **OS** | không |
+| macOS IMKit | 1 | giả định có² | **OS** | không |
 | Linux Wayland-native | 1 | **không có** | buttre | **có** |
 | Windows | **2** (TSF + hook) | có | buttre | **có** |
 
-¹ Chưa xác minh trên môi trường thật. Nếu fcitx5 hoặc IMKit không render được menu kiểu gõ
-của chính addon/controller, nền tảng đó chuyển sang nhóm "buttre sở hữu + tray".
+¹ **Đã xác minh và đã hiện thực** (PR #17): `addons/fcitx5-buttre` dựng menu kiểu gõ phẳng ở
+`StatusGroup::InputMethod`, kèm icon riêng từng kiểu và lối vào cửa sổ Cấu hình. Cùng mô hình
+IBus dùng — addon sở hữu danh sách, panel của OS vẽ nó.
+
+² Chưa xác minh trên môi trường thật. Nếu IMKit không render được menu kiểu gõ của chính
+controller, macOS chuyển sang nhóm "buttre sở hữu + tray".
 
 Hai nhóm cuối đến cùng một kết luận vì **hai lý do khác nhau**: Wayland-native vì không có
 menu nào để hiển thị; Windows vì hook không phải đường truyền mà OS biết, nên chỉ ta phân
