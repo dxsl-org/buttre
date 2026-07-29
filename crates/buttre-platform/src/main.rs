@@ -146,6 +146,10 @@ fn run_tsf_registration(_unregister: bool) -> Result<()> {
 }
 
 /// Flags whose whole purpose is to print something.
+///
+/// Windows-only, like the single function that reads it: no other platform
+/// builds a GUI-subsystem binary, so nowhere else needs to reattach a console.
+#[cfg(platform_windows)]
 const REPORTING_FLAGS: [&str; 8] = [
     "--version",
     "-V",
