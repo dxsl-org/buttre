@@ -145,6 +145,90 @@ fn run_tsf_registration(_unregister: bool) -> Result<()> {
     anyhow::bail!("--register-tsf is Windows-only")
 }
 
+/// Flags whose whole purpose is to print something.
+const REPORTING_FLAGS: [&str; 8] = [
+    "--version",
+    "-V",
+    "--help",
+    "-h",
+    "--doctor",
+    "--tsf-status",
+    "--register-tsf",
+    "--unregister-tsf",
+];
+
+/// Bind stdout/stderr to the console that launched us, so the reporting flags
+/// can actually be read.
+///
+/// buttre.exe is a GUI-subsystem binary — it must be, or launching the tray
+/// would flash a console window. A GUI binary starts with NO console attached,
+/// so `println!` writes to an invalid handle and vanishes. It appears to work
+/// from a terminal only by luck: a GUI child sometimes inherits the shell's
+/// handles, and sometimes does not. Captured by a script it reliably produced
+/// nothing, which `check-tsf-status.ps1` then reported as "this exe is too old
+/// for --tsf-status" — a diagnostic lying about a binary that was correct.
+///
+/// `SetStdHandle` has to run before the first print: Rust's `Stdout` caches the
+/// handle it gets from `GetStdHandle` on first use.
+///
+/// CRITICAL: this must NOT touch a stdout the parent already gave us. A caller
+/// that captures output (`$x = & buttre --tsf-status`, a pipe, a redirect to a
+/// file) hands the child a perfectly good handle, and pointing stdout at
+/// `CONOUT$` instead sends the report to the console where the caller cannot see
+/// it — the first version of this function did exactly that and turned a
+/// sometimes-empty capture into an always-empty one.
+///
+/// Silent no-op when there is no parent console either (launched from Explorer,
+/// or by the MSI) — nothing to attach to, and those callers read the exit code.
+#[cfg(platform_windows)]
+fn attach_parent_console(args: &[String]) {
+    use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    if !args.iter().any(|a| REPORTING_FLAGS.contains(&a.as_str())) {
+        return;
+    }
+
+    // SAFETY: every call here takes only constants or a handle obtained from
+    // the call above it. `CreateFileW` on the "CONOUT$" pseudo-file is the
+    // documented way to reach the attached console; the handle it returns is
+    // handed to `SetStdHandle`, which keeps it for the process's lifetime, so it
+    // is deliberately not closed.
+    unsafe {
+        let existing = GetStdHandle(STD_OUTPUT_HANDLE);
+        let usable = matches!(existing, Ok(h) if h != INVALID_HANDLE_VALUE && h != HANDLE(std::ptr::null_mut()));
+        if usable {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return;
+        }
+        let Ok(console) = CreateFileW(
+            windows::core::w!("CONOUT$"),
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        ) else {
+            return;
+        };
+        let _ = SetStdHandle(STD_OUTPUT_HANDLE, console);
+        let _ = SetStdHandle(STD_ERROR_HANDLE, console);
+    }
+}
+
+#[cfg(not(platform_windows))]
+fn attach_parent_console(_args: &[String]) {}
+
 /// `buttre --tsf-status`: report which backend the tray will pick, and why.
 ///
 /// Exists so diagnostics ask the AUTHORITY instead of guessing. A shell script
@@ -399,6 +483,8 @@ fn main() -> Result<()> {
     // the tray, matching prior behaviour; `--ibus`/`--ime`/`--config` are
     // matched further down.
     let args: Vec<String> = std::env::args().collect();
+    // BEFORE the first println. See `attach_parent_console`.
+    attach_parent_console(&args);
     init_tracing(&args);
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("buttre {}", env!("CARGO_PKG_VERSION"));

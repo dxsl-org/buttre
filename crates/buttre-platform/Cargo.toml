@@ -57,6 +57,10 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
+    # Attaching the parent console so buttre.exe's reporting flags can print:
+    # a GUI-subsystem binary starts with no console, so println! goes nowhere
+    # (see `attach_parent_console` in main.rs).
+    "Win32_System_Console",
     "Win32_UI_TextServices",
     "Win32_System_Com",
     "Win32_System_Registry",

@@ -59,8 +59,17 @@ $buttreExe = @(
 if (-not $buttreExe) {
     Write-Host "  ?   buttre.exe not found - install it, or build it first." -ForegroundColor DarkYellow
 } else {
-    $status = & $buttreExe --tsf-status 2>&1
-    $exitCode = $LASTEXITCODE
+    # Start-Process with explicit redirection, NOT `& $exe`. buttre.exe is a
+    # GUI-subsystem binary (it must be, or the tray would flash a console), and a
+    # GUI child's stdout is only sometimes inherited by a capturing shell — so
+    # `&` returned the report on one run and nothing on the next. Real pipes to
+    # files are deterministic.
+    $outFile = Join-Path $env:TEMP "buttre-tsf-status.out"
+    $errFile = Join-Path $env:TEMP "buttre-tsf-status.err"
+    $proc = Start-Process $buttreExe -ArgumentList "--tsf-status" -Wait -PassThru -NoNewWindow `
+        -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $exitCode = $proc.ExitCode
+    $status = @(Get-Content $outFile -ErrorAction SilentlyContinue)
     # An older buttre.exe does not know this flag and falls through to launching
     # the tray, which then exits non-zero on the single-instance lock. Treat a
     # missing verdict line as "cannot tell" — reporting HOOK there would be a
