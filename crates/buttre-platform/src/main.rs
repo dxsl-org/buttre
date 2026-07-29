@@ -81,13 +81,17 @@ impl StateObserver for BackspaceModeObserver {
 }
 
 /// Route the `ToggleLastWord` hotkey to the Hook backend's delivery path
-/// (event-sourcing-completion Phase 4). Hook multiword backend only — see
-/// `hook.rs` for the focus guard and chord-exemption CRITICALs this depends
-/// on. TSF is deferred (scope note, phase-04-user-controls.md): TSF's own
-/// `Keyboard` instances live inside `vietnamese_engine.rs` and never touch
-/// this `keyboard` handle, so its window is always empty here — this no-ops
-/// safely for that backend too, with no extra branching needed. Also a safe
-/// no-op on non-Windows platforms (not yet implemented there).
+/// (event-sourcing-completion Phase 4). Hook backend only — see `hook.rs` for
+/// the focus guard and chord-exemption CRITICALs this depends on.
+///
+/// Under TSF this is never reached: the chord is not registered as a global
+/// hotkey at all (`PlatformBackend::owns_word_toggle_chord`), so the keystroke
+/// flows to the text service, which calls
+/// `VietnameseEngine::toggle_composition` in-process. Belt and braces, it
+/// would also no-op here anyway — TSF's `Keyboard` instances live inside
+/// `vietnamese_engine.rs` and never touch this `keyboard` handle.
+///
+/// Still a no-op on non-Windows platforms (not yet implemented there).
 #[cfg(platform_windows)]
 fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
     buttre_platform::platforms::windows::hook::dispatch_toggle_last_word(keyboard);
@@ -95,6 +99,189 @@ fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
 
 #[cfg(not(platform_windows))]
 fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
+
+/// `buttre --register-tsf` / `--unregister-tsf`: install or remove the TSF
+/// text-service registration for the DLL sitting next to this executable.
+///
+/// The installer calls this instead of writing the registry itself. Those keys
+/// are not a flat list — a working text service also needs its TSF CATEGORIES
+/// registered, and that goes through `ITfCategoryMgr`, a COM call an MSI
+/// cannot express as registry rows. The MSI's hand-written approximation was
+/// missing exactly that, plus the icon, and it shipped a service Windows
+/// refused to name or drive. Keeping ONE implementation
+/// (`registration::register_server`, the same one `regsvr32` reaches through
+/// `DllRegisterServer`) is what stops the copies drifting again.
+#[cfg(platform_windows)]
+fn run_tsf_registration(unregister: bool) -> Result<()> {
+    use anyhow::Context;
+    use buttre_platform::platforms::windows::tsf::registration::{
+        register_server, unregister_server,
+    };
+
+    if unregister {
+        unregister_server()?;
+        println!("buttre TSF unregistered");
+        return Ok(());
+    }
+
+    let dll = std::env::current_exe()
+        .context("cannot locate buttre.exe")?
+        .parent()
+        .context("buttre.exe has no parent directory")?
+        .join("buttre_platform.dll");
+    anyhow::ensure!(
+        dll.exists(),
+        "buttre_platform.dll not found next to buttre.exe ({})",
+        dll.display()
+    );
+
+    register_server(&dll)?;
+    println!("buttre TSF registered: {}", dll.display());
+    Ok(())
+}
+
+#[cfg(not(platform_windows))]
+fn run_tsf_registration(_unregister: bool) -> Result<()> {
+    anyhow::bail!("--register-tsf is Windows-only")
+}
+
+/// Flags whose whole purpose is to print something.
+///
+/// Windows-only, like the single function that reads it: no other platform
+/// builds a GUI-subsystem binary, so nowhere else needs to reattach a console.
+#[cfg(platform_windows)]
+const REPORTING_FLAGS: [&str; 8] = [
+    "--version",
+    "-V",
+    "--help",
+    "-h",
+    "--doctor",
+    "--tsf-status",
+    "--register-tsf",
+    "--unregister-tsf",
+];
+
+/// Bind stdout/stderr to the console that launched us, so the reporting flags
+/// can actually be read.
+///
+/// buttre.exe is a GUI-subsystem binary — it must be, or launching the tray
+/// would flash a console window. A GUI binary starts with NO console attached,
+/// so `println!` writes to an invalid handle and vanishes. It appears to work
+/// from a terminal only by luck: a GUI child sometimes inherits the shell's
+/// handles, and sometimes does not. Captured by a script it reliably produced
+/// nothing, which `check-tsf-status.ps1` then reported as "this exe is too old
+/// for --tsf-status" — a diagnostic lying about a binary that was correct.
+///
+/// `SetStdHandle` has to run before the first print: Rust's `Stdout` caches the
+/// handle it gets from `GetStdHandle` on first use.
+///
+/// CRITICAL: this must NOT touch a stdout the parent already gave us. A caller
+/// that captures output (`$x = & buttre --tsf-status`, a pipe, a redirect to a
+/// file) hands the child a perfectly good handle, and pointing stdout at
+/// `CONOUT$` instead sends the report to the console where the caller cannot see
+/// it — the first version of this function did exactly that and turned a
+/// sometimes-empty capture into an always-empty one.
+///
+/// Silent no-op when there is no parent console either (launched from Explorer,
+/// or by the MSI) — nothing to attach to, and those callers read the exit code.
+#[cfg(platform_windows)]
+fn attach_parent_console(args: &[String]) {
+    use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    if !args.iter().any(|a| REPORTING_FLAGS.contains(&a.as_str())) {
+        return;
+    }
+
+    // SAFETY: every call here takes only constants or a handle obtained from
+    // the call above it. `CreateFileW` on the "CONOUT$" pseudo-file is the
+    // documented way to reach the attached console; the handle it returns is
+    // handed to `SetStdHandle`, which keeps it for the process's lifetime, so it
+    // is deliberately not closed.
+    unsafe {
+        let existing = GetStdHandle(STD_OUTPUT_HANDLE);
+        let usable = matches!(existing, Ok(h) if h != INVALID_HANDLE_VALUE && h != HANDLE(std::ptr::null_mut()));
+        if usable {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return;
+        }
+        let Ok(console) = CreateFileW(
+            windows::core::w!("CONOUT$"),
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        ) else {
+            return;
+        };
+        let _ = SetStdHandle(STD_OUTPUT_HANDLE, console);
+        let _ = SetStdHandle(STD_ERROR_HANDLE, console);
+    }
+}
+
+#[cfg(not(platform_windows))]
+fn attach_parent_console(_args: &[String]) {}
+
+/// `buttre --tsf-status`: report which backend the tray will pick, and why.
+///
+/// Exists so diagnostics ask the AUTHORITY instead of guessing. A shell script
+/// reading `HKCU\...\CTF\SortOrder` to infer "is buttre added as an input
+/// method" answered NO while the text service was demonstrably running — the
+/// same wrong-proxy mistake that made the backend gate test the language list.
+/// Here the script calls the very function the tray decides with.
+///
+/// Exit code 0 = TSF, 1 = Hook, so a caller can branch without parsing text.
+#[cfg(platform_windows)]
+fn run_tsf_status() -> Result<()> {
+    use buttre_platform::platforms::windows::tsf::{lang_check, registration};
+
+    let registered = registration::is_tsf_registered();
+    let langids = lang_check::enabled_langids();
+    let enabled = !langids.is_empty();
+    let under = if enabled {
+        langids
+            .iter()
+            .map(|id| format!("0x{id:04X}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        "(none — add it in Windows keyboard settings)".to_string()
+    };
+
+    println!("registered (HKLM, available):   {registered}");
+    println!("added by you (HKCU, languages): {under}");
+    println!(
+        "tray will use:                  {}",
+        if registered && enabled { "TSF" } else { "Hook" }
+    );
+    if registered && enabled {
+        return Ok(());
+    }
+
+    // Flush before exiting. `process::exit` runs no destructors, and stdout is
+    // BLOCK-buffered when redirected — so the whole report vanished whenever a
+    // script captured it, which read as "this exe is too old for the flag".
+    // Interactively it worked, because a terminal makes stdout line-buffered.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    std::process::exit(1)
+}
+
+#[cfg(not(platform_windows))]
+fn run_tsf_status() -> Result<()> {
+    anyhow::bail!("--tsf-status is Windows-only")
+}
 
 /// Debounce successive personal-learning save requests down to the LATEST
 /// snapshot only (event-sourcing-completion Phase 5, red-team C3): a
@@ -300,6 +487,8 @@ fn main() -> Result<()> {
     // the tray, matching prior behaviour; `--ibus`/`--ime`/`--config` are
     // matched further down.
     let args: Vec<String> = std::env::args().collect();
+    // BEFORE the first println. See `attach_parent_console`.
+    attach_parent_console(&args);
     init_tracing(&args);
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("buttre {}", env!("CARGO_PKG_VERSION"));
@@ -315,11 +504,26 @@ fn main() -> Result<()> {
              --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
              --config    Open the settings window\n  \
              --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \
+             --register-tsf    Register the Windows TSF text service (needs Administrator)\n  \
+             --unregister-tsf  Remove that registration (needs Administrator)\n  \
+             --tsf-status      Report whether the tray will use TSF or the hook\n  \
              --version   Print version and exit\n  \
              --help      Print this help and exit",
             ver = env!("CARGO_PKG_VERSION")
         );
         return Ok(());
+    }
+    // Installer hooks: run before any backend or UI setup — they must work in
+    // the MSI's non-interactive, elevated context where there is no session to
+    // put a tray icon in.
+    if args.iter().any(|a| a == "--register-tsf") {
+        return run_tsf_registration(false);
+    }
+    if args.iter().any(|a| a == "--unregister-tsf") {
+        return run_tsf_registration(true);
+    }
+    if args.iter().any(|a| a == "--tsf-status") {
+        return run_tsf_status();
     }
     if args.iter().any(|a| a == "--doctor") {
         run_doctor();
@@ -613,7 +817,13 @@ fn main() -> Result<()> {
     });
 
     // --- Hotkey Setup ---
-    let mut hotkey_manager = ButtreHotkeyManager::new().expect("Failed to create hotkey manager");
+    // The word-toggle chord goes to whichever layer can actually see it: TSF
+    // handles it in-process, so registering it globally here would swallow the
+    // keystroke before the text service ever ran (see
+    // `PlatformBackend::owns_word_toggle_chord`).
+    let mut hotkey_manager =
+        ButtreHotkeyManager::new_with_word_toggle(!backend.owns_word_toggle_chord())
+            .expect("Failed to create hotkey manager");
 
     // Register custom hotkeys (Ctrl+Shift+4..0) based on menu items count
     if let Err(e) = hotkey_manager.register_custom_methods(custom_items.len()) {

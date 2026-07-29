@@ -74,6 +74,10 @@ pub struct PipelineExecutor {
     /// [`Self::take_confirmed_raw`]; macro-agnostic: this is raw the
     /// executor already owns, nothing here knows what callers do with it.
     last_confirmed_raw: Vec<char>,
+
+    /// Case-preserved literal form of the same word as `last_confirmed_raw`,
+    /// stashed at the same moment. See [`Self::take_confirmed_display`].
+    last_confirmed_display: String,
 }
 
 impl PipelineExecutor {
@@ -163,6 +167,7 @@ impl PipelineExecutor {
             boundary_repair_opts,
             compose_live_opts,
             last_confirmed_raw: Vec::new(),
+            last_confirmed_display: String::new(),
         }
     }
 
@@ -365,8 +370,9 @@ impl PipelineExecutor {
                         // repair above read) before reset() destroys it — see
                         // `last_confirmed_raw`'s field doc.
                         let len = self.context.char_buffer.len();
-                        self.last_confirmed_raw =
-                            self.context.char_buffer[..len.saturating_sub(1)].to_char_vec();
+                        let confirmed_run = &self.context.char_buffer[..len.saturating_sub(1)];
+                        self.last_confirmed_raw = confirmed_run.to_char_vec();
+                        self.last_confirmed_display = confirmed_run.to_output_string();
                         debug!("Confirming composition: {}", confirmed);
                         actions.push(Action::ConfirmComposition(confirmed));
                     }
@@ -399,6 +405,25 @@ impl PipelineExecutor {
     /// exists at all.
     pub fn take_confirmed_raw(&mut self) -> Vec<char> {
         std::mem::take(&mut self.last_confirmed_raw)
+    }
+
+    /// The same word [`Self::take_confirmed_raw`] returns, but as the literal
+    /// keystrokes WITH ORIGINAL CASE — what the user would have seen had the
+    /// engine never composed anything ("Dads" stays "Dads", not "dads").
+    ///
+    /// Separate from `take_confirmed_raw` because that one feeds shorthand
+    /// lookup, which keys on normalized lowercase. Consumed by
+    /// `buttre_core::keyboard::Keyboard`'s composition-literal toggle to
+    /// render the confirmed word verbatim; independent take, so using one does
+    /// not consume the other.
+    pub fn take_confirmed_display(&mut self) -> String {
+        std::mem::take(&mut self.last_confirmed_display)
+    }
+
+    /// Literal keystrokes of the live (not-yet-confirmed) word with original
+    /// case restored. Display counterpart to [`Self::raw_char_vec`].
+    pub fn raw_display_string(&self) -> String {
+        self.context.char_buffer.to_output_string()
     }
 
     /// Raw keys currently in `char_buffer` (the live, not-yet-confirmed

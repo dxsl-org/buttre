@@ -395,6 +395,172 @@ fn toggle_last_word_is_bidirectional_and_repeatable() {
 }
 
 #[test]
+fn toggle_is_the_escape_for_the_dd_free_marking_collision() {
+    // The free-marking đ order made "dad" compose to "đa" (see
+    // `buttre_engine::compose::segment`'s accepted-collision note). The word
+    // toggle is the documented escape, and it must cycle — a user who wanted
+    // English "dad" presses the hotkey once; one who wanted "đa" and pressed
+    // it by mistake presses again.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "dad");
+    assert_eq!(kb.buffer(), "đa");
+
+    kb.toggle_last_word().expect("toggle acts on the open word");
+    assert_eq!(
+        kb.buffer(),
+        "dad",
+        "first toggle restores the raw keystrokes"
+    );
+
+    kb.toggle_last_word().expect("toggle is bidirectional");
+    assert_eq!(kb.buffer(), "đa", "second toggle returns the composed form");
+}
+
+#[test]
+fn toggle_still_reaches_the_word_after_its_separator() {
+    // The multiword window keeps separators, so the last WORD run is still
+    // "dads" after the space — pressing the hotkey once the space is already
+    // typed (the common case: users notice the wrong word after moving on)
+    // must still act on it, not no-op.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "dads ");
+    assert_eq!(kb.buffer(), "đá ");
+
+    kb.toggle_last_word()
+        .expect("the word before the trailing separator is still reachable");
+    assert_eq!(kb.buffer(), "dads ");
+}
+
+// ── Composition-backend word toggle (TSF) ───────────────────────────────────
+
+/// Screen text a composition backend would be showing after these actions.
+fn composition_text(actions: &[buttre_core::Action]) -> Option<String> {
+    actions.iter().rev().find_map(|a| match a {
+        buttre_core::Action::UpdateComposition { text, .. } => Some(text.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn toggle_composition_is_bidirectional_and_repeatable() {
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    type_str(&mut kb, "dads");
+    assert_eq!(kb.buffer(), "đá");
+
+    let action = kb
+        .toggle_composition()
+        .expect("toggle must act on the open composition");
+    assert!(matches!(
+        action,
+        buttre_core::Action::UpdateComposition { .. }
+    ));
+    assert_eq!(
+        kb.buffer(),
+        "dads",
+        "first toggle renders the raw keystrokes"
+    );
+
+    kb.toggle_composition().expect("toggle is bidirectional");
+    assert_eq!(kb.buffer(), "đá", "second toggle returns the composed form");
+
+    kb.toggle_composition().expect("and repeatable");
+    assert_eq!(kb.buffer(), "dads");
+}
+
+#[test]
+fn toggle_composition_preserves_case() {
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    type_str(&mut kb, "Dads");
+    assert_eq!(kb.buffer(), "Đá");
+
+    kb.toggle_composition().expect("toggle acts");
+    assert_eq!(
+        kb.buffer(),
+        "Dads",
+        "the literal projection restores the case as typed, not the normalized raw"
+    );
+}
+
+#[test]
+fn toggle_composition_freezes_the_rest_of_the_word() {
+    // A tone key typed after the toggle must not re-diacritic the word the
+    // user just rejected — it appends literally, mirroring the multiword rule.
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    type_str(&mut kb, "dad");
+    assert_eq!(kb.buffer(), "đa");
+    kb.toggle_composition().expect("toggle acts");
+    assert_eq!(kb.buffer(), "dad");
+
+    let actions = kb.process('s').expect("process must not error");
+    assert_eq!(
+        composition_text(&actions).as_deref(),
+        Some("dads"),
+        "continued typing stays literal while the word is frozen"
+    );
+}
+
+#[test]
+fn toggle_composition_literal_survives_the_commit() {
+    // The text that actually reaches the application must be the literal form
+    // — otherwise the toggle is cosmetic and the composed word commits anyway.
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    type_str(&mut kb, "dads");
+    kb.toggle_composition().expect("toggle acts");
+
+    let actions = kb.process(' ').expect("process must not error");
+    let confirmed = actions.iter().find_map(|a| match a {
+        buttre_core::Action::ConfirmComposition(t) => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        confirmed.as_deref(),
+        Some("dads"),
+        "the committed text is the literal form the user chose"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, buttre_core::Action::Commit(t) if t == " ")),
+        "the separator itself must still be committed (issue #4)"
+    );
+}
+
+#[test]
+fn toggle_composition_freeze_ends_with_the_word() {
+    // The next word composes normally — the freeze is scoped to one word.
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    type_str(&mut kb, "dads");
+    kb.toggle_composition().expect("toggle acts");
+    type_str(&mut kb, " ");
+
+    type_str(&mut kb, "dads");
+    assert_eq!(
+        kb.buffer(),
+        "đá",
+        "a new word after the toggled one is composed again"
+    );
+}
+
+#[test]
+fn toggle_composition_noop_without_an_open_composition() {
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    assert!(
+        kb.toggle_composition().is_none(),
+        "nothing typed yet — nothing to toggle"
+    );
+}
+
+#[test]
+fn toggle_composition_noop_on_the_multiword_backend() {
+    // The two toggles are mutually exclusive by backend: multiword has
+    // `toggle_last_word`, which owns the raw window this one cannot see.
+    let mut kb = KeyboardBuilder::telex().expect("telex keyboard");
+    type_str(&mut kb, "dads");
+    assert!(kb.toggle_composition().is_none());
+    assert_eq!(kb.buffer(), "đá", "and the display is left untouched");
+}
+
+#[test]
 fn toggle_closes_the_word_so_continued_typing_starts_a_new_one() {
     // critical row: toggle → keep typing → literal projection persists for
     // that word; a NEW word composes independently (word-freezing per the

@@ -1,523 +1,218 @@
-//! Candidate UI for Windows TSF
+//! Nôm candidate panel for the Windows TSF text service.
 //!
-//! **Tests**: Integration tests for this module are located in `crates/buttre-platform/tests/platform_windows_tsf_tests.rs`.
+//! **Tests**: `crates/buttre-platform/tests/platform_windows_tsf_tests.rs`.
 //!
-//! Implementation of ITfCandidateListUIElement for displaying
-//! Nôm character candidates.
+//! A borderless top-most window that lists the candidates for the open
+//! composition. It is a PURE RENDERER: it never receives a keystroke.
+//!
+//! That is deliberate, not a gap. The window is `WS_EX_NOACTIVATE`, so it never
+//! takes focus and Windows never routes a key to it; every key still arrives at
+//! `ITfKeyEventSink::OnKeyDown` in `text_service_stub.rs`, which owns selection
+//! and navigation. Giving this window a `WM_KEYDOWN` handler would create a
+//! second, unreachable copy of that logic — a previous version had exactly that
+//! and it had never run.
+//!
+//! Selection state lives in `VietnameseEngine`'s `CandidateState`, shared with
+//! every other backend (`shared::candidates`); this file only turns it into
+//! pixels.
 
-use std::cell::{Cell, RefCell};
-use windows::core::*;
-use windows::Win32::Foundation::*;
+use std::cell::RefCell;
+use windows::core::{Result, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::TextServices::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Candidate UI Element for Nôm characters
-#[implement(ITfUIElement, ITfCandidateListUIElement)]
-pub struct NomCandidateUI {
-    /// List of candidates to display
-    candidates: Vec<CandidateItem>,
+use super::candidate_render::{self, PanelContent};
+use crate::shared::candidates::CandidateState;
 
-    /// Currently selected index - uses Cell for interior mutability
-    selected_index: Cell<usize>,
+/// Candidates shown at once — the digits 1..=9 that select them.
+pub const PAGE_SIZE: usize = 9;
 
-    /// Page size (how many candidates to show at once)
-    page_size: usize,
+const CLASS_NAME: PCWSTR = windows::core::w!("buttreNomCandidatePanel");
 
-    /// Current page index - uses Cell for interior mutability
-    current_page: Cell<usize>,
-
-    /// Window handle (for Win32 window) - uses RefCell for interior mutability
-    hwnd: RefCell<Option<HWND>>,
-
-    /// Visibility state - uses Cell for interior mutability
-    is_shown: Cell<bool>,
-
-    /// Callback for when a candidate is selected (character, reading)
-    #[allow(clippy::type_complexity)]
-    on_select: RefCell<Option<Box<dyn Fn(char, &str)>>>,
+/// Everything `WM_PAINT` needs, in one allocation the window procedure can
+/// reach through `GWLP_USERDATA`. The font belongs here rather than in
+/// `CandidatePanel` because the procedure has no other way to get it — asking
+/// the DC would return the system default and every Nôm glyph would be a box.
+struct PanelShared {
+    content: RefCell<PanelContent>,
+    font: HFONT,
 }
 
-/// Single candidate item
-#[derive(Clone)]
-pub struct CandidateItem {
-    /// The Nôm character
-    pub character: char,
-
-    /// Phonetic reading (for display)
-    pub reading: String,
-
-    /// Meaning/definition (optional)
-    pub meaning: Option<String>,
-
-    /// Frequency/rank (for sorting)
-    pub frequency: u32,
+/// The candidate window plus the content it draws.
+///
+/// `shared` is boxed so its address is stable: the window procedure holds a raw
+/// pointer to it, which must stay valid even if the `CandidatePanel` itself is
+/// moved into another owner.
+pub struct CandidatePanel {
+    hwnd: HWND,
+    shared: Box<PanelShared>,
 }
 
-impl Drop for NomCandidateUI {
-    fn drop(&mut self) {
-        // Destroy the Win32 window before the NomCandidateUI memory is freed.
-        // This prevents window_proc from dereferencing GWLP_USERDATA after the backing struct is gone.
-        let _ = self.destroy_window();
-    }
-}
+impl CandidatePanel {
+    /// Create the panel hidden. Fails only if the window cannot be created,
+    /// in which case the caller runs without a panel rather than without an IME.
+    pub fn new() -> Result<Self> {
+        register_class();
 
-impl NomCandidateUI {
-    /// Create new candidate UI
-    pub fn new(candidates: Vec<CandidateItem>) -> Self {
-        Self {
-            candidates,
-            selected_index: Cell::new(0),
-            page_size: 9, // Show 9 candidates (1-9 keys)
-            current_page: Cell::new(0),
-            hwnd: RefCell::new(None),
-            is_shown: Cell::new(false),
-            on_select: RefCell::new(None),
-        }
-    }
-
-    /// Get current page of candidates
-    pub fn current_page_candidates(&self) -> &[CandidateItem] {
-        let start = self.current_page.get() * self.page_size;
-        let end = (start + self.page_size).min(self.candidates.len());
-        &self.candidates[start..end]
-    }
-
-    /// Get total number of pages
-    pub fn page_count(&self) -> usize {
-        self.candidates.len().div_ceil(self.page_size)
-    }
-
-    /// Move to next page
-    pub fn next_page(&self) -> bool {
-        let current = self.current_page.get();
-        if current + 1 < self.page_count() {
-            self.current_page.set(current + 1);
-            self.selected_index
-                .set(self.current_page.get() * self.page_size);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Move to previous page
-    pub fn prev_page(&self) -> bool {
-        let current = self.current_page.get();
-        if current > 0 {
-            self.current_page.set(current - 1);
-            self.selected_index
-                .set(self.current_page.get() * self.page_size);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Select candidate by index (0-8 for current page)
-    pub fn select(&self, page_index: usize) -> Option<&CandidateItem> {
-        let global_index = self.current_page.get() * self.page_size + page_index;
-        if global_index < self.candidates.len() {
-            self.selected_index.set(global_index);
-            Some(&self.candidates[global_index])
-        } else {
-            None
-        }
-    }
-
-    /// Get selected candidate
-    pub fn selected(&self) -> Option<&CandidateItem> {
-        self.candidates.get(self.selected_index.get())
-    }
-
-    /// Set callback for when a candidate is selected
-    pub fn set_on_select<F>(&self, callback: F)
-    where
-        F: Fn(char, &str) + 'static,
-    {
-        *self.on_select.borrow_mut() = Some(Box::new(callback));
-    }
-
-    /// Trigger selection callback
-    fn trigger_selection(&self, candidate: &CandidateItem) {
-        if let Some(ref callback) = *self.on_select.borrow() {
-            callback(candidate.character, &candidate.reading);
-        }
-    }
-
-    /// Create and show candidate window
-    pub fn create_window(&self, x: i32, y: i32) -> Result<()> {
-        // SAFETY:
-        // 1. RegisterClassW is called once via std::sync::Once - thread-safe initialization
-        // 2. WNDCLASSW is properly initialized with valid function pointer and strings
-        // 3. CreateWindowExW creates a native Windows window with valid parameters
-        // 4. w!() macro creates valid null-terminated wide strings
-        // 5. SetWindowLongPtrW stores pointer to self - valid as long as window exists
-        // 6. ShowWindow and UpdateWindow are standard Win32 APIs - safe to call
-        // 7. Window is destroyed before self is dropped (in destroy_window)
-        unsafe {
-            // Register window class (one-time)
-            use std::sync::Once;
-            static REGISTER: Once = Once::new();
-
-            REGISTER.call_once(|| {
-                let wc = WNDCLASSW {
-                    lpfnWndProc: Some(window_proc),
-                    lpszClassName: w!("buttreNomCandidate"),
-                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                    hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _),
-                    ..Default::default()
-                };
-                let _ = RegisterClassW(&wc);
-            });
-
-            // Create window
-            let hwnd = CreateWindowExW(
+        // SAFETY: the class was just registered; all parameters are constants
+        // or null. WS_EX_NOACTIVATE keeps focus in the host application, which
+        // is what lets the user keep typing while the panel is up.
+        let hwnd = unsafe {
+            CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-                w!("buttreNomCandidate"),
-                w!(""),
+                CLASS_NAME,
+                windows::core::w!(""),
                 WS_POPUP | WS_BORDER,
-                x,
-                y,
-                400,
-                250, // Position and size
+                0,
+                0,
+                0,
+                0,
                 None,
                 None,
                 None,
                 None,
-            )?;
-
-            // Store window handle
-            *self.hwnd.borrow_mut() = Some(hwnd);
-
-            // Store pointer to self in window user data for window procedure access
-            let ui_ptr = self as *const NomCandidateUI as isize;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ui_ptr);
-
-            // Show window
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = UpdateWindow(hwnd);
-            self.is_shown.set(true);
-
-            Ok(())
-        }
-    }
-
-    /// Hide and destroy window
-    pub fn destroy_window(&self) -> Result<()> {
-        if let Some(hwnd) = *self.hwnd.borrow() {
-            // SAFETY:
-            // 1. hwnd is a valid HWND from CreateWindowExW
-            // 2. Clearing GWLP_USERDATA BEFORE DestroyWindow ensures that any
-            //    WM_PAINT / WM_ERASEBKGND messages pumped synchronously during
-            //    DestroyWindow see a null pointer and skip dereferencing self.
-            //    (WM_NCDESTROY also clears it, but only arrives late in destruction.)
-            // 3. DestroyWindow is a standard Win32 API
-            // 4. After DestroyWindow we set hwnd to None (no double-destroy)
-            unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                DestroyWindow(hwnd)?;
-            }
-            *self.hwnd.borrow_mut() = None;
-            self.is_shown.set(false);
-        }
-        Ok(())
-    }
-}
-
-#[allow(non_snake_case)]
-impl ITfUIElement_Impl for NomCandidateUI_Impl {
-    fn GetDescription(&self) -> Result<BSTR> {
-        Ok(BSTR::from("buttre Nôm Candidate Window"))
-    }
-
-    fn GetGUID(&self) -> Result<windows::core::GUID> {
-        // Return a unique GUID for this UI element
-        // Generated GUID: {A5B3C4D5-E6F7-8901-2345-6789ABCDEF01}
-        Ok(windows::core::GUID::from_values(
-            0xA5B3C4D5,
-            0xE6F7,
-            0x8901,
-            [0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01],
-        ))
-    }
-
-    fn Show(&self, bshow: BOOL) -> Result<()> {
-        // Update visibility state using Cell
-        self.is_shown.set(bshow.as_bool());
-
-        // If we have a window handle, show/hide it
-        if let Some(hwnd) = *self.hwnd.borrow() {
-            // SAFETY:
-            // 1. hwnd is a valid HWND from CreateWindowExW
-            // 2. ShowWindow is a standard Win32 API - safe to call
-            // 3. SW_SHOW and SW_HIDE are valid window show commands
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
-                let _ = ShowWindow(hwnd, if bshow.as_bool() { SW_SHOW } else { SW_HIDE });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn IsShown(&self) -> Result<BOOL> {
-        // Return visibility state using Cell
-        Ok(BOOL::from(self.is_shown.get()))
-    }
-}
-
-#[allow(non_snake_case)]
-impl ITfCandidateListUIElement_Impl for NomCandidateUI_Impl {
-    fn GetUpdatedFlags(&self) -> Result<u32> {
-        // Return flags indicating what has changed
-        Ok(TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION)
-    }
-
-    fn GetDocumentMgr(&self) -> Result<ITfDocumentMgr> {
-        // TODO: Return the document manager
-        Err(E_NOTIMPL.into())
-    }
-
-    fn GetCount(&self) -> Result<u32> {
-        Ok(self.candidates.len() as u32)
-    }
-
-    fn GetSelection(&self) -> Result<u32> {
-        Ok(self.selected_index.get() as u32)
-    }
-
-    fn GetString(&self, index: u32) -> Result<BSTR> {
-        let candidate = self.candidates.get(index as usize).ok_or(E_INVALIDARG)?;
-
-        // Format: "1. 𡦂 (người) - person"
-        let display = if let Some(ref meaning) = candidate.meaning {
-            format!(
-                "{}. {} ({}) - {}",
-                (index % self.page_size as u32) + 1,
-                candidate.character,
-                candidate.reading,
-                meaning
-            )
-        } else {
-            format!(
-                "{}. {} ({})",
-                (index % self.page_size as u32) + 1,
-                candidate.character,
-                candidate.reading
-            )
+            )?
         };
 
-        Ok(BSTR::from(display))
-    }
-
-    // Signature is fixed by the windows-rs-generated
-    // `ITfCandidateListUIElement_Impl` trait (COM vtable contract) — cannot
-    // be `unsafe fn`. Raw pointer writes are scoped to an inner `unsafe`
-    // block below.
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    fn GetPageIndex(&self, _pindex: *mut u32, _usize: u32, _pupagecnt: *mut u32) -> Result<()> {
-        // SAFETY:
-        // 1. _pindex and _pupagecnt pointers are provided by COM caller
-        // 2. We check for null before dereferencing
-        // 3. Writing u32 values to these pointers is safe
-        // 4. current_page and page_count are valid values within bounds
+        let shared = Box::new(PanelShared {
+            content: RefCell::new(PanelContent::default()),
+            font: candidate_render::create_font(),
+        });
+        // SAFETY: hwnd is valid; the pointer stored here is owned by `shared`,
+        // which outlives the window (Drop destroys the window first).
         unsafe {
-            if !_pindex.is_null() {
-                *_pindex = self.current_page.get() as u32;
-            }
-            if !_pupagecnt.is_null() {
-                *_pupagecnt = self.page_count() as u32;
-            }
+            SetWindowLongPtrW(
+                hwnd,
+                GWLP_USERDATA,
+                shared.as_ref() as *const PanelShared as isize,
+            );
         }
-        Ok(())
+
+        Ok(Self { hwnd, shared })
     }
 
-    fn SetPageIndex(&self, _pindex: *const u32, _upagecnt: u32) -> Result<()> {
-        // TODO: Implement page navigation
-        Ok(())
+    /// Show `state`'s current page at screen position `(x, y)`, resizing to fit.
+    ///
+    /// `y` should already be the BOTTOM of the caret so the panel sits under the
+    /// text rather than over it.
+    pub fn show(&self, state: &CandidateState, x: i32, y: i32) {
+        if state.is_empty() {
+            self.hide();
+            return;
+        }
+
+        let page_start = state.page_start(PAGE_SIZE);
+        let page_count = state.page_count(PAGE_SIZE);
+        let content = PanelContent {
+            lines: state
+                .page_items(PAGE_SIZE)
+                .iter()
+                .enumerate()
+                .map(|(i, item)| format!("{}. {}", i + 1, item.display))
+                .collect(),
+            highlight: state.cursor() - page_start,
+            footer: (page_count > 1)
+                .then(|| format!("Trang {} / {}", state.cursor() / PAGE_SIZE + 1, page_count)),
+        };
+
+        let size = candidate_render::measure(self.hwnd, self.shared.font, &content);
+        *self.shared.content.borrow_mut() = content;
+
+        // SAFETY: hwnd is this panel's own window, valid until Drop.
+        // SWP_NOACTIVATE keeps the host application's focus intact.
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                size.cx,
+                size.cy,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = InvalidateRect(Some(self.hwnd), None, true);
+            let _ = UpdateWindow(self.hwnd);
+        }
     }
 
-    fn GetCurrentPage(&self) -> Result<u32> {
-        Ok(self.current_page.get() as u32)
+    pub fn hide(&self) {
+        // SAFETY: hwnd is valid until Drop.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
     }
 }
 
-/// Window procedure for candidate window
-// SAFETY:
-// 1. This is a Windows window procedure - must use extern "system" calling convention
-// 2. Called by Windows OS with valid hwnd and parameters
-// 3. All Win32 GDI/window functions are properly declared in windows crate
-// 4. ui_ptr retrieved from GWLP_USERDATA is valid as long as window exists
-// 5. Must return LRESULT per Windows window procedure protocol
+impl Drop for CandidatePanel {
+    fn drop(&mut self) {
+        // SAFETY: clear GWLP_USERDATA BEFORE destroying the window so any
+        // message pumped synchronously during DestroyWindow (WM_PAINT,
+        // WM_ERASEBKGND) sees null and skips the content pointer — which is
+        // about to be freed with `self`.
+        unsafe {
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+            let _ = DestroyWindow(self.hwnd);
+            // Harmless on the stock fallback font: DeleteObject refuses stock
+            // objects rather than corrupting them.
+            let _ = DeleteObject(self.shared.font.into());
+        }
+    }
+}
+
+fn register_class() {
+    use std::sync::Once;
+    static REGISTER: Once = Once::new();
+
+    REGISTER.call_once(|| {
+        let class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(window_proc),
+            lpszClassName: CLASS_NAME,
+            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _),
+            ..Default::default()
+        };
+        // SAFETY: `class` is fully initialised and CLASS_NAME is a static
+        // null-terminated wide string. A duplicate registration would only be
+        // possible if `Once` ran twice.
+        unsafe {
+            RegisterClassW(&class);
+        }
+    });
+}
+
+/// # Safety
+/// Called by Windows with valid message parameters. A panic crossing this FFI
+/// boundary is undefined behaviour, so painting is wrapped in `catch_unwind` —
+/// the host process must survive a bug in our renderer.
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // A panic crossing the FFI boundary is undefined behaviour. Catch it and
-    // fall through to DefWindowProcW so the host process remains stable.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: same guarantees as window_proc — hwnd/msg/wparam/lparam are valid
-        // Win32 parameters provided by the OS.
-        unsafe { window_proc_inner(hwnd, msg, wparam, lparam) }
+    if msg != WM_PAINT {
+        // SAFETY: parameters come straight from the OS.
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
+
+    let mut ps = PAINTSTRUCT::default();
+    // SAFETY: hwnd is valid; EndPaint below balances this call on every path.
+    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: GWLP_USERDATA holds the pointer stored by
+        // `CandidatePanel::new`, and Drop zeroes it before destroying the
+        // window, so a non-zero value here is a live `PanelShared`.
+        let shared_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+        if shared_ptr == 0 {
+            return;
+        }
+        let shared = unsafe { &*(shared_ptr as *const PanelShared) };
+        candidate_render::paint(hwnd, hdc, shared.font, &shared.content.borrow());
     }));
-    match result {
-        Ok(v) => v,
-        Err(_) => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-    }
-}
 
-unsafe fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            // SAFETY: BeginPaint is safe because hwnd is valid from CreateWindowExW
-            let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-
-            // Get UI pointer from window user data
-            // SAFETY: GetWindowLongPtrW is safe because hwnd is valid
-            let ui_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
-
-            if ui_ptr != 0 {
-                // SAFETY: ui_ptr was stored in GWLP_USERDATA by create_window, valid during window lifetime
-                let ui = unsafe { &*(ui_ptr as *const NomCandidateUI) };
-
-                // Use system default GUI font
-                // SAFETY: GetStockObject is safe with DEFAULT_GUI_FONT constant
-                let stock_font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
-                // SAFETY: SelectObject is safe with valid hdc and stock object
-                let old_font = unsafe { SelectObject(hdc, stock_font) };
-
-                // Draw background
-                let rect = RECT {
-                    left: 0,
-                    top: 0,
-                    right: 400,
-                    bottom: 250,
-                };
-                // SAFETY: FillRect is safe with valid hdc, rect reference, and brush handle
-                unsafe { FillRect(hdc, &rect, HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _)) };
-
-                // Draw candidates
-                let candidates = ui.current_page_candidates();
-                let mut y = 10;
-
-                for (i, candidate) in candidates.iter().enumerate() {
-                    // Highlight selected
-                    let global_index = ui.current_page.get() * ui.page_size + i;
-                    if global_index == ui.selected_index.get() {
-                        // SAFETY: SetBkColor is safe with valid hdc and color value
-                        unsafe { SetBkColor(hdc, COLORREF(0x00FFE4B5)) }; // Light orange
-                                                                          // SAFETY: SetTextColor is safe with valid hdc and color value
-                        unsafe { SetTextColor(hdc, COLORREF(0x00000000)) }; // Black
-                    } else {
-                        // SAFETY: SetBkColor is safe with valid hdc and color value
-                        unsafe { SetBkColor(hdc, COLORREF(0x00FFFFFF)) }; // White
-                                                                          // SAFETY: SetTextColor is safe with valid hdc and color value
-                        unsafe { SetTextColor(hdc, COLORREF(0x00000000)) }; // Black
-                    }
-
-                    // Format text: "1. 𠊛 (người) - person"
-                    let text = if let Some(ref meaning) = candidate.meaning {
-                        format!(
-                            "{}. {} ({}) - {}",
-                            i + 1,
-                            candidate.character,
-                            candidate.reading,
-                            meaning
-                        )
-                    } else {
-                        format!("{}. {} ({})", i + 1, candidate.character, candidate.reading)
-                    };
-
-                    // Draw text
-                    let text_utf16: Vec<u16> = text.encode_utf16().collect();
-                    // SAFETY: TextOutW is safe with valid hdc, coordinates, and UTF-16 text buffer
-                    let _ = unsafe { TextOutW(hdc, 10, y, &text_utf16) };
-
-                    y += 25;
-                }
-
-                // Draw page info at bottom
-                if ui.page_count() > 1 {
-                    let page_info =
-                        format!("Trang {} / {}", ui.current_page.get() + 1, ui.page_count());
-                    let page_utf16: Vec<u16> = page_info.encode_utf16().collect();
-                    // SAFETY: SetTextColor is safe with valid hdc and color value
-                    unsafe { SetTextColor(hdc, COLORREF(0x00808080)) }; // Gray
-                                                                        // SAFETY: TextOutW is safe with valid hdc, coordinates, and UTF-16 text buffer
-                    let _ = unsafe { TextOutW(hdc, 10, 220, &page_utf16) };
-                }
-
-                // Cleanup
-                // SAFETY: SelectObject is safe with valid hdc and previous font object
-                unsafe { SelectObject(hdc, old_font) };
-                // No DeleteObject needed for stock objects
-            }
-
-            // SAFETY: EndPaint is safe and must be called after BeginPaint
-            let _ = unsafe { EndPaint(hwnd, &ps) };
-            LRESULT(0)
-        }
-        WM_KEYDOWN => {
-            let vk = wparam.0 as u32;
-            // SAFETY: GetWindowLongPtrW is safe because hwnd is valid
-            let ui_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
-
-            if ui_ptr != 0 {
-                // SAFETY: ui_ptr was stored in GWLP_USERDATA by create_window, valid during window lifetime
-                let ui = unsafe { &*(ui_ptr as *const NomCandidateUI) };
-
-                match vk {
-                    // Number keys 1-9 for selection
-                    0x31..=0x39 => {
-                        // VK_1 to VK_9
-                        let index = (vk - 0x31) as usize;
-                        if let Some(candidate) = ui.select(index) {
-                            // Trigger callback to insert character
-                            ui.trigger_selection(candidate);
-
-                            // Close the window
-                            // SAFETY: DestroyWindow is safe because hwnd is valid
-                            let _ = unsafe { DestroyWindow(hwnd) };
-                        }
-                    }
-                    0x22 => {
-                        // VK_NEXT (PageDown)
-                        if ui.next_page() {
-                            // SAFETY: InvalidateRect is safe with valid hwnd
-                            let _ = unsafe { InvalidateRect(Some(hwnd), None, true) };
-                        }
-                    }
-                    0x21 => {
-                        // VK_PRIOR (PageUp)
-                        if ui.prev_page() {
-                            // SAFETY: InvalidateRect is safe with valid hwnd
-                            let _ = unsafe { InvalidateRect(Some(hwnd), None, true) };
-                        }
-                    }
-                    0x1B => {
-                        // VK_ESCAPE
-                        // SAFETY: DestroyWindow is safe because hwnd is valid
-                        let _ = unsafe { DestroyWindow(hwnd) };
-                    }
-                    _ => {}
-                }
-            }
-
-            LRESULT(0)
-        }
-        WM_DESTROY => LRESULT(0),
-        WM_NCDESTROY => {
-            // Zero GWLP_USERDATA so any late-arriving messages see a null pointer.
-            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
-            LRESULT(0)
-        }
-        _ => {
-            // SAFETY: DefWindowProcW is safe with valid hwnd and message parameters
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-    }
+    // SAFETY: balances BeginPaint above.
+    let _ = unsafe { EndPaint(hwnd, &ps) };
+    LRESULT(0)
 }

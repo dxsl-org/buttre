@@ -7,11 +7,36 @@ use tracing::debug;
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_BACK, VK_LEFT, VK_LSHIFT, VK_SHIFT,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_BACK, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT,
+    VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 
 /// Extra info flag to identify our own injected keys
 pub const BUTTRE_INJECTED: usize = 0x564B4559; // "VKEY" in hex
+
+/// Modifier keys that turn an injected keystroke into an application shortcut.
+/// Both the left and right variant of each is listed: either one alone is
+/// enough to change how an injected keystroke is interpreted.
+#[cfg(windows)]
+const SHORTCUT_MODIFIER_VKS: [u16; 8] = [
+    VK_LCONTROL,
+    VK_RCONTROL,
+    VK_LSHIFT,
+    VK_RSHIFT,
+    VK_LMENU,
+    VK_RMENU,
+    VK_LWIN,
+    VK_RWIN,
+];
+
+/// True when `vk` is down according to the async (physical) key state.
+#[cfg(windows)]
+fn is_physically_down(vk: u16) -> bool {
+    // SAFETY: GetAsyncKeyState takes a plain VK code and cannot fail; the high
+    // bit of the result indicates the key is currently down.
+    let state = unsafe { GetAsyncKeyState(vk as i32) };
+    state as u16 & 0x8000 != 0
+}
 
 /// Send backspace keys (optimized with batching)
 #[cfg(windows)]
@@ -166,7 +191,11 @@ pub fn send_replacement(backspace_count: usize, text: &str) {
 /// Modifier note: transforms only ever fire on plain character keystrokes
 /// (Ctrl/Alt chords never reach the engine as text), so injecting an
 /// LSHIFT-down/LEFT/LSHIFT-up sandwich cannot compose with a held Ctrl/Alt
-/// into a word-selection chord. When Shift is ALREADY physically held (e.g.
+/// into a word-selection chord. The ONE caller for which that does not hold —
+/// the `Ctrl+Shift+Z` word toggle — never reaches this function at all: it goes
+/// through [`send_replacement_under_held_modifiers`], which uses the plain
+/// payload precisely because the `shift_already_held` probe below cannot see
+/// its own pending release. When Shift is ALREADY physically held (e.g.
 /// typing an all-caps word), the synthetic down/up is skipped — pressing it
 /// anyway would still select correctly, but the synthetic keyup would lift
 /// Shift out from under the user's still-held key, un-capitalizing whatever
@@ -276,43 +305,26 @@ fn send_replacement_plain(backspace_count: usize, text: &str) {
         backspace_count, text
     );
 
-    // Calculate total capacity needed
+    let mut inputs = build_plain_replacement(backspace_count, text);
+    send_batch(&mut inputs, "batch");
+}
+
+/// N backspaces + text as INPUT events, no `SendInput` call.
+///
+/// Split from [`send_replacement_plain`] so the word-toggle path can wrap the
+/// same payload in a modifier release/restore pair INSIDE ONE BATCH — see
+/// [`send_replacement_under_held_modifiers`].
+#[cfg(windows)]
+fn build_plain_replacement(backspace_count: usize, text: &str) -> Vec<INPUT> {
     let char_count = text.chars().count();
-    // 2 inputs per backspace (down/up), 2 inputs per char (down/up) + extras for surrogates
-    let capacity = (backspace_count * 2) + (char_count * 2);
+    // 2 inputs per backspace (down/up), 2 per char (down/up) + surrogate extras
+    let mut inputs = Vec::with_capacity((backspace_count * 2) + (char_count * 2));
 
-    let mut inputs = Vec::with_capacity(capacity);
-
-    // 1. Add Backspaces
     for _ in 0..backspace_count {
-        inputs.push(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_BACK,
-                    wScan: 0,
-                    dwFlags: 0,
-                    time: 0,
-                    dwExtraInfo: BUTTRE_INJECTED,
-                },
-            },
-        });
-
-        inputs.push(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_BACK,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: BUTTRE_INJECTED,
-                },
-            },
-        });
+        inputs.push(key_input(VK_BACK, 0));
+        inputs.push(key_input(VK_BACK, KEYEVENTF_KEYUP));
     }
 
-    // 2. Add Text
     for ch in text.chars() {
         let code = ch as u32;
         if code > 0xFFFF {
@@ -325,35 +337,142 @@ fn send_replacement_plain(backspace_count: usize, text: &str) {
             add_unicode_inputs(&mut inputs, code as u16);
         }
     }
+    inputs
+}
 
-    // 3. Send all at once
-    if !inputs.is_empty() {
-        // SAFETY:
-        // 1. inputs contains both backspace and unicode key events in single batch
-        // 2. as_mut_ptr() returns valid pointer, validated non-empty above
-        // 3. expected count matches Vec length
-        // 4. size_of::<INPUT>() is correct for SendInput
-        // 5. SendInput is properly declared in windows_sys
-        // 6. Batching improves performance and timing consistency
-        // 7. All INPUT structs properly initialized with correct flags
-        unsafe {
-            let expected = inputs.len() as u32;
-            let sent = SendInput(
-                expected,
-                inputs.as_mut_ptr(),
-                std::mem::size_of::<INPUT>() as i32,
-            );
+/// One keyboard INPUT event for `vk`, tagged so our own hook skips it.
+#[cfg(windows)]
+fn key_input(vk: u16, flags: u32) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: BUTTRE_INJECTED,
+            },
+        },
+    }
+}
 
-            if sent != expected {
-                tracing::error!(
-                    "SendInput batch failed: expected {}, sent {}",
-                    expected,
-                    sent
-                );
-            }
+/// Send one prepared batch, logging a short-write.
+#[cfg(windows)]
+fn send_batch(inputs: &mut [INPUT], what: &str) {
+    if inputs.is_empty() {
+        return;
+    }
+    // SAFETY: `inputs` is a live slice of fully initialized INPUT structs; the
+    // count matches its length and the size argument matches the struct.
+    unsafe {
+        let expected = inputs.len() as u32;
+        let sent = SendInput(
+            expected,
+            inputs.as_mut_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        );
+        if sent != expected {
+            tracing::error!("SendInput {what} failed: expected {expected}, sent {sent}");
         }
     }
 }
+
+/// Replace text while the user is HOLDING a modifier chord — the word toggle's
+/// injection path (`Ctrl+Shift+Z`).
+///
+/// ## The problem
+///
+/// Injected input composes with whatever modifiers are actually down. Sent
+/// naively under a held chord, the application reads `Ctrl+Shift+Backspace`
+/// instead of `Backspace` — delete-previous-WORD in Word and VS Code, which
+/// silently ate text instead of replacing it — and the `KEYEVENTF_UNICODE`
+/// payload gets routed to accelerators rather than inserted.
+///
+/// ## Why one batch is what makes this safe
+///
+/// The release, the payload and the restore all go in a SINGLE `SendInput`
+/// call. Windows documents that the events of one call are never interspersed
+/// with other input — user keystrokes included — so no keyboard state can
+/// change mid-batch and the restore needs no state query at all. That matters
+/// because a query would be worthless here: `SendInput` UPDATES the async key
+/// state, so once we release Ctrl ourselves we can no longer tell whether the
+/// user is still holding it. An earlier attempt that released and restored in
+/// SEPARATE calls restored nothing for exactly that reason, leaving the system
+/// convinced the user had let go — the first press worked and every repeat of
+/// the chord was swallowed as a bare `z`.
+///
+/// ## Residual window
+///
+/// The modifier state is sampled a few microseconds before the batch is sent.
+/// A physical release inside that window would be followed by our restore,
+/// leaving that modifier down from the application's point of view until the
+/// user presses and releases it once. Pressing a chord and releasing it within
+/// microseconds is not humanly reachable, and the recovery is a single
+/// keypress.
+#[cfg(windows)]
+pub fn send_replacement_under_held_modifiers(backspace_count: usize, text: &str) {
+    if backspace_count == 0 && text.is_empty() {
+        return;
+    }
+    let held: Vec<u16> = SHORTCUT_MODIFIER_VKS
+        .into_iter()
+        .filter(|&vk| is_physically_down(vk))
+        .collect();
+    if held.is_empty() {
+        // Nothing to work around — take the ordinary path, which keeps the
+        // Chromium-omnibox selection variant available.
+        send_replacement(backspace_count, text);
+        return;
+    }
+
+    debug!(
+        "Replacement under {} held modifier(s): {} backspaces + {} char(s)",
+        held.len(),
+        backspace_count,
+        text.chars().count()
+    );
+
+    // Plain payload only: the omnibox selection variant probes the async Shift
+    // state to decide whether to synthesize its own Shift+Left, and inside this
+    // batch that probe would still see the user's Shift as down even though our
+    // prefix is about to lift it — it would then skip the sandwich and select
+    // nothing. Under-deleting by one in a Chromium omnibox while the toggle
+    // chord is held is the far smaller failure.
+    let mut inputs =
+        wrap_in_modifier_release(&held, build_plain_replacement(backspace_count, text));
+    send_batch(&mut inputs, "replacement under held modifiers");
+}
+
+/// Sandwich `payload` between a release and a re-press of `held`, as ONE event
+/// sequence.
+///
+/// The ordering IS the safety property (see
+/// [`send_replacement_under_held_modifiers`]): releases first so the payload is
+/// interpreted plainly, re-presses last and in the same batch so no state query
+/// is needed to restore them.
+#[cfg(windows)]
+fn wrap_in_modifier_release(held: &[u16], payload: Vec<INPUT>) -> Vec<INPUT> {
+    let mut inputs = Vec::with_capacity(held.len() * 2 + payload.len());
+    inputs.extend(held.iter().map(|&vk| key_input(vk, KEYEVENTF_KEYUP)));
+    inputs.extend(payload);
+    inputs.extend(held.iter().map(|&vk| key_input(vk, 0)));
+    inputs
+}
+
+/// Insert text while the user is holding a modifier chord. Same contract and
+/// rationale as [`send_replacement_under_held_modifiers`], for the commit-only
+/// shape of the toggle's output.
+#[cfg(windows)]
+pub fn send_string_under_held_modifiers(text: &str) {
+    send_replacement_under_held_modifiers(0, text);
+}
+
+#[cfg(not(windows))]
+pub fn send_replacement_under_held_modifiers(_backspace_count: usize, _text: &str) {}
+
+#[cfg(not(windows))]
+pub fn send_string_under_held_modifiers(_text: &str) {}
 
 #[cfg(not(windows))]
 pub fn send_string(_s: &str) {}
@@ -399,3 +518,87 @@ pub fn send_unicode_char(ch: char) {
 
 #[cfg(not(windows))]
 pub fn send_unicode_char(_ch: char) {}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// Every modifier that reinterprets an injected keystroke must be watched,
+    /// in both left and right form: Ctrl and Alt turn Backspace into
+    /// delete-WORD, Shift turns it into a selection extend, Win opens the
+    /// shell. Missing one means the word toggle would inject through it.
+    #[test]
+    fn watches_both_variants_of_every_shortcut_modifier() {
+        for vk in [
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_LSHIFT,
+            VK_RSHIFT,
+            VK_LMENU,
+            VK_RMENU,
+            VK_LWIN,
+            VK_RWIN,
+        ] {
+            assert!(
+                SHORTCUT_MODIFIER_VKS.contains(&vk),
+                "missing modifier {vk:#x}"
+            );
+        }
+    }
+
+    /// Deliberately NOT the generic `VK_CONTROL`/`VK_SHIFT`/`VK_MENU`: those
+    /// report either side, which is fine for a pure probe but would have made
+    /// the list ambiguous for anything that needs to know WHICH key is down.
+    #[test]
+    fn watch_list_has_no_duplicates() {
+        let mut seen = SHORTCUT_MODIFIER_VKS.to_vec();
+        seen.sort_unstable();
+        let len_before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), len_before);
+    }
+
+    /// `(wVk, is_keyup)` per event, for asserting batch shape.
+    fn shape(inputs: &[INPUT]) -> Vec<(u16, bool)> {
+        inputs
+            .iter()
+            .map(|i| {
+                // SAFETY: every INPUT built by this module is INPUT_KEYBOARD,
+                // so reading the `ki` arm of the union is the correct variant.
+                let ki = unsafe { i.Anonymous.ki };
+                (ki.wVk, ki.dwFlags & KEYEVENTF_KEYUP != 0)
+            })
+            .collect()
+    }
+
+    /// THE safety property: releases first, re-presses LAST AND IN THE SAME
+    /// batch. `SendInput` guarantees one call's events are never interspersed
+    /// with other input, which is what lets the restore skip any state query —
+    /// splitting this across two calls is what silently swallowed every repeat
+    /// of the chord (the restore read its own release and did nothing).
+    #[test]
+    fn modifier_wrap_releases_before_payload_and_restores_after() {
+        let held = [VK_LCONTROL, VK_LSHIFT];
+        let payload = vec![key_input(VK_BACK, 0), key_input(VK_BACK, KEYEVENTF_KEYUP)];
+        let batch = wrap_in_modifier_release(&held, payload);
+
+        assert_eq!(
+            shape(&batch),
+            vec![
+                (VK_LCONTROL, true), // release
+                (VK_LSHIFT, true),   // release
+                (VK_BACK, false),    // payload, now read as a plain Backspace
+                (VK_BACK, true),
+                (VK_LCONTROL, false), // restore, same batch
+                (VK_LSHIFT, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn modifier_wrap_with_nothing_held_is_the_payload_verbatim() {
+        let payload = vec![key_input(VK_BACK, 0)];
+        let batch = wrap_in_modifier_release(&[], payload);
+        assert_eq!(shape(&batch), vec![(VK_BACK, false)]);
+    }
+}

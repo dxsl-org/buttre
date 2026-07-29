@@ -39,16 +39,17 @@ pub extern "system" fn DllMain(
     const DLL_PROCESS_ATTACH: u32 = 1;
     const DLL_PROCESS_DETACH: u32 = 0;
 
-    // A panic crossing an FFI boundary is undefined behaviour. Catch and swallow
-    // any panic here so a bug in the logging path cannot crash the host process.
+    // Deliberately does almost nothing. `DllMain` runs under the loader lock,
+    // where creating directories, opening files or installing a global
+    // subscriber can deadlock the host application — and this DLL loads into
+    // EVERY application that uses TSF. Logging is initialized from
+    // `TextService::Activate` instead (see `logging::init_logging`), which
+    // runs as an ordinary COM call with no such constraint.
+    //
+    // A panic crossing an FFI boundary is undefined behaviour, so the little
+    // that happens here is still caught.
     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match fdw_reason {
-        DLL_PROCESS_ATTACH => {
-            init_logging();
-            log_debug("DLL_PROCESS_ATTACH - buttre TSF loaded");
-        }
-        DLL_PROCESS_DETACH => {
-            log_debug("DLL_PROCESS_DETACH - buttre TSF unloaded");
-        }
+        DLL_PROCESS_ATTACH | DLL_PROCESS_DETACH => {}
         _ => {}
     }));
 

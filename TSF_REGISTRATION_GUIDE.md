@@ -19,7 +19,7 @@
 2. **Chạy script đăng ký:**
    ```powershell
    cd C:\Users\Admin\Download\buttre
-   .\register-tsf.ps1
+   .\scripts\build-tsf.ps1 -Install
    ```
 
 3. **Kiểm tra kết quả:**
@@ -131,7 +131,7 @@ Cài đặt [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.
 ```powershell
 # PowerShell as Administrator
 cd C:\Users\Admin\Download\buttre
-.\unregister-tsf.ps1
+.\scripts\build-tsf.ps1 -Uninstall
 ```
 
 Hoặc:

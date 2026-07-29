@@ -19,17 +19,12 @@ use buttre_core::{Action, Keyboard, KeyboardBuilder};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// One candidate offered for the current composition (Nôm lookup). Decoupled
-/// from the engine's `Candidate` so backends depend only on this bridge.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CandidateView {
-    /// Shown in the candidate UI — the character plus its gloss, e.g.
-    /// `"𡗶 (trời)"`.
-    pub display: String,
-    /// Committed when this candidate is chosen — the bare character, e.g.
-    /// `"𡗶"` (the engine `Candidate`'s `get_value()`).
-    pub value: String,
-}
+use crate::shared::candidates::CandidateState;
+
+/// Re-exported so existing backends keep importing it from here. The type
+/// itself lives in [`crate::shared::candidates`] because the Windows TSF text
+/// service needs the same candidate model without pulling in this bridge.
+pub use crate::shared::candidates::CandidateView;
 
 /// One IME-visible operation, in emission order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,15 +139,11 @@ pub struct EngineBridge {
     /// Last value pushed into the live `Keyboard` (see
     /// `VietnameseEngine::strict_applied` — same cheap-compare pattern).
     strict_applied: bool,
-    /// Candidates for the current composition (Nôm). Mirrors what the engine
-    /// last emitted via `Action::ShowCandidates`, so a backend can select one
-    /// by index ([`Self::select_candidate`]) without re-querying. Empty when no
-    /// candidate list is showing. Always empty for Telex/VNI.
-    candidates: Vec<CandidateView>,
-    /// Highlighted candidate — a global index into `candidates`, moved by the
-    /// cursor/page navigation methods. Meaningless (always 0) when `candidates`
-    /// is empty.
-    cursor: usize,
+    /// Candidates for the current composition (Nôm) plus the highlight.
+    /// Mirrors what the engine last emitted via `Action::ShowCandidates`, so a
+    /// backend can select one by index ([`Self::select_candidate`]) without
+    /// re-querying. Empty when no list is showing; always empty for Telex/VNI.
+    candidates: CandidateState,
     /// The current method id (`"telex"`/`"vni"`/`"nom"`), needed to rebuild the
     /// keyboard when [`Self::set_use_composition`] toggles the preedit model and
     /// to keep Nôm on composition regardless of that toggle.
@@ -187,8 +178,7 @@ impl EngineBridge {
             macros: None,
             strict_spelling: None,
             strict_applied: false,
-            candidates: Vec::new(),
-            cursor: 0,
+            candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
             passthrough: method == "english",
@@ -209,8 +199,7 @@ impl EngineBridge {
             macros: Some(macros),
             strict_spelling: None,
             strict_applied: false,
-            candidates: Vec::new(),
-            cursor: 0,
+            candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
             passthrough: method == "english",
@@ -226,8 +215,7 @@ impl EngineBridge {
             macros: None,
             strict_spelling: None,
             strict_applied: false,
-            candidates: Vec::new(),
-            cursor: 0,
+            candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
             passthrough: method == "english",
@@ -247,8 +235,7 @@ impl EngineBridge {
             macros: Some(macros),
             strict_spelling: None,
             strict_applied: false,
-            candidates: Vec::new(),
-            cursor: 0,
+            candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
             passthrough: method == "english",
@@ -285,21 +272,15 @@ impl EngineBridge {
     /// when one was actually showing — callers append it to their outcome so a
     /// reset/commit/method-switch never leaves a stale popup on screen.
     fn clear_candidates_op(&mut self) -> Option<ImeOp> {
-        if self.candidates.is_empty() {
-            None
-        } else {
-            self.candidates.clear();
-            self.cursor = 0;
-            Some(ImeOp::HideCandidates)
-        }
+        self.candidates.clear().then_some(ImeOp::HideCandidates)
     }
 
     /// The `Candidates` op for the current list + cursor. Callers only build it
     /// when `candidates` is non-empty (the variant is never emitted empty).
     fn candidates_op(&self) -> ImeOp {
         ImeOp::Candidates {
-            items: self.candidates.clone(),
-            cursor: self.cursor,
+            items: self.candidates.items().to_vec(),
+            cursor: self.candidates.cursor(),
         }
     }
 
@@ -457,15 +438,8 @@ impl EngineBridge {
                     // Nôm lookup hit: remember the list for index selection and
                     // hand the backend a view to render. A candidate list means
                     // the key was consumed into the composition.
-                    self.candidates = candidates
-                        .iter()
-                        .map(|c| CandidateView {
-                            display: c.text.clone(),
-                            value: c.get_value().to_string(),
-                        })
-                        .collect();
-                    // A fresh list starts highlighting the top candidate.
-                    self.cursor = 0;
+                    // `set` also puts the highlight back on the top candidate.
+                    self.candidates.set(CandidateView::from_engine(&candidates));
                     ops.push(self.candidates_op());
                     emitted = true;
                     candidates_refreshed = true;
@@ -691,31 +665,36 @@ impl EngineBridge {
     /// the list so the panel repaints (and re-pages if the cursor crossed a
     /// page boundary). No-op when nothing is showing.
     pub fn cursor_next(&mut self) -> KeyOutcome {
-        self.move_cursor(|cur, n| (cur + 1) % n)
+        self.candidates.move_next();
+        self.cursor_outcome()
     }
 
     /// Move the highlight to the previous candidate, wrapping at the start.
     pub fn cursor_prev(&mut self) -> KeyOutcome {
-        self.move_cursor(|cur, n| (cur + n - 1) % n)
+        self.candidates.move_prev();
+        self.cursor_outcome()
     }
 
     /// Advance the highlight by one `page` (clamped to the last candidate).
     pub fn cursor_page_down(&mut self, page: usize) -> KeyOutcome {
-        self.move_cursor(move |cur, n| (cur + page).min(n - 1))
+        self.candidates.page_down(page);
+        self.cursor_outcome()
     }
 
     /// Retreat the highlight by one `page` (clamped to the first candidate).
     pub fn cursor_page_up(&mut self, page: usize) -> KeyOutcome {
-        self.move_cursor(move |cur, _| cur.saturating_sub(page))
+        self.candidates.page_up(page);
+        self.cursor_outcome()
     }
 
-    /// Shared cursor mover: applies `f(current, len) -> new` and re-emits.
-    fn move_cursor(&mut self, f: impl FnOnce(usize, usize) -> usize) -> KeyOutcome {
-        let n = self.candidates.len();
-        if n == 0 {
+    /// Wrap a cursor move as an outcome. Re-emits the list whenever one is
+    /// showing, even if the cursor did not actually move (a clamped page jump
+    /// at the end): the user pressed a navigation key, so the key IS handled
+    /// and must not fall through to the application.
+    fn cursor_outcome(&self) -> KeyOutcome {
+        if self.candidates.is_empty() {
             return KeyOutcome::default();
         }
-        self.cursor = f(self.cursor, n).min(n - 1);
         KeyOutcome {
             ops: vec![self.candidates_op()],
             handled: true,
@@ -724,31 +703,35 @@ impl EngineBridge {
 
     /// Commit the highlighted candidate (Space/Enter, panel double-click).
     pub fn select_current(&mut self) -> KeyOutcome {
-        self.select_candidate(self.cursor)
+        let taken = self.candidates.take_current();
+        self.selection_outcome(taken)
     }
 
     /// Commit the candidate at position `page_index` (0-based) WITHIN the page
     /// currently holding the cursor — the mapping for number keys 1..=9 and the
     /// panel's `CandidateClicked` (both are page-relative). Out-of-range no-ops.
     pub fn select_at_page(&mut self, page_index: usize, page: usize) -> KeyOutcome {
-        let page_start = (self.cursor / page) * page;
-        self.select_candidate(page_start + page_index)
+        let taken = self.candidates.take_at_page(page_index, page);
+        self.selection_outcome(taken)
     }
 
-    /// Commit the candidate at global `index` and reset the composition — the
-    /// selection primitive the higher-level methods delegate to. Out-of-range
-    /// is a no-op (empty, unhandled outcome). Clears the preedit BEFORE
-    /// committing so the word is never momentarily doubled, then hides the
-    /// now-stale candidate list.
+    /// Commit the candidate at global `index` and reset the composition.
+    /// Out-of-range is a no-op (empty, unhandled outcome).
     pub fn select_candidate(&mut self, index: usize) -> KeyOutcome {
-        let Some(candidate) = self.candidates.get(index) else {
+        let taken = self.candidates.take_at(index);
+        self.selection_outcome(taken)
+    }
+
+    /// Finish a selection: reset the engine, clear the preedit BEFORE
+    /// committing so the word is never momentarily doubled, then hide the
+    /// now-stale list. `None` means nothing was selected — leave everything
+    /// alone and report unhandled.
+    fn selection_outcome(&mut self, value: Option<String>) -> KeyOutcome {
+        let Some(value) = value else {
             return KeyOutcome::default();
         };
-        let value = candidate.value.clone();
         self.keyboard.reset();
         self.preedit.clear();
-        self.candidates.clear();
-        self.cursor = 0;
         KeyOutcome {
             ops: vec![
                 ImeOp::Preedit(String::new()),

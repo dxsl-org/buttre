@@ -21,13 +21,12 @@
 //! ## Build & Installation
 //!
 //! ```bash
-//! # Build the DLL
-//! cargo build --package buttre-platform --lib --release
+//! # Build only (no admin):
+//! .\scripts\build-tsf.ps1
 //!
-//! # Output: target/release/buttre_platform.dll
-//!
-//! # Install (run as Administrator)
-//! .\install-tsf-auto.ps1
+//! # Install and register exactly the way the release MSI does
+//! # (Administrator):
+//! .\scripts\build-tsf.ps1 -Install
 //! ```
 //!
 //! ## Important Notes
@@ -50,7 +49,7 @@ pub mod com;
 pub mod factory; // Public for COM exports
 pub mod ipc;
 // Note: key_event_sink is integrated into text_service module
-mod lang_check;
+pub mod lang_check; // Public so `buttre --tsf-status` reports the same verdict
 pub mod logging;
 pub mod registration; // Public for COM exports
 mod text_ops;
@@ -78,11 +77,19 @@ impl TsfBackend {
         // Check 2: Ensure we can get DLL path (sanity check)
         get_dll_path()?;
 
-        // Check 3: Verify Vietnamese language is installed in Windows
-        // TSF only works if the user has added Vietnamese to their language list
-        // If not installed, we should fallback to Hook backend
-        if !lang_check::is_vietnamese_language_installed() {
-            anyhow::bail!("Vietnamese language not installed in Windows. TSF requires Vietnamese language to be added in Settings > Language & Region.");
+        // Check 3: the user must have ADDED buttre as an input method.
+        //
+        // Registration only makes it available in Windows' picker. Until it is
+        // selected there, no application ever activates the text service, so
+        // choosing this backend would leave the user unable to type at all —
+        // and choosing Hook while it IS selected means both layers run, with
+        // the hook winning because it sees keys first.
+        if !lang_check::is_buttre_text_service_enabled() {
+            anyhow::bail!(
+                "buttre is registered but not added as a Windows input method. \
+                 Add it under Settings > Time & language > Language & region > \
+                 (language) > Keyboards, then restart buttre."
+            );
         }
 
         Ok(Self { _keyboard: None })
