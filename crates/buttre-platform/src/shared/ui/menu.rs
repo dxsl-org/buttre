@@ -265,4 +265,3 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
 
     (menu, menu_items)
 }
-

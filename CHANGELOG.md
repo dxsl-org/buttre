@@ -4,63 +4,55 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
-- linux: tải custom keyboard từ `~/.local/share/buttre/keyboards/*.toml` vào menu IBus, support 3-surface sync (IBus panel ↔ tray ↔ config window) — parity với Windows; `EngineBridge::build_keyboard` load `keyboards/{id}.toml` thay vì fallback âm thầm sang Telex cho non-builtin id; constraint: tên file phải lowercase, `metadata.id` nên match filename stem, trên GNOME custom TOML thêm mid-session chỉ hiện menu sau engine restart (Shell nghe RegisterProperties một lần), `config.toml` và `-.toml` là tên reserved (collision menu-key)
-- linux: gõ được trên KDE Plasma Wayland — backend `zwp_input_method_v1` mới (KWin không hỗ trợ v2 như wlroots; xác minh Plasma 6): engine connect MỘT lần rồi thử v2 → v1 → IBus (socket đặc quyền `WAYLAND_SOCKET` do KWin cấp bị `connect_to_env` tiêu thụ nên không được connect lần hai). Phím không tiêu thụ re-inject qua `context.key` (KWin không có virtual-keyboard); gói .deb/.rpm kèm `buttre-ime.desktop` + hướng dẫn trỏ `kwinrc [Wayland] InputMethod`
-- linux: backend Wayland tôn trọng "gõ thẳng không preedit" (`use_preedit = false`) — chuyển `DeleteSurrounding` từ đơn vị ký tự sang byte qua shadow từ-đang-gõ; CHỈ bật khi app gửi `surrounding_text` KHÔNG rỗng (Konsole gửi event rỗng nhưng nuốt lệnh xóa — mỗi lần bỏ dấu bị nhân đôi chữ) và không phải terminal (`content_purpose=terminal` — Ptyxis/VTE gửi surrounding thật nhưng cũng nuốt xóa); terminal giữ preedit như IBus
-- linux: tray không chết ngầm trên KDE nữa — bỏ hẳn cửa sổ ẩn winit trên Linux (Plasma liệt kê nó thành entry ma trên taskbar và có thể đóng nó → tray thoát im lặng sau ~10 phút, icon zombie vẫn hiện); CloseRequested trên Linux được bỏ qua, tray chỉ thoát qua "Thoát"
-- linux: chọn "English" trên tray (hoặc Ctrl+Shift+Space) giờ TẮT bộ gõ thật sự trên IBus — "english" thành method hạng nhất trong Store B, engine chuyển sang chế độ passthrough (mọi phím đi thẳng tới ứng dụng, không ghép vần) theo mô hình Unikey: KHÔNG đụng vào input source của OS (trên GNOME, Shell sở hữu trạng thái source — đổi lén bị revert khi focus đổi; và nếu máy không có source English thì không có đích để chuyển). Menu IBus thêm radio "English" nên tắt/bật được từ cả 3 bề mặt, radio đồng bộ trọn vẹn. Bộ chuyển input source của OS (Super+Space) vẫn nguyên vẹn và độc lập; mirror `enabled` → tray nay stash lại kiểu gõ trước khi tự flip sang English để chuyến khứ hồi Super+Space không làm mất lựa chọn tiếng Việt của người dùng
-- linux: radio trên menu IBus của GNOME Shell giờ THỰC SỰ nhảy theo khi đổi kiểu gõ — GNOME Shell chỉ nghe `RegisterProperties` đúng MỘT LẦN cho mỗi lần kích hoạt engine (`ibusManager.js` disconnect handler ngay sau danh sách đầu tiên), nên mọi re-register về sau đều bị bỏ qua; engine nay phát thêm `UpdateProperty` cho từng radio (kênh GNOME Shell giữ mở vĩnh viễn) ở cả ba đường: switch từ tray/config (task nền), theo keystroke (`sync_method`), và click trên chính panel (`PropertyActivate` — trước đây dấu chấm cũng không nhảy khi click panel). Xác minh trên GNOME Shell 50.1 bằng dbus-monitor: signal cũ đến đủ, checked-state đúng, nhưng Shell không vẽ lại
-- linux: đổi kiểu gõ trên tray/cửa sổ Cấu hình giờ chuyển dấu chấm radio trên menu IBus (GNOME) NGAY LẬP TỨC, không cần gõ phím hay refocus — engine chạy một task nền phát lại `RegisterProperties` trên engine đang focus khi file `method` đổi (trước đây chỉ re-emit trong `sync_method` theo từng keystroke nên radio bị trơ)
-- linux: tray phản ánh trạng thái bật/tắt của bộ gõ theo bộ chuyển input source của HĐH — engine ghi `~/.config/buttre/enabled` khi nhận `Enable`/`Disable`; tray watch file này để hiện English/disabled khi chuyển sang bàn phím English và khôi phục kiểu gõ tiếng Việt (từ Store B) khi bật lại. Enable/disable vẫn do bộ chuyển của HĐH sở hữu; tray chỉ soi gương
+- windows: sửa Ctrl+Shift+Z không ăn trên backend Hook — nguyên nhân không phải xung đột phím tắt với app mà là phím do buttre tự inject bị chính modifier người dùng đang giữ biến thành shortcut. Hotkey được poll từ vòng lặp tray mỗi 50 ms nên khi inject diễn ra, Ctrl và Shift vẫn đang bị giữ vật lý; app nhận `Ctrl+Shift+Backspace` (xoá cả từ trước trong Word và VS Code, âm thầm mất chữ thay vì thay chữ) và phần Unicode bị đẩy sang accelerator thay vì chèn vào văn bản. Đây là đường inject duy nhất trong hook có modifier đang giữ. Cách sửa: gộp **nhả modifier + payload + nhấn lại** vào **một lần `SendInput` duy nhất**. Windows bảo đảm các event trong cùng một lần gọi không bị chen ngang bởi input khác (kể cả phím thật của người dùng), nên trạng thái bàn phím không thể đổi giữa batch và bước nhấn lại không cần đọc lại trạng thái phím — điều bắt buộc, vì `SendInput` cập nhật luôn async key state nên sau khi tự nhả Ctrl thì không còn cách nào biết người dùng còn giữ hay không. Tách nhả và nhấn lại thành hai lần gọi (thử rồi, đã bỏ) khiến bước nhấn lại đọc chính cái nhả của mình và không nhấn lại gì cả, để hệ thống tưởng người dùng đã thả tay và **mọi lần nhấn lặp lại của chord bị nuốt** (lần đầu ăn, lần hai thành `z` trơn). Đảo có tác dụng ngay lúc nhấn, không phải chờ thả phím. Đổi chord khác không giải quyết được, miễn là chord còn chứa Ctrl hoặc Alt
+
+- windows: Ctrl+Shift+Z (đảo từ vừa gõ giữa nguyên văn/bỏ dấu) chạy được trên backend TSF — trước đây chỉ nối vào backend Hook, mà Windows lại chạy TSF trước nên với hầu hết người dùng nút này không làm gì cả. Ba lớp chặn đều được mở: TSF không đăng ký hotkey toàn cục nữa (RegisterHotKey giữ phím lại, không cho tới app đang focus) mà tự bắt chord trong tiến trình app; `should_ignore` cho Ctrl+Shift+Z đi qua; và `Keyboard::toggle_composition` mới xử lý được chế độ composition vốn không có cửa sổ multiword. Đảo hai chiều, lặp được, giữ nguyên chữ hoa, và lựa chọn nguyên văn theo tới lúc chốt từ (nhấn dấu cách ra đúng phím thô, không phải dạng bỏ dấu). Phạm vi: chỉ từ đang gõ dở — từ đã chốt vào tài liệu thì ngoài tầm với. Khi không có gì để đảo, phím rơi xuống cho app xử lý nên Ctrl+Shift+Z "redo" của editor vẫn hoạt động
+
+- engine: bỏ dấu tự do (gõ hết chữ rồi mới bỏ dấu, kiểu Unikey) chạy được với nhóm từ `đ` âm tiết mở trong Telex — `dads`→`đá`, `did`→`đi`, `duadf`→`đùa`, `daodj`→`đạo`. Trước đây dấu `đ` chỉ nổ khi còn nguyên âm phía sau chữ `d` thứ hai, nên 20/44 từ `đ` thông dụng không gõ được theo thứ tự này (VNI không dính vì phím `đ` là chữ số 9). Đánh đổi: `dad`/`dads` giờ ra `đa`/`đá` — trùng nghĩa không tách được bằng từ điển, lối thoát là double-key undo như `reset`→`rết`; đo trên corpus 9.858 từ tiếng Anh chỉ thêm 4 từ cần escape, không từ nào mất khả năng gõ
+- engine: VNI bỏ dấu tự do không còn phụ thuộc thứ tự phím — dấu suy ra không liền kề chỉ cần hợp lệ về cấu trúc thay vì phải có trong từ điển 7.889 âm tiết (`dech91`→`đéch` như `d9ech1`). Phím chữ số không thể nằm trong từ tiếng Anh nên cổng từ vựng ở nhánh này không bảo vệ được gì, chỉ chặn nhầm tiếng lóng/tên riêng/phương ngữ
+- engine: gõ tắt `đt`/`đc`/`đhqg` với dấu `9` đặt cuối (`dt9`) không còn bị hoàn nguyên về phím thô khi nhấn dấu cách — chốt biên từ giờ miễn trừ dạng viết tắt `đ`, vốn không bao giờ có dấu thanh để thỏa điều kiện cũ
+- test: golden corpus thêm nhãn `FreeToneMarking` (+193 case mỗi kiểu gõ) và test bất biến "thứ tự phím không đổi kết quả"; bộ dữ liệu `buttre-test` thêm 353 case bỏ dấu tự do
+
+## [0.7.11-beta] — 2026-07-25
+
+- linux: tải custom keyboard
+- linux: gõ được trên Wayland/fcitx5
+- linux: đồng bộ kiểu gõ giữa tray/cửa sổ Cấu hình và radio trên menu IBus
+- linux: tùy chọn bật/tắt gạch chân với các app hỗ trợ
 
 ## [0.7.10-beta] — 2026-07-21
 
-- linux: sửa tray app crash ngay khi mở (`GTK has not been initialized. Call gtk::init first.`) — `main` dựng menu tray qua GTK (tray-icon/muda) nhưng chưa gọi `gtk::init()`; giờ init GTK trên thread sở hữu tray trước khi dựng menu và bơm GTK main loop trong vòng lặp winit (`AboutToWait`) để icon khay hiện và menu nhận được click. Đây là lỗi chặn toàn bộ việc chọn kiểu gõ/cấu hình trên Linux
-- linux: `buttre --version` và `buttre --help` in thông tin rồi thoát sạch — trước đây cờ lạ rơi vào đường khởi động tray và panic
-- linux: gói .deb/.rpm nay kèm icon engine tại `/usr/share/icons/hicolor/128x128/apps/buttre.png` khớp `<icon>buttre</icon>` trong component XML (trước đây bộ chọn input source chỉ hiện chữ); postinst/postrm refresh icon cache; `install-ibus.sh` cũng cài icon và tôn trọng `CARGO_TARGET_DIR`
-- linux: sửa version trong `installers/linux/buttre.xml` (0.6.3 → 0.7.9-beta) cho khớp phiên bản workspace
+- linux: sửa tray app crash ngay khi mở
 
 ## [0.7.9-beta] — 2026-07-20
 
-- engine: gõ tắt kiểu "đt"/"đc"/"đkkd" chạy được ngay không cần tự định nghĩa — cụm phụ âm không nguyên âm bắt đầu bằng "đ" (chỉ sinh ra được từ phím biến đổi chủ ý dd/d9) giữ nguyên dạng đã ghép thay vì rơi về phím thô; thêm tùy chọn "Kiểm soát gắt gao chính tả tiếng Việt" trong tab Chung để tắt độ lỏng này (mặc định lỏng kiểu Unikey), áp dụng ngay trên mọi backend (hook, TSF, IBus, Wayland)
-- scripts: `build-hook.ps1` build bản release theo mặc định — trước đây build debug (~32MB) khiến bản cài thực tế nặng gấp 5 lần bản release thật (~6.4MB); thêm cờ `-Debug` cho ai cần build nhanh để test, không dùng để cài
-- core: kéo dài thời hạn tự xóa từ-đã-học không dùng tới từ 180 ngày lên 365 ngày — người ít dùng buttre không còn mất hết thiết lập sau nửa năm; cập nhật lại hướng dẫn "tắt toàn bộ" trong learning.toml đã lỗi thời
+- engine: gõ tắt kiểu "đt"/"đc"/"đkkd" chạy được ngay không cần tự định nghĩa
 - windows: sửa TSF nuốt ký tự phân giới ở cuối composition (`xin.` ra `xin`, dấu `.` biến mất) — `VietnameseEngine::process_key` trước đây chỉ lấy action đầu tiên trong `Vec<Action>`, bỏ luôn `Commit(dấu phân giới)` đi kèm `ConfirmComposition`; giờ áp dụng đủ toàn bộ vector. Đồng thời vá race ẩn do fix này mở ra: `write_text` gộp các lần ghi liên tiếp qua `pending_edit` để tối ưu, nhưng nếu session ghi từ vừa xác nhận chưa kịp chạy thì lần ghi dấu phân giới kế tiếp sẽ ghi đè lên nó thay vì tạo session riêng — mất luôn cả từ. `end_composition` giờ luôn làm mới `pending_edit` trước khi trả về (đóng #4)
-- app: tab Giới thiệu trong cửa sổ Cấu hình có nội dung thật (phiên bản qua CARGO_PKG_VERSION, phím tắt, liên kết mở bằng trình duyệt mặc định) — thay MessageBox cũ đã xóa
-- docs: ADR-0002 — tray chỉ sở hữu chọn kiểu gõ, cửa sổ Cấu hình sở hữu mọi thứ còn lại
-- tray: gọn lại còn kiểu gõ + "Cấu hình…" + "Thoát" — Học thông minh/Tự động khởi động/Gõ tắt/Từ đã học/Quản lý gõ tắt/Hướng dẫn chuyển hết vào cửa sổ Cấu hình (mở qua "Cấu hình…", process riêng); xóa MessageBox hướng dẫn cũ
-- app: cửa sổ Cấu hình thêm tab "Từ đã học" (bảng xem/xóa âm tiết đã học, "Quên tất cả", vẫn giữ nút mở tệp gốc) và tab "Gõ tắt" (bảng thêm/sửa/xóa/bật-tắt macro, cảnh báo không chặn khi gõ tắt trùng một âm tiết tiếng Việt thật — điểm khác biệt so với mọi bộ gõ Việt khác)
-- app: thêm cửa sổ Cấu hình native (`buttre --config`, Slint) — tab Chung điều khiển kiểu gõ mặc định, tự động khởi động, chế độ xóa lùi, học thông minh, gõ tắt; lưu là áp dụng ngay cho tray đang chạy (không cần khởi động lại), kể cả khi tray tự đổi cùng lúc; single-instance; process riêng biệt (crash cửa sổ config không ảnh hưởng gõ chữ)
-- core: `Settings::save`/`LearningStore::write_atomic`/`MacroStore::write_atomic` giờ dùng tên file tạm duy nhất theo từng lần gọi (không chỉ theo PID) — tránh race giữa nhiều tiến trình (config window + tray) lẫn nhiều luồng chạy song song trong cùng tiến trình (test suite)
-- core: gộp logic autostart vào crate `buttre-autostart` dùng chung giữa tray và cửa sổ config
-- engine: thêm gõ tắt (macros.toml) — tự định nghĩa chuỗi gõ tắt (vd. vn → Việt Nam), chỉ nổ khi gõ đúng nguyên cả từ rồi sang dấu cách/dấu câu (không nổ giữa chừng, không nổ khi là một phần của từ khác); Ctrl+Shift+Z đảo về nguyên văn; cơ chế tách biệt hoàn toàn khỏi học cá nhân hóa (ADR-0001) — deterministic, tự tay định nghĩa, không suy luận
-- tray: thêm "Tùy chọn → Gõ tắt" bật/tắt gõ tắt ngay lập tức + menu "Quản lý gõ tắt" mở macros.toml để xem/tự sửa, tự nạp lại khi sửa tay
-- core: bất biến record-replay cho học cá nhân hóa (ADR-0001) — toggle literal trên raw dạng undo xóa pref cũ thay vì ghi pref không thể replay
-- test: guard hai-phiên chống lớp bug "học xong thì gõ khác đi" — gõ 10k từ Anh (double-key escape) + toàn bộ corpus telex qua 3 phiên chung learning store, output phải giống hệt, chạy trong CI
-- tray: thêm "Tùy chọn → Học thông minh" bật/tắt học cá nhân hóa ngay lập tức, không cần khởi động lại
-- tray: "Tự động khởi động" hoạt động thật — đăng ký/hủy autostart theo OS (Windows Run key, Linux XDG autostart), tự re-đăng ký khi exe đổi chỗ; bỏ mục placeholder tắt sẵn "Tự động sửa lỗi chính tả" (trái thiết kế leniency)
-- tray: thêm menu "Từ đã học" mở learning.toml để xem/tự sửa; file có hướng dẫn ngay đầu; sửa tay được nạp lại tự động khi buttre đang chạy
-- tool: `buttre-test explain <method> <raw> [--learning]` — chẩn đoán từng tầng (pref/overlay/undo/gate) vì sao một chuỗi phím ra kết quả đó, nạp được learning.toml thật của máy
-- docs: ADR-0001 học cá nhân hóa additive-only; hướng dẫn cập nhật hotkey Ctrl+Shift+Z và mục Học thông minh
-- engine: sửa "yes" không gõ được trên máy đã bật learning — bỏ tự ghi pref literal từ double-tap undo (cái user chấp nhận là kết quả undo "yes", nhưng pref replay raw nguyên văn "yess" nên chiếm vĩnh viễn lối thoát double-key); raw dạng undo giờ không bao giờ replay pref literal, learning.toml cũ tự trung hòa không cần migration
+- engine: thêm gõ tắt (macros.toml)
+- tray: thêm "Tùy chọn → Gõ tắt" bật/tắt gõ tắt ngay lập tức + menu "Quản lý gõ tắt" mở macros.toml để xem/tự sửa
+- core: bất biến record-replay cho học cá nhân hóa - toggle literal trên raw dạng undo xóa pref cũ thay vì ghi pref không thể replay
+- test: guard hai-phiên chống lớp bug "học xong thì gõ khác đi" — gõ 10k từ Anh (double-key escape) + toàn bộ corpus telex qua 3 phiên chung learning store, chạy trong CI
+- tray: thêm "Tùy chọn → Học thông minh" bật/tắt học cá nhân hóa ngay lập tức
+- tray: đăng ký/hủy autostart theo OS (Windows Run key, Linux XDG autostart)
+- tray: thêm menu "Từ đã học" mở learning.toml để xem/tự sửa; file có hướng dẫn ngay đầu
+- tool: `buttre-test explain <method> <raw> [--learning]` — chẩn đoán từng tầng (pref/overlay/undo/gate), nạp learning.toml thật
+- engine: sửa "yes" không gõ được trên máy đã bật learning — bỏ tự ghi pref literal từ double-tap undo
 - engine: dấu thanh trên vần khuyết "ye"/"ie" đặt vào e — "yes" ra "yé" như Unikey, không còn "ýe"
 - engine: sửa lớp từ tiếng Anh không gõ được (rows, towns, owns, lows) — cặp hủy transform (ww) không còn bị hồi sinh khi có phím dấu theo sau
 - engine: undo dấu không còn nuốt phím dấu bị ghi đè trước đó ("meterss" ra "meters", không phải "metes")
 - test: guard 10.000 từ tiếng Anh thông dụng — mọi từ phải gõ được bằng gõ thẳng hoặc double-key escape, chạy trong CI chống tái phát
-- engine: sửa "quo7t1"/"quowts" không ra "quớt" — quy tắc ghép uo→ươ không còn chiếm chữ u thuộc phụ âm đầu "qu" (trước đây ra "qươt" bất hợp lệ rồi rơi về raw)
+- engine: sửa "quo7t1"/"quowts" không ra "quớt" — quy tắc ghép uo→ươ không còn chiếm chữ u thuộc phụ âm đầu "qu"
 
 ## [0.7.7-beta] — 2026-07-07
 
-- engine: sửa không gõ được "reset"/"resset" — phím sau cặp hủy dấu (ss) không còn hồi sinh dấu sắc thành "rết"; undo giữa từ giờ là chung cuộc đến hết từ (chuẩn Unikey)
-- linux: gõ tiếng Việt hoạt động thật — engine đăng ký đúng với ibus-daemon (private bus + Factory), trước đây không bao giờ nhận được phím
+- engine: undo giữa từ giờ là chung cuộc đến hết từ (chuẩn Unikey)
+- linux: engine đăng ký đúng với ibus-daemon (private bus + Factory)
 - linux: sửa semantics preedit — composition dựng dần có gạch chân, commit đúng ở dấu cách/dấu câu
-- linux: thêm backend Wayland-native `zwp_input_method_v2` cho sway/Hyprland/KDE, tự fallback IBus cho GNOME/X11
+- linux: thêm backend Wayland-native cho sway/Hyprland/KDE
 - linux: đổi kiểu gõ Telex/VNI/Nôm từ tray áp dụng ngay vào engine đang chạy, không cần restart
 - linux: ô mật khẩu bypass engine; không tap phím toàn cục ở cả hai backend
 - macos: FFI v2 (`ButtreKeyResult`) map thẳng vào IMKit; semantics composition dùng chung với Linux; kèm header C
-- macos: host IMKit (Objective-C) chạy được, không cần quyền Accessibility; build script đóng gói `Buttre.app` universal
-- ci: job integration Linux chạy ibus-daemon thật + headless sway để chống hồi quy (trước đây CI xanh không chứng minh gõ được)
-- docs: sửa các tuyên bố sai lệch về mức độ sẵn sàng của macOS/Linux; sửa URL repo cũ
+- ci: job integration Linux chạy ibus-daemon thật + headless sway để chống hồi quy
 
 ## [0.7.6-beta] — 2026-07-04
 

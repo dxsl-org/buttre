@@ -55,5 +55,8 @@ fn repo_keyboards_load_and_ids_match_filename_stems() {
         );
         checked += 1;
     }
-    assert!(checked > 0, "repo keyboards/ must contain at least one TOML");
+    assert!(
+        checked > 0,
+        "repo keyboards/ must contain at least one TOML"
+    );
 }

@@ -30,7 +30,7 @@ mod transform;
 mod tests;
 
 use crate::pipeline::config::{PipelineConfig, ToneMark, ToneStyle};
-use crate::pipeline::validation::{is_attested_overlay, is_shape_attested};
+use crate::pipeline::validation::is_attested_overlay;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -692,46 +692,43 @@ fn last_tone_raw_pos(raw: &[char], tone_key: char) -> Option<usize> {
 }
 
 /// True when `text` passes the non-adjacent attestation gate: either no
-/// applied mark is flagged non-adjacent, or the composed syllable is
-/// attested.
+/// applied mark is flagged non-adjacent, or the composed syllable clears the
+/// bar its trigger kind demands.
 ///
-/// ## Word-boundary closed projection (Phase 3)
+/// ## Trigger classification
 ///
-/// `closed` is the word-boundary flag from [`compose_closed`]. When `true`,
-/// the digit-trigger shape-relaxation below is disabled for TONELESS text —
-/// a closed word expects no further keystrokes, so a shape-only match whose
-/// tone never arrived has no excuse left to survive on ("nhat6" → "nhât"
-/// restores its literal raw). When the composed text ALREADY carries a tone,
-/// shape attestation still suffices at the boundary: the "tone hasn't
-/// arrived yet" rationale is moot, and clamping to exact attestation there
-/// rejected deliberately-typed informal words ("d9ech56" → "đệch", shape
-/// attested via "đếch") while the adjacent key order ("d9e6ch5", marks
-/// unflagged) committed the same word — commit results must not depend on
-/// key order. The demote path taken when the gate fails is byte-identical
-/// to the open-projection gate's (`compose_internal` recurses with
-/// `allow_nonadjacent=false`, unaffected by `closed`).
+/// A NON-DIGIT trigger (Telex-style alphabetic, or a punctuation trigger in a
+/// hypothetical custom config) requires an EXACT lexical match: a real Telex
+/// mark key is also a base letter or a tone key, so relaxing it would reopen
+/// the `data` → `dât` class this gate exists to close. Measured on the
+/// 9 858-word English typeability corpus, relaxing this branch to structural
+/// validity costs 59 extra words and makes one unrecoverable — it is not a
+/// trade worth making.
 ///
-/// ## Trigger classification (P6 gate hardening)
+/// An ASCII-DIGIT trigger (VNI) requires only STRUCTURAL validity
+/// ([`could_be_vietnamese`]). A digit cannot occur inside an English word, so
+/// the lexical table buys no English safety on this branch — it only produces
+/// false negatives on real-but-unlisted syllables (slang, names, dialect),
+/// which is aggressive spell-check rather than leniency. Crucially, it also
+/// removes a KEY-ORDER dependency: the adjacent order ("d9e6ch5") never
+/// flags its marks and so clears the gate ungated, while the delayed order
+/// ("d9ech56") composes the identical syllable and used to revert to raw.
+/// Same keys, same word, different order — the results must agree.
 ///
-/// ASCII-digit triggers relax to a SHAPE match (`is_shape_attested`, any
-/// tone): the tone key often arrives AFTER the digit mark (`nhat61`), so the
-/// exact tone is not yet known when the gate must decide, and a real VNI
-/// digit trigger cannot occur inside an English word anyway. EVERYTHING ELSE
-/// — Telex-style alphabetic triggers AND any non-alphabetic, non-digit
-/// trigger (punctuation, in a hypothetical custom config) — requires an EXACT
-/// match (`is_attested`, whatever tone `text` currently carries): a real
-/// Telex mark key is also a base letter or a tone key, so a false alphabetic
-/// match would already have to look like a real Vietnamese word, and a
-/// punctuation trigger has no VNI-style "tone hasn't arrived yet" excuse for
-/// relaxing to shape.
+/// ## Word-boundary closed projection
 ///
-/// Before this hardening, the classification was inverted — `is_alphabetic()
-/// → exact, else → shape` — which correctly handled Telex (alphabetic) and
-/// VNI (digit) but wrongly RELAXED any non-digit, non-alphabetic trigger
-/// (e.g. a punctuation trigger in a custom config) to shape-attestation too.
-/// Classifying on `is_ascii_digit()` instead closes that gap while leaving
-/// Telex and VNI byte-identical (Telex triggers are never digits; VNI
-/// triggers are always digits).
+/// `closed` is the word-boundary flag from [`compose_closed`]. A closed word
+/// expects no further keystrokes, so a digit-triggered composition whose tone
+/// NEVER ARRIVED loses the "the tone is still coming" excuse and is clamped
+/// back to exact attestation ("nhat6" → "nhât" restores its literal raw).
+/// Once a tone HAS been typed the clamp lifts, because the intermediate-state
+/// rationale is moot.
+///
+/// The single exemption is the deliberate-đ abbreviation
+/// ([`is_deliberate_dd_abbreviation`]): "đt"/"đc" are toneless by nature, so
+/// no amount of further typing could ever satisfy the tone condition, and the
+/// clamp made them display correctly while typing and then revert at the
+/// space.
 ///
 /// ## Intrinsic trade-off (delayed-mark Telex live feedback)
 ///
@@ -756,16 +753,13 @@ fn last_tone_raw_pos(raw: &[char], tone_key: char) -> Option<usize> {
 ///
 /// ## Overlay (event-sourcing-completion Phase 5)
 ///
-/// The EXACT-match branch consults `opts.user_attested` through
+/// The EXACT-match branches consult `opts.user_attested` through
 /// [`is_attested_overlay`] — the single shared consult point P2's
 /// evidence-based un-latch probe (`pipeline::stages::compose_stage::
 /// should_unlatch`) also uses, so both the word-boundary closed gate and
-/// the un-latch probe agree on what counts as attested. The SHAPE-relaxed
-/// branch (digit triggers, open projection only) is deliberately NOT
-/// overlay-aware: overlay entries are individual exact syllables (a
-/// specific onset/nucleus/coda/TONE tuple), not shape families, so
-/// widening a shape check to the overlay would double-relax an
-/// already-permissive path for no corresponding user signal.
+/// the un-latch probe agree on what counts as attested. The
+/// structural-validity branch is deliberately NOT overlay-aware: it is
+/// already strictly more permissive than any overlay entry could make it.
 fn passes_attestation_gate(
     text: &str,
     applied: &[AppliedMark],
@@ -775,6 +769,9 @@ fn passes_attestation_gate(
     let mut flagged = applied.iter().filter(|m| m.non_adjacent).peekable();
     if flagged.peek().is_none() {
         return true;
+    }
+    if !flagged.all(|m| m.key.is_ascii_digit()) {
+        return is_attested_overlay(text, opts.user_attested.as_deref());
     }
     // Digit (VNI) triggers relax to SHAPE attestation — mid-word always, and
     // at the closed boundary too PROVIDED the composed text already carries a
@@ -788,10 +785,26 @@ fn passes_attestation_gate(
     // (marks unflagged, gate never consulted) committed "đệch" while the
     // delayed order reverted to raw. A digit trigger cannot occur inside an
     // English word, so this relaxation has no English-safety cost.
-    if flagged.all(|m| m.key.is_ascii_digit()) && (!closed || carries_tone(text)) {
-        is_shape_attested(text)
+    if !closed || carries_tone(text) {
+        // Open projection, or the tone has already arrived: a digit trigger
+        // cannot occur inside an English word, so the lexical table buys no
+        // English safety here — only false negatives on real-but-unlisted
+        // syllables (slang, names, dialect), which is aggressive spell-check,
+        // not leniency. Structural validity is the honest bar, and it is the
+        // SAME bar the adjacent key order already clears ungated: "d9e6ch5"
+        // committed "đệch" while the delayed order "d9ech56" reverted to raw.
+        // Results must not depend on key order.
+        could_be_vietnamese(text, opts)
     } else {
+        // Closed boundary, tone never arrived: keep the exact clamp so a
+        // shape-only intermediate restores its literal raw ("nhat6" → "nhât"
+        // must not commit). The one exemption is the deliberate-đ
+        // abbreviation, which is toneless BY NATURE and so could never
+        // satisfy `carries_tone` no matter how long the user waits —
+        // clamping it meant "đt" displayed correctly while typing and then
+        // reverted to "dt9" at the space.
         is_attested_overlay(text, opts.user_attested.as_deref())
+            || is_deliberate_dd_abbreviation(text, opts)
     }
 }
 
@@ -918,18 +931,7 @@ fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
     if nucleus.is_empty() && coda.is_empty() && !onset.is_empty() {
         return true;
     }
-    // Deliberate-đ abbreviation (leniency, Unikey parity): a vowel-less
-    // cluster can only contain 'đ' through an explicit transform keystroke
-    // ("dd" Telex, "d9" VNI) — the user unambiguously asked for Vietnamese,
-    // so "đt"/"đc"/"đkkd" stay composed instead of reverting to raw. Only
-    // letters from the Vietnamese consonant inventory qualify: "đf"-shaped
-    // results (f/j/w/z can never follow đ in an abbreviation) still revert.
-    // Gated off by `strict_spelling` — the config window's "Kiểm soát gắt
-    // gao chính tả tiếng Việt" switch.
-    if !opts.strict_spelling
-        && normalized.starts_with('đ')
-        && normalized.chars().skip(1).all(is_vietnamese_consonant)
-    {
+    if is_deliberate_dd_abbreviation(normalized, opts) {
         return true;
     }
     // KEEP (phase-03 adjudication table — REVISED from the original plan's
@@ -966,15 +968,49 @@ fn could_be_vietnamese(text: &str, opts: &ComposeOpts) -> bool {
     false
 }
 
+/// Deliberate-đ abbreviation (leniency, Unikey parity): a vowel-less cluster
+/// can only contain 'đ' through an explicit transform keystroke ("dd" Telex,
+/// "d9" VNI) — the user unambiguously asked for Vietnamese, so "đt"/"đc"/
+/// "đkkd" stay composed instead of reverting to raw. Only letters from the
+/// Vietnamese consonant inventory qualify: "đf"-shaped results (f/j/w/z can
+/// never follow đ in an abbreviation) still revert.
+///
+/// Gated off by `strict_spelling` — the config window's "Kiểm soát gắt gao
+/// chính tả tiếng Việt" switch.
+///
+/// `text` must already be tone-stripped/normalized when the caller has a
+/// normalized form to hand ([`could_be_vietnamese`]); the abbreviation shape
+/// carries no tone by construction, so passing composed text
+/// ([`passes_attestation_gate`]'s closed-boundary exemption) is equivalent.
+fn is_deliberate_dd_abbreviation(text: &str, opts: &ComposeOpts) -> bool {
+    !opts.strict_spelling
+        && text.starts_with('đ')
+        && text.chars().skip(1).all(is_vietnamese_consonant)
+}
+
 /// The Vietnamese consonant letter inventory (lowercase, tone-stripped
-/// input — see [`could_be_vietnamese`]'s deliberate-đ branch, its only
-/// caller). Excludes f/j/w/z: they exist on the keyboard but never inside
-/// a Vietnamese word or abbreviation.
+/// input — see [`is_deliberate_dd_abbreviation`], its only caller). Excludes
+/// f/j/w/z: they exist on the keyboard but never inside a Vietnamese word or
+/// abbreviation.
 fn is_vietnamese_consonant(c: char) -> bool {
     matches!(
         c,
-        'b' | 'c' | 'd' | 'đ' | 'g' | 'h' | 'k' | 'l' | 'm' | 'n' | 'p' | 'q' | 'r' | 's' | 't'
-            | 'v' | 'x'
+        'b' | 'c'
+            | 'd'
+            | 'đ'
+            | 'g'
+            | 'h'
+            | 'k'
+            | 'l'
+            | 'm'
+            | 'n'
+            | 'p'
+            | 'q'
+            | 'r'
+            | 's'
+            | 't'
+            | 'v'
+            | 'x'
     )
 }
 

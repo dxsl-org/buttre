@@ -1365,16 +1365,50 @@ fn test_nonadjacent_dd_with_coda_no_tone_demotes_to_literal() {
 }
 
 #[test]
-fn test_bare_dad_stays_english() {
-    // "dad": second 'd' is the last raw char, no vowel follows it.
-    // The open-syllable non-adjacent đ guard must NOT fire — English "dad" preserved.
-    // (Fast-typing "dodong"→"đông" fires because vowel 'o' follows the second 'd'.)
-    let config = create_telex_config();
-    let mut ex = PipelineExecutor::new(config);
-    for ch in "dad".chars() {
-        ex.process(ch);
+fn test_open_syllable_dd_fires_in_free_marking_order() {
+    // Free-marking order puts the đ key LAST on an open syllable, with the
+    // tone (if any) after it: "dads" → "đá", "did" → "đi". This is the order
+    // ~45% of the common đ-vocabulary is typed in by users who write the
+    // letters first and add marks afterwards, and it used to be unreachable
+    // in Telex because the đ branch demanded a vowel after the second 'd'.
+    //
+    // The cost is the accepted collision pinned by
+    // `test_dad_class_collides_with_dd_by_design` — the same "escape by
+    // retyping the trigger" hatch "reset" → "rết" relies on.
+    for (keys, expected) in [
+        ("dads", "đá"),
+        ("did", "đi"),
+        ("dodf", "đò"),
+        ("duadf", "đùa"),
+        ("daodj", "đạo"),
+    ] {
+        let config = create_telex_config();
+        let mut ex = PipelineExecutor::new(config);
+        for ch in keys.chars() {
+            ex.process(ch);
+        }
+        assert_eq!(
+            ex.context().syllable_buffer,
+            expected,
+            "free-marking order '{keys}' must compose to '{expected}'"
+        );
     }
-    assert_eq!(ex.context().syllable_buffer, "dad");
+}
+
+#[test]
+fn test_dad_class_collides_with_dd_by_design() {
+    // Accepted collision, not a leak: "đa" IS an attested Vietnamese syllable,
+    // so no lexical gate can separate English "dad"/"dads" from a deliberate
+    // free-marked đ. Both are reachable — the English side via the double-key
+    // undo escape, which `english_typeability_guard` exercises corpus-wide.
+    for (keys, expected) in [("dad", "đa"), ("dads", "đá")] {
+        let config = create_telex_config();
+        let mut ex = PipelineExecutor::new(config);
+        for ch in keys.chars() {
+            ex.process(ch);
+        }
+        assert_eq!(ex.context().syllable_buffer, expected);
+    }
 }
 
 // ── Phase 2: attestation gate self-heal (executor-level) ──────────────────────
@@ -1602,9 +1636,10 @@ fn test_vieteje_immediacy_violated_no_undo() {
 
 #[test]
 fn test_data_class_words_stay_literal_at_executor_level() {
+    // "dad"/"dads" are deliberately absent: they now compose to "đa"/"đá" —
+    // see `test_dad_class_collides_with_dd_by_design`.
     for word in [
-        "data", "meme", "photo", "papa", "salsa", "radar", "banana", "canal", "media", "dad",
-        "dads", "nasa",
+        "data", "meme", "photo", "papa", "salsa", "radar", "banana", "canal", "media", "nasa",
     ] {
         let config = create_telex_config();
         let mut ex = PipelineExecutor::new(config);

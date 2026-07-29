@@ -101,6 +101,15 @@ impl PlatformBackend for WindowsBackend {
             BackendMode::Hook(hook) => hook.cleanup(),
         }
     }
+
+    /// TSF handles `Ctrl+Shift+Z` inside the focused app's process (see
+    /// `tsf::text_service`'s `VK_WORD_TOGGLE`), so the tray must leave the
+    /// chord unregistered. The Hook backend is the opposite: its own callback
+    /// deliberately EXEMPTS the chord from the modifier-reset and waits for the
+    /// global hotkey to dispatch it (`hook::dispatch_toggle_last_word`).
+    fn owns_word_toggle_chord(&self) -> bool {
+        matches!(self.mode, BackendMode::Tsf(_))
+    }
 }
 
 impl StateObserver for WindowsBackend {

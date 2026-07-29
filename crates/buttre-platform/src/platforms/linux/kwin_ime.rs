@@ -30,7 +30,9 @@ fn kwinrc_value(content: &str) -> Option<String> {
     for line in content.lines() {
         let line = line.trim();
         if let Some(section) = line.strip_prefix('[') {
-            in_wayland = section.trim_end_matches(']').eq_ignore_ascii_case("Wayland");
+            in_wayland = section
+                .trim_end_matches(']')
+                .eq_ignore_ascii_case("Wayland");
             continue;
         }
         if in_wayland {

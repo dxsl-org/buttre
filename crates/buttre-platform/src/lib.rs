@@ -75,6 +75,21 @@ pub trait PlatformBackend {
 
     /// Cleanup resources
     fn cleanup(&mut self);
+
+    /// True when this backend handles the word-toggle chord (`Ctrl+Shift+Z`)
+    /// ITSELF, from inside the focused application's process.
+    ///
+    /// The caller must then NOT register the chord as a global hotkey:
+    /// `RegisterHotKey` delivers to the registering thread and WITHHOLDS the
+    /// keystroke from the focused window, so registering it would starve an
+    /// in-process text service of the very key it needs to see.
+    ///
+    /// Default `false` — a backend that receives its keystrokes from a global
+    /// hook (Windows hook, Linux IBus/fcitx5) has no such conflict and relies
+    /// on the global hotkey to deliver the chord.
+    fn owns_word_toggle_chord(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================================

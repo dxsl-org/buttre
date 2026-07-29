@@ -131,6 +131,19 @@ pub struct Keyboard {
     /// Only ever appended to by `toggle_last_word`; drained externally.
     toggle_signals: Vec<ToggleSignal>,
 
+    /// Composition-mode word toggle (`toggle-composition-tsf`): `true` while
+    /// the OPEN composition is frozen to its literal keystrokes by
+    /// [`Self::toggle_composition`].
+    ///
+    /// The composition backends (TSF) run `process_legacy`, which has no
+    /// `raw`/`toggle_map` window to key a per-word decision off — the whole
+    /// state for the current word lives in the executor. So the flag is a
+    /// single bool scoped to the word being composed, and it is cleared the
+    /// moment that word ends (`ConfirmComposition`, or any [`Self::reset`]):
+    /// the next word starts composed again, mirroring the multiword rule that
+    /// a toggle freezes only the word it was pressed on.
+    composition_literal: bool,
+
     /// Backspace deletion granularity (event-sourcing-completion Phase 4).
     /// Set from `Settings::backspace_mode` by the platform layer via
     /// `set_backspace_mode` — `Keyboard::new` always starts at the engine
@@ -215,6 +228,7 @@ impl Keyboard {
             macro_map: HashMap::new(),
             macros: None,
             toggle_signals: Vec::new(),
+            composition_literal: false,
             backspace_mode: BackspaceMode::default(),
             method,
             compose_opts,
@@ -491,6 +505,16 @@ impl Keyboard {
     fn process_legacy(&mut self, key: char) -> anyhow::Result<Vec<Action>> {
         // Process through engine pipeline
         let engine_actions = self.executor.process(key);
+
+        // Frozen-literal composition (`toggle-composition-tsf`): the executor
+        // still consumed the key — its raw buffer must stay authoritative so
+        // un-freezing recomposes the WHOLE word — but the display is
+        // overridden to the literal keystrokes for the rest of this word.
+        if self.composition_literal {
+            if let Some(actions) = self.render_literal_composition(&engine_actions) {
+                return Ok(actions);
+            }
+        }
 
         // Convert engine actions to our actions
         let mut result = Vec::new();
@@ -807,6 +831,8 @@ impl Keyboard {
         // never re-commits with a matching raw must not survive to be mis-matched
         // against an identical raw sequence typed later in a different context.
         self.toggle_signals.clear();
+        // The composition this froze is gone with the reset.
+        self.composition_literal = false;
     }
 
     /// Word-boundary final repair probe (event-sourcing-completion Phase 3):
@@ -1121,9 +1147,10 @@ impl Keyboard {
     /// silently mutating the frozen word (the junk-letter cascade) and from
     /// mis-attributing a later learning signal to the wrong raw span.
     ///
-    /// No-op (`None`) when: not in multiword mode (TSF/Nôm/native — scope
-    /// note, TSF deferred), or the window holds no word to toggle (empty, or
-    /// only trailing separators).
+    /// No-op (`None`) when: not in multiword mode (composition backends have
+    /// [`Self::toggle_composition`] instead; Nôm/native scripts have no
+    /// literal/composed duality to flip), or the window holds no word to
+    /// toggle (empty, or only trailing separators).
     pub fn toggle_last_word(&mut self) -> Option<Action> {
         if !self.multiword {
             return None;
@@ -1151,6 +1178,109 @@ impl Keyboard {
         self.buffer = new.clone();
 
         Some(diff_to_action(&old, &new))
+    }
+
+    /// Flip the OPEN composition between its literal keystrokes and the
+    /// composed Vietnamese projection — the composition-backend counterpart of
+    /// [`Self::toggle_last_word`] (`toggle-composition-tsf`).
+    ///
+    /// Bidirectional and repeatable: `dads` → `đá` → hotkey → `dads` → hotkey
+    /// → `đá`. Like the multiword toggle it also FREEZES the word — while
+    /// literal, the rest of this word renders verbatim, including the text
+    /// that finally commits at the separator — so a tone key typed after the
+    /// toggle cannot silently re-diacritic the word the user just rejected.
+    /// The freeze ends with the word (see [`Self::composition_literal`]).
+    ///
+    /// Scope: the OPEN composition only. A word already committed to the
+    /// application is out of reach — recovering it would mean reading text
+    /// back out of the host document, which this layer has no access to.
+    ///
+    /// # Returns
+    ///
+    /// The composition update to apply, or `None` when there is nothing to
+    /// toggle: multiword mode (use [`Self::toggle_last_word`]) or an empty
+    /// composition.
+    pub fn toggle_composition(&mut self) -> Option<Action> {
+        if self.multiword {
+            return None;
+        }
+        let raw = self.executor.raw_char_vec();
+        if raw.is_empty() {
+            return None;
+        }
+
+        self.composition_literal = !self.composition_literal;
+        let text = if self.composition_literal {
+            self.executor.raw_display_string()
+        } else {
+            // Recompose from the raw the executor still holds. `closed=false`:
+            // the word is open by definition here, so it keeps the live
+            // projection exactly as continued typing would.
+            self.executor.compose_word_forced_composed(&raw, false)
+        };
+
+        self.toggle_signals.push(ToggleSignal {
+            raw_sequence: self.executor.raw_display_string(),
+            literal: self.composition_literal,
+        });
+
+        self.buffer = text.clone();
+        let cursor = text.chars().count();
+        Some(Action::UpdateComposition { text, cursor })
+    }
+
+    /// Render one keystroke's worth of output while the composition is frozen
+    /// literal (see [`Self::composition_literal`]).
+    ///
+    /// `None` means "not handled — fall through to the normal conversion":
+    /// either the word already ended without a `ConfirmComposition` (a
+    /// separator typed on an empty composition), or there is no raw left to
+    /// render. Both also un-freeze, so the next word starts composed.
+    fn render_literal_composition(
+        &mut self,
+        engine_actions: &[EngineAction],
+    ) -> Option<Vec<Action>> {
+        let confirmed = engine_actions
+            .iter()
+            .enumerate()
+            .find_map(|(i, a)| match a {
+                EngineAction::ConfirmComposition(_) => Some(i),
+                _ => None,
+            });
+
+        if let Some(confirm_idx) = confirmed {
+            // The separator closed the word: commit the LITERAL keystrokes,
+            // not the composed form the executor produced. Shorthand is
+            // deliberately skipped — a toggled word is an explicit rejection
+            // of any automatic rewriting, matching multiword's `toggle > macro`
+            // precedence. The raw stash is drained so it cannot leak into the
+            // next word's expansion check.
+            let _ = self.executor.take_confirmed_raw();
+            let literal = self.executor.take_confirmed_display();
+            self.composition_literal = false;
+
+            let mut out = Vec::with_capacity(engine_actions.len());
+            for (i, action) in engine_actions.iter().enumerate() {
+                if i == confirm_idx {
+                    out.push(Action::ConfirmComposition(literal.clone()));
+                } else {
+                    out.push(convert_engine_action(action));
+                }
+            }
+            // Mirror the normal path's ending state: the executor reset at the
+            // separator, so the tracked display is whatever it now holds.
+            self.buffer = self.executor.get_buffer().to_string();
+            return Some(out);
+        }
+
+        let text = self.executor.raw_display_string();
+        if text.is_empty() {
+            self.composition_literal = false;
+            return None;
+        }
+        self.buffer = text.clone();
+        let cursor = text.chars().count();
+        Some(vec![Action::UpdateComposition { text, cursor }])
     }
 
     /// Compose a single separator-free word via the executor (recompute-from-raw).
@@ -1202,6 +1332,37 @@ impl Keyboard {
     /// Get current buffer
     pub fn buffer(&self) -> &str {
         &self.buffer
+    }
+}
+
+/// Translate an engine action into the public one, verbatim and with NO
+/// buffer bookkeeping.
+///
+/// `process_legacy`'s main loop does its own bookkeeping per arm and so cannot
+/// use this; `render_literal_composition` needs the plain translation for the
+/// actions it passes through untouched (the separator's `Commit`, candidate UI
+/// events) while substituting only the `ConfirmComposition` payload.
+fn convert_engine_action(action: &EngineAction) -> Action {
+    match action {
+        EngineAction::DoNothing => Action::DoNothing,
+        EngineAction::Commit(text) => Action::Commit(text.clone()),
+        EngineAction::Replace {
+            backspace_count,
+            text,
+        } => Action::Replace {
+            backspace_count: *backspace_count,
+            text: text.clone(),
+        },
+        EngineAction::UpdateComposition { text, cursor } => Action::UpdateComposition {
+            text: text.clone(),
+            cursor: *cursor,
+        },
+        EngineAction::ConfirmComposition(text) => Action::ConfirmComposition(text.clone()),
+        EngineAction::ShowCandidates { candidates, input } => Action::ShowCandidates {
+            candidates: candidates.clone(),
+            input: input.clone(),
+        },
+        EngineAction::HideCandidates => Action::HideCandidates,
     }
 }
 

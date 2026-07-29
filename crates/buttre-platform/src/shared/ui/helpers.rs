@@ -3,8 +3,8 @@
 //! This module contains helper functions for updating menu and tray icons
 //! to avoid code duplication in the main event loop.
 
-use crate::shared::ui::menu::{set_method_checked, MethodMenuItem};
 use crate::shared::ui::load_icon_from_bytes;
+use crate::shared::ui::menu::{set_method_checked, MethodMenuItem};
 use buttre_core::vietnamese::config_loader::MethodMetadata;
 use buttre_core::vietnamese::get_custom_dir;
 use muda::Submenu;

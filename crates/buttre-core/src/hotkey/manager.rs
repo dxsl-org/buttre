@@ -23,12 +23,18 @@ pub enum HotkeyAction {
     /// Switch to custom method (index)
     Custom(usize),
     /// Toggle the last (current) multi-word window word between
-    /// `literal(raw)` and `compose(raw)` (event-sourcing-completion Phase
-    /// 4). Hook multiword backend only — see `buttre_platform`'s
-    /// `platforms::windows::hook::dispatch_toggle_last_word`, which no-ops
-    /// safely for TSF/empty-window. Chord (Ctrl+Shift+Z) is exempted from
-    /// `hook.rs`'s modifier-reset (`is_toggle_chord_exempt`) — keep both in
-    /// sync if this chord ever changes.
+    /// `literal(raw)` and `compose(raw)` (event-sourcing-completion Phase 4).
+    ///
+    /// Delivered as a GLOBAL hotkey only for backends that receive their
+    /// keystrokes from a hook — see `buttre_platform`'s
+    /// `platforms::windows::hook::dispatch_toggle_last_word`. TSF handles the
+    /// same chord in-process instead and the registration below is SKIPPED for
+    /// it (`PlatformBackend::owns_word_toggle_chord`), because `RegisterHotKey`
+    /// would withhold the keystroke from the focused app.
+    ///
+    /// The chord (Ctrl+Shift+Z) is exempted from `hook.rs`'s modifier-reset
+    /// (`is_toggle_chord_exempt`) and matched by TSF's `VK_WORD_TOGGLE` — keep
+    /// all three in sync if it ever changes.
     ToggleLastWord,
 }
 
@@ -39,8 +45,24 @@ pub struct ButtreHotkeyManager {
 }
 
 impl ButtreHotkeyManager {
-    /// Create new hotkey manager with default hotkeys
+    /// Create new hotkey manager with default hotkeys, including the
+    /// `ToggleLastWord` chord.
     pub fn new() -> Result<Self> {
+        Self::new_with_word_toggle(true)
+    }
+
+    /// Create the manager, choosing whether to claim the `ToggleLastWord`
+    /// chord (`Ctrl+Shift+Z`) globally.
+    ///
+    /// # Arguments
+    ///
+    /// * `register_word_toggle` — pass `false` when the active input backend
+    ///   handles the chord itself from inside the focused application (see
+    ///   `PlatformBackend::owns_word_toggle_chord`). `RegisterHotKey` withholds
+    ///   the keystroke from the focused window, so claiming it here would make
+    ///   the chord permanently invisible to an in-process text service. Every
+    ///   OTHER hotkey is registered identically either way.
+    pub fn new_with_word_toggle(register_word_toggle: bool) -> Result<Self> {
         info!("Creating hotkey manager");
 
         // Headless guard: on X11/Wayland-less environments (CI runners,
@@ -133,22 +155,30 @@ impl ButtreHotkeyManager {
         // cannot be registered at all (verified). Must stay in sync with the
         // chord exemption in buttre-platform's `hook.rs`
         // (`is_toggle_chord_exempt`).
-        let toggle_hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyZ);
-        match manager.register(toggle_hotkey) {
-            Ok(()) => {
-                info!(
-                    "Registered hotkey Ctrl+Shift+Z -> ToggleLastWord (ID: {})",
-                    toggle_hotkey.id()
-                );
-                hotkeys.insert(toggle_hotkey.id(), HotkeyAction::ToggleLastWord);
+        if register_word_toggle {
+            let toggle_hotkey =
+                HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyZ);
+            match manager.register(toggle_hotkey) {
+                Ok(()) => {
+                    info!(
+                        "Registered hotkey Ctrl+Shift+Z -> ToggleLastWord (ID: {})",
+                        toggle_hotkey.id()
+                    );
+                    hotkeys.insert(toggle_hotkey.id(), HotkeyAction::ToggleLastWord);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to register ToggleLastWord hotkey (Ctrl+Shift+Z): {} — \
+                         word-toggle feature disabled this session",
+                        e
+                    );
+                }
             }
-            Err(e) => {
-                warn!(
-                    "Failed to register ToggleLastWord hotkey (Ctrl+Shift+Z): {} — \
-                     word-toggle feature disabled this session",
-                    e
-                );
-            }
+        } else {
+            info!(
+                "Ctrl+Shift+Z left unregistered — the input backend claims it in-process \
+                 (RegisterHotKey would withhold the key from the focused app)"
+            );
         }
 
         info!("Hotkey manager initialized with {} hotkeys", hotkeys.len());

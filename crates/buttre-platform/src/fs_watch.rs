@@ -43,6 +43,16 @@ pub fn spawn_dir_watch(
         tracing::warn!("{label}: cannot create {dir:?}, watch disabled: {e}");
         return false;
     }
+    // Canonicalize BEFORE arming: notify's macOS (FSEvents) backend reports
+    // event paths with symlink components resolved (e.g. `/var/...` — itself
+    // a symlink to `/private/var/...` — comes back as `/private/var/...`).
+    // Comparing un-resolved `dir` against those paths below would silently
+    // never match, so the handler would never fire despite events arriving
+    // (caught by `missing_dir_is_created`/`survives_dir_delete_and_recreate`
+    // failing on macOS CI with a resolved-path callback dir). Canonicalize
+    // once so every later `==`/`parent()` comparison uses the same form the
+    // backend hands back.
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
     let (tx, rx) = mpsc::channel();
     let mut watcher = match notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
@@ -166,7 +176,8 @@ mod tests {
     }
 
     fn unique_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("buttre-fs-watch-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("buttre-fs-watch-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -175,7 +186,9 @@ mod tests {
     /// as a match — it means "assume changed", which is what callers do.
     fn wait_for_file_cue(rx: &mpsc::Receiver<Option<String>>, name: &str) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while let Ok(cue) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        while let Ok(cue) =
+            rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
             match cue {
                 None => return true, // Rearmed
                 Some(n) if n == name => return true,

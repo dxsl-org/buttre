@@ -10,8 +10,9 @@
 //! - `char_tables`    — Vietnamese char → key decomposition functions
 //! - `syllable_list`  — SYLLABLES constant, ENGLISH_WORDS, undo/toggle sets
 
-use char_tables::{decompose_telex, decompose_vni, telex_tone_key, vni_tone_key};
-use syllable_list::{ENGLISH_WORDS, SYLLABLES, TELEX_UNDO_TOGGLE, VNI_UNDO_TOGGLE};
+pub use char_tables::{decompose_telex, decompose_vni, telex_tone_key, vni_tone_key, VnTone};
+pub use syllable_list::SYLLABLES;
+use syllable_list::{ENGLISH_WORDS, TELEX_UNDO_TOGGLE, VNI_UNDO_TOGGLE};
 
 mod char_tables;
 mod syllable_list;
@@ -28,6 +29,11 @@ pub enum Tag {
     VietnameseValid,
     /// Flexible typing order (tone before final consonant, etc.) — MUST NOT change.
     FlexibleTyping,
+    /// Free tone marking: whole word typed first, marks and tone appended
+    /// afterwards (`dongdo`, `dong96`) — MUST NOT change. Every mark here is
+    /// inferred non-adjacently, so these cases pin the attestation gate
+    /// against key-order dependence.
+    FreeToneMarking,
     /// Pure ASCII English word — output MAY change in Phase 4.
     EnglishWord,
     /// Undo / toggle sequence (`aaa`, `aww`, `a11`, …) — MUST NOT change.
@@ -40,11 +46,17 @@ impl Tag {
         match self {
             Tag::VietnameseValid => "VietnameseValid",
             Tag::FlexibleTyping => "FlexibleTyping",
+            Tag::FreeToneMarking => "FreeToneMarking",
             Tag::EnglishWord => "EnglishWord",
             Tag::UndoToggle => "UndoToggle",
         }
     }
 }
+
+/// Vietnamese char → (base letter, optional diacritic key, optional tone).
+/// Shape shared by [`decompose_telex`] and [`decompose_vni`], so a converter
+/// can be written once and parameterized by method.
+pub type DecomposeFn = fn(char) -> (char, Option<char>, Option<VnTone>);
 
 // ============================================================================
 // Key converters
@@ -95,6 +107,61 @@ pub fn vn_to_vni_keys(syllable: &str) -> String {
         out.push(t);
     }
     out
+}
+
+/// Convert a Vietnamese syllable into the **free tone marking** keystroke
+/// order: every letter first, then the diacritic marks in the order their
+/// letters appear, then the tone key last (`đường` → `duongdw f`, `đông` →
+/// `dongdo`, VNI `dong96`).
+///
+/// This is the Unikey habit of typing the whole word before marking it, and
+/// it is the order in which every mark is inferred NON-ADJACENTLY — the path
+/// the attestation gate in `buttre_engine::compose` governs. Canonical
+/// (adjacent) order reaches that gate ungated, so the two orders exercise
+/// genuinely different code and must still agree on the output.
+///
+/// Adjacent duplicate marks collapse: the `ươ` pair decomposes to two horn
+/// keys, but typing `w`/`7` twice in a row is the double-key undo, not two
+/// marks — `đường` is `duongdwf`, never `duongdwwf`. The single horn key is
+/// enough because the coda makes `uơng` impossible, so it promotes to `ương`.
+///
+/// Returns `None` when that shorthand is NOT available: with no coda after
+/// the pair, one horn key denotes a genuinely different syllable (`uo7` is
+/// `uơ`, not `ươ`) and the free order has no unambiguous encoding at all.
+pub fn vn_to_free_keys(
+    syllable: &str,
+    decompose: DecomposeFn,
+    tone_key: fn(VnTone) -> char,
+) -> Option<String> {
+    let mut base = String::new();
+    let mut marks: Vec<char> = Vec::new();
+    let mut tone: Option<char> = None;
+    let mut collapsed_at: Option<usize> = None;
+    for ch in syllable.chars() {
+        let (b, extra, t) = decompose(ch);
+        if let Some(t) = t {
+            tone = Some(tone_key(t));
+        }
+        base.push(b);
+        if let Some(e) = extra {
+            if marks.last() == Some(&e) {
+                collapsed_at = Some(base.chars().count());
+            } else {
+                marks.push(e);
+            }
+        }
+    }
+    // A collapsed pair needs a coda behind it to disambiguate.
+    if let Some(pair_end) = collapsed_at {
+        if base.chars().count() == pair_end {
+            return None;
+        }
+    }
+    base.extend(marks);
+    if let Some(t) = tone {
+        base.push(t);
+    }
+    Some(base)
 }
 
 // ============================================================================
@@ -167,6 +234,11 @@ pub fn telex_corpus() -> Vec<(String, Tag)> {
                 v.push((p, Tag::FlexibleTyping));
             }
         }
+        if let Some(free) = vn_to_free_keys(s, decompose_telex, telex_tone_key) {
+            if free != k {
+                v.push((free, Tag::FreeToneMarking));
+            }
+        }
     }
     for &w in ENGLISH_WORDS {
         v.push((w.to_string(), Tag::EnglishWord));
@@ -191,6 +263,11 @@ pub fn vni_corpus() -> Vec<(String, Tag)> {
         if let Some(p) = vni_permute_tone_before_coda(&k) {
             if p != k {
                 v.push((p, Tag::FlexibleTyping));
+            }
+        }
+        if let Some(free) = vn_to_free_keys(s, decompose_vni, vni_tone_key) {
+            if free != k {
+                v.push((free, Tag::FreeToneMarking));
             }
         }
     }

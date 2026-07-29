@@ -77,7 +77,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-use crate::platforms::windows::common::input::BUTTRE_INJECTED;
+use crate::platforms::windows::common::input::{
+    send_replacement_under_held_modifiers, send_string_under_held_modifiers, BUTTRE_INJECTED,
+};
 use crate::platforms::windows::common::{
     hide_candidates, is_buffer_reset_key, is_modifier_key, is_special_key, send_backspaces,
     send_replacement, send_string, show_candidates, VK_BACK,
@@ -264,16 +266,22 @@ pub fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
         kb_opt.as_mut().and_then(Keyboard::toggle_last_word)
     };
 
+    // The chord is still physically held here — the hotkey is polled from the
+    // event loop up to 50 ms after the keypress, and nobody lets go that fast.
+    // These two variants release it, inject, and restore it in ONE `SendInput`
+    // batch; the plain `send_replacement`/`send_string` used everywhere else
+    // would have the application read `Ctrl+Shift+Backspace` instead of
+    // `Backspace`. See `input::send_replacement_under_held_modifiers`.
     match action {
         Some(Action::Replace {
             backspace_count,
             text,
         }) => {
-            send_replacement(backspace_count, &text);
+            send_replacement_under_held_modifiers(backspace_count, &text);
             record_output_hwnd();
         }
         Some(Action::Commit(text)) if !text.is_empty() => {
-            send_string(&text);
+            send_string_under_held_modifiers(&text);
             record_output_hwnd();
         }
         // `toggle_last_word` only ever returns via `diff_to_action`, which
@@ -1416,4 +1424,15 @@ mod toggle_last_word_tests {
     //    `toggle_last_word_noop_for_non_multiword_backend`); exercising
     //    `dispatch_toggle_last_word` itself here would require a live HWND
     //    and a real hook installation, which is the P8 manual smoke item.
+
+    // ── Injection under the held chord (chord-still-held CRITICAL) ──────────
+    //
+    // The chord's own Ctrl/Shift is ALWAYS still down when this dispatch runs,
+    // so the injection must release and restore it inside ONE `SendInput`
+    // batch — otherwise the app reads `Ctrl+Shift+Backspace`
+    // (delete-previous-WORD) instead of `Backspace`. That batch is built in
+    // `input::send_replacement_under_held_modifiers`, whose own tests pin the
+    // modifier watch-list; the behaviour under a REAL held chord needs a
+    // physical keypress (a test that synthesized one could strand a modifier
+    // down system-wide), so it is the P8 manual smoke item.
 }

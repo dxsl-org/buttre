@@ -177,9 +177,7 @@ impl ImeV1State {
                         delete_pending = true;
                     }
                 }
-                ImeOp::Preedit(_)
-                | ImeOp::Candidates { .. }
-                | ImeOp::HideCandidates => {}
+                ImeOp::Preedit(_) | ImeOp::Candidates { .. } | ImeOp::HideCandidates => {}
             }
         }
         if delete_pending {
@@ -208,9 +206,7 @@ impl ImeV1State {
     /// Clients without it (terminals) stay on preedit, where
     /// `delete_surrounding_text` is never needed.
     fn sync_use_preedit(&mut self) {
-        let want_composition = self
-            .use_preedit
-            .load(std::sync::atomic::Ordering::Relaxed)
+        let want_composition = self.use_preedit.load(std::sync::atomic::Ordering::Relaxed)
             || !self.saw_surrounding
             || self.content_purpose == PURPOSE_TERMINAL_V1;
         if want_composition != self.applied_composition {

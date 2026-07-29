@@ -118,8 +118,25 @@ public:
         }
         auto *ic = keyEvent.inputContext();
         refreshMethodFromSharedFile(ic);
+        /* Ctrl/Alt/Super combos (copy, paste, save, window shortcuts) carry
+         * no modifier info through bt_engine_process_keysym (keysym-only
+         * ABI), so process_keysym would compose the bare letter and this
+         * addon would swallow every shortcut. Commit whatever is pending —
+         * same rule the ibus/wayland backends apply
+         * (ibus.rs::is_control_combo) — then let the combo reach the
+         * client untouched.
+         *
+         * BEFORE the candidate routing below, not after: with a Nôm list
+         * open, Ctrl+Space's keysym IS space, so the router would read it as
+         * "select the highlighted candidate" and eat the shortcut. Same
+         * ordering the Windows text service uses (`should_ignore` ahead of
+         * `handle_candidate_key`). */
+        if (keyEvent.rawKey().states().testAny(fcitx::KeyState::Ctrl_Alt_Super)) {
+            applyResult(ic, bt_engine_flush(engine_));
+            return;
+        }
         const auto sym = static_cast<uint32_t>(keyEvent.rawKey().sym());
-        /* Candidate navigation first (mirror of ibus.rs): while the Nôm
+        /* Candidate navigation next (mirror of ibus.rs): while the Nôm
          * list is showing, digits/arrows/paging/Return-Space drive the
          * BRIDGE's cursor instead of composing — otherwise digit keys
          * would type into the word and PgUp/PgDn would flush it. */
@@ -172,6 +189,12 @@ public:
                   fcitx::InputContextEvent &event) override {
         auto *ic = event.inputContext();
         refreshMethodFromSharedFile(ic);
+        /* One engine_ handle serves every input context (fcitx5 creates one
+         * engine instance per addon, not per IC) — without this, a
+         * composition left pending when a window closed without
+         * deactivate() (or reset() not delivered) would leak into the next
+         * focused window's first keystroke. */
+        bt_engine_reset(engine_);
         /* (Re)attach the panel entries for this input context — the status
          * area is per-IC and cleared when the input method changes. The
          * method actions sit FLAT at the top level (checked = current),

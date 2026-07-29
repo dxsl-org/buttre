@@ -58,14 +58,9 @@ pub fn load_initial_use_preedit() -> Arc<AtomicBool> {
 /// Re-read `settings.toml` and swap `store`'s contents + refresh `strict` and
 /// `use_preedit` to match — the single reload spelling both watch callbacks
 /// below share.
-fn reload(
-    store: &Arc<Mutex<MacroStore>>,
-    strict: &Arc<AtomicBool>,
-    use_preedit: &Arc<AtomicBool>,
-) {
+fn reload(store: &Arc<Mutex<MacroStore>>, strict: &Arc<AtomicBool>, use_preedit: &Arc<AtomicBool>) {
     let settings = Settings::load();
-    *store.lock().unwrap_or_else(|e| e.into_inner()) =
-        MacroStore::load_gated(settings.shorthand);
+    *store.lock().unwrap_or_else(|e| e.into_inner()) = MacroStore::load_gated(settings.shorthand);
     strict.store(settings.strict_spelling, Ordering::Relaxed);
     use_preedit.store(settings.use_preedit, Ordering::Relaxed);
     tracing::info!(
