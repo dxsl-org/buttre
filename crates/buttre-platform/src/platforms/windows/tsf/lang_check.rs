@@ -17,15 +17,24 @@
 //!    machine where the user had never added buttre and Win+Space did not offer
 //!    it. A check that reads back what we ourselves wrote validates nothing.
 //!
-//! Availability and selection live in different hives, and that distinction is
+//! Availability and selection live in different places, and that distinction is
 //! the whole answer:
 //!
 //! * `HKLM\SOFTWARE\Microsoft\CTF\TIP\<clsid>` — written by the installer:
-//!   "this text service EXISTS and may be offered".
-//! * `HKCU\Software\Microsoft\CTF\TIP\<clsid>` — written by Windows when the
-//!   user adds or removes the keyboard: "this user WANTS it".
+//!   "this text service EXISTS and may be offered". We write it, so reading it
+//!   back proves nothing.
+//! * `HKCU\Control Panel\International\User Profile\<lang>` — written by
+//!   Windows when the keyboard is added, as a value NAMED
+//!   `<langid>:{clsid}{profile}`. This is the list `Get-WinUserLanguageList`
+//!   reports and Settings edits, and it is the one that answers the question.
+//! * `HKCU\Software\Microsoft\CTF\TIP\<clsid>\...\Enable` — a per-user OVERRIDE,
+//!   present only when the user has explicitly disabled a profile. Absent means
+//!   "no opinion", NOT "not added" — a third wrong guess this module made.
 //!
-//! Only the second one answers the question, and we never write it.
+//! Attempt 3 read only that last key, found it empty on a machine where the
+//! keyboard was working, and answered "Hook" while TSF was live — putting both
+//! layers on the keyboard at once, which is the exact thing this check exists
+//! to prevent.
 
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
@@ -59,65 +68,118 @@ pub fn is_buttre_text_service_enabled() -> bool {
     }
 }
 
-/// Language ids the user has enabled buttre under, per `HKCU`.
+/// Language ids the user has buttre added under.
 ///
 /// Public so `buttre --tsf-status` can show them: "which languages" is the
 /// first thing anyone asks when the answer is not what they expected.
 pub fn enabled_langids() -> Vec<u32> {
-    let Ok(profiles) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(format!(
-        "Software\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile",
-        CLSID_BUTTRE_TEXT_SERVICE
-    )) else {
-        // No per-user key at all: Windows has never been told to add it.
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(languages) = hkcu.open_subkey("Control Panel\\International\\User Profile") else {
         return Vec::new();
     };
 
-    profiles
+    let mut langids: Vec<u32> = languages
         .enum_keys()
         .filter_map(|name| name.ok())
-        .filter(|langid| profile_enabled(&profiles, langid))
-        .filter_map(|langid| parse_langid(&langid))
+        .filter_map(|language| languages.open_subkey(language).ok())
+        .flat_map(|language| added_langids_in(&language))
+        .collect();
+
+    langids.retain(|langid| !explicitly_disabled(&hkcu, *langid));
+    langids.sort_unstable();
+    langids.dedup();
+    langids
+}
+
+/// Langids from one language subkey's value NAMES.
+///
+/// Windows records a keyboard as a value named `<langid>:<layout-or-tip>`, where
+/// a text service is spelled `{clsid}{profile}`. The value's DATA is only an
+/// ordering index, so the name is the whole signal.
+fn added_langids_in(language: &RegKey) -> Vec<u32> {
+    language
+        .enum_values()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|(name, _)| parse_tip_entry(&name))
         .collect()
 }
 
-/// Is any profile under this language id switched on?
+/// `"0409:{clsid}{profile}"` → `Some(0x0409)` when the CLSID is ours.
 ///
-/// The `Enable` value sits one level deeper, on the profile GUID, and a
-/// language can hold more than one profile — so this looks at every child
-/// rather than assuming a single well-known GUID.
-fn profile_enabled(profiles: &RegKey, langid: &str) -> bool {
-    let Ok(language) = profiles.open_subkey(langid) else {
+/// Case-insensitive on the GUID: Windows has written both cases over the years,
+/// and a case-sensitive compare here would silently answer "not added".
+fn parse_tip_entry(name: &str) -> Option<u32> {
+    let (langid, service) = name.split_once(':')?;
+    if !service
+        .to_ascii_uppercase()
+        .starts_with(&CLSID_BUTTRE_TEXT_SERVICE.to_ascii_uppercase())
+    {
+        return None;
+    }
+    u32::from_str_radix(langid, 16).ok()
+}
+
+/// Has the user explicitly switched this language's profile OFF?
+///
+/// `HKCU\...\CTF\TIP\<clsid>\LanguageProfile\0x0000<langid>\<profile>` carries
+/// `Enable` only as an override. A MISSING key means "no opinion" — treating it
+/// as "not added" is what made the previous version of this module wrong.
+fn explicitly_disabled(hkcu: &RegKey, langid: u32) -> bool {
+    let path = format!(
+        "Software\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile\\0x{:08X}",
+        CLSID_BUTTRE_TEXT_SERVICE, langid
+    );
+    let Ok(language) = hkcu.open_subkey(path) else {
         return false;
     };
+    // Any profile under it explicitly zeroed counts as off; a language with no
+    // profiles listed is simply unopinionated.
     language
         .enum_keys()
         .filter_map(|name| name.ok())
         .filter_map(|profile| language.open_subkey(profile).ok())
-        .any(|profile| profile.get_value::<u32, _>("Enable").unwrap_or(0) != 0)
-}
-
-/// `"0x00000409"` → `0x0409`. Windows writes these as 8-digit hex with the
-/// `0x` prefix; anything else is not ours to interpret.
-fn parse_langid(key: &str) -> Option<u32> {
-    let digits = key.strip_prefix("0x").or_else(|| key.strip_prefix("0X"))?;
-    u32::from_str_radix(digits, 16).ok()
+        .filter_map(|profile| profile.get_value::<u32, _>("Enable").ok())
+        .any(|enable| enable == 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const PROFILE: &str = "{B7447743-7652-4AB6-8D82-250D935EBCC0}";
+
     #[test]
-    fn langid_keys_parse_as_windows_writes_them() {
-        assert_eq!(parse_langid("0x00000409"), Some(0x0409));
-        assert_eq!(parse_langid("0x0000042A"), Some(0x042A));
+    fn tip_entries_parse_as_windows_writes_them() {
+        let name = format!("0409:{CLSID_BUTTRE_TEXT_SERVICE}{PROFILE}");
+        assert_eq!(parse_tip_entry(&name), Some(0x0409));
+        let vietnamese = format!("042a:{CLSID_BUTTRE_TEXT_SERVICE}{PROFILE}");
+        assert_eq!(parse_tip_entry(&vietnamese), Some(0x042A));
     }
 
     #[test]
-    fn anything_else_is_rejected_rather_than_guessed() {
-        assert_eq!(parse_langid("0409"), None, "missing prefix");
-        assert_eq!(parse_langid("0xnope"), None);
-        assert_eq!(parse_langid(""), None);
+    fn guid_case_does_not_change_the_answer() {
+        // Windows has written both cases; a case-sensitive compare here would
+        // silently report the keyboard as not added.
+        let lower = format!(
+            "0409:{}{}",
+            CLSID_BUTTRE_TEXT_SERVICE.to_ascii_lowercase(),
+            PROFILE.to_ascii_lowercase()
+        );
+        assert_eq!(parse_tip_entry(&lower), Some(0x0409));
+    }
+
+    #[test]
+    fn other_keyboards_are_not_mistaken_for_ours() {
+        assert_eq!(parse_tip_entry("0409:00000409"), None, "plain layout");
+        assert_eq!(
+            parse_tip_entry(
+                "042a:{C2CB2CF0-AF47-413E-9780-8BC3A3C16068}{5FB02EC5-0A77-4684-B4FA-DEF8A2195628}"
+            ),
+            None,
+            "Microsoft's Vietnamese IME"
+        );
+        assert_eq!(parse_tip_entry("nonsense"), None);
+        assert_eq!(parse_tip_entry(""), None);
     }
 
     #[test]

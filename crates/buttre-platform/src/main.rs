@@ -178,10 +178,16 @@ fn run_tsf_status() -> Result<()> {
         if registered && enabled { "TSF" } else { "Hook" }
     );
     if registered && enabled {
-        Ok(())
-    } else {
-        std::process::exit(1)
+        return Ok(());
     }
+
+    // Flush before exiting. `process::exit` runs no destructors, and stdout is
+    // BLOCK-buffered when redirected — so the whole report vanished whenever a
+    // script captured it, which read as "this exe is too old for the flag".
+    // Interactively it worked, because a terminal makes stdout line-buffered.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    std::process::exit(1)
 }
 
 #[cfg(not(platform_windows))]
