@@ -126,6 +126,46 @@ if (Test-Path "HKCU:\Keyboard Layout\Preload") {
     }
 }
 
+# The OTHER direction, and the one this section used to miss entirely — leaving
+# it blank on the very run where it held the answer. A routing entry under
+# SortOrder with no matching Preload value means buttre is installed, added, and
+# correctly wired, but is NOT in the Win+Space cycle: Windows cycles Preload. It
+# cannot be selected, with nothing anywhere saying why.
+$routed = Get-ChildItem $assemblyRoot -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.PSChildName -match '^[0-9a-fA-F]{8}$' } |
+    Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).CLSID -eq $clsid } |
+    ForEach-Object {
+        $parts = ($_.Name -split 'AssemblyItem\\')[1] -split '\\'
+        # 0x0000<langid>\<category>\<8-digit index>  ->  d<3-digit index><langid>
+        [pscustomobject]@{
+            Expected = "d{0}{1}" -f $parts[2].Substring(5), $parts[0].Substring(6)
+            Where    = $parts[0]
+        }
+    }
+
+$inPreload = if (Test-Path $preloadKey) {
+    $p = Get-ItemProperty $preloadKey
+    (Get-Item $preloadKey).GetValueNames() | ForEach-Object { $p.$_ }
+} else { @() }
+
+foreach ($entry in $routed) {
+    if ($inPreload -contains $entry.Expected) {
+        Write-Host "  OK      $($entry.Expected) is in the Win+Space cycle" -ForegroundColor Green
+    } else {
+        Write-Host "  MISSING $($entry.Expected) - buttre is wired up under $($entry.Where)" -ForegroundColor Red
+        Write-Host "          but absent from Preload, so Win+Space cannot reach it." -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  Fix: sign out and back in (Windows rebuilds Preload from the" -ForegroundColor Cyan
+        Write-Host "       language list). If it still does not appear, add it directly:" -ForegroundColor Cyan
+        # Literal path, not interpolated: this line is meant to be copy-pasted,
+        # and a variable that happens to be out of scope would print an empty
+        # path into a command the reader then runs.
+        Write-Host '         $k = "HKCU:\Keyboard Layout\Preload"' -ForegroundColor White
+        Write-Host '         $n = (((Get-Item $k).GetValueNames() | ForEach-Object { [int]$_ } | Measure-Object -Maximum).Maximum) + 1' -ForegroundColor White
+        Write-Host "         New-ItemProperty `$k -Name `$n -Value '$($entry.Expected)' -PropertyType String" -ForegroundColor White
+    }
+}
+
 if ($dangling) {
     $sub = Get-ItemProperty "HKCU:\Keyboard Layout\Substitutes" -ErrorAction SilentlyContinue
     foreach ($value in $dangling) {
