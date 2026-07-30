@@ -488,15 +488,15 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         *self.this.thread_mgr.borrow_mut() = Some(tm);
         self.this.client_id.set(tid);
 
-        // Transport claim (phase 03): tell the hook this thread's window is
-        // ours. Activate runs ON the host app's UI thread, so the current
-        // thread id IS the id `GetWindowThreadProcessId(foreground)` yields
-        // while any of this thread's windows holds focus.
+        // Transport claim (phase 03): tell the hook this PROCESS hosts a live
+        // text service. Process id, not thread id — in Chromium/Qt/Notepad the
+        // activating thread is not the foreground window's thread, and the
+        // mismatch made the hook type over the text service (garbled text).
         //
-        // SAFETY: GetCurrentThreadId has no preconditions.
-        let host_thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-        crate::platforms::windows::transport_claim::publish(host_thread);
-        debug!("transport claim published for thread {host_thread}");
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let host_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        crate::platforms::windows::transport_claim::publish(host_pid);
+        debug!("transport claim published for process {host_pid}");
 
         // Register Display Attributes
         // SAFETY:
@@ -596,8 +596,13 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         // Release the transport claim FIRST: from this moment the hook may
         // take over this window, and every line below only tears down COM
-        // plumbing that no longer affects who types.
-        crate::platforms::windows::transport_claim::publish(0);
+        // plumbing that no longer affects who types. Conditional release (not
+        // publish(0)): another app's activation may have claimed since, and
+        // wiping ITS claim would unguard a live text service.
+        //
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let host_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        crate::platforms::windows::transport_claim::release(host_pid);
 
         // Clone the ITfThreadMgr out of the RefCell BEFORE any COM calls so the
         // borrow is released. COM callbacks triggered by Unadvise* could re-enter
@@ -886,9 +891,23 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
 }
 
 impl ITfThreadFocusSink_Impl for TextService_Impl {
+    /// The host thread gained input focus — the earliest, most reliable "this
+    /// app is now in front" signal TSF gives us, and it fires BEFORE the first
+    /// keystroke lands. The document-focus sink alone missed app switches in
+    /// hosts that keep one document manager across windows, and the claim has
+    /// to be in place before key one or the hook types that key.
     fn OnSetThreadFocus(&self) -> Result<()> {
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let host_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        crate::platforms::windows::transport_claim::publish(host_pid);
         Ok(())
     }
+
+    /// Deliberately does NOT release the claim: the window gaining focus next
+    /// either hosts its own text service (its OnSetThreadFocus overwrites the
+    /// claim) or does not (its pid never matches, so the hook runs there
+    /// regardless). Releasing here would only open a gap in which the hook
+    /// could race a sibling window of THIS app.
     fn OnKillThreadFocus(&self) -> Result<()> {
         Ok(())
     }
