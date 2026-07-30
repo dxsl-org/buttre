@@ -2,7 +2,7 @@
 Type=Application
 Name=buttre
 Comment=Bộ gõ tiếng Việt
-Exec=/usr/bin/buttre
+Exec=/usr/bin/buttre --autostart
 Icon=buttre
 Terminal=false
 X-GNOME-Autostart-enabled=true

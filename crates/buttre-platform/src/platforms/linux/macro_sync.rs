@@ -55,19 +55,38 @@ pub fn load_initial_use_preedit() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(use_preedit))
 }
 
-/// Re-read `settings.toml` and swap `store`'s contents + refresh `strict` and
-/// `use_preedit` to match — the single reload spelling both watch callbacks
-/// below share.
-fn reload(store: &Arc<Mutex<MacroStore>>, strict: &Arc<AtomicBool>, use_preedit: &Arc<AtomicBool>) {
+/// Build the initial `Settings::enabled` mirror for engine-process startup —
+/// the engine owns its own on/off. Consulted per keystroke by every engine
+/// (`sync_enabled`) so a toggle written to `settings.toml` from ANY process
+/// — tray left-click on Wayland, a hand-edit on IBus, the panel's English
+/// radio via the engine itself — silences or revives typing without a tray
+/// relaying it.
+pub fn load_initial_enabled() -> Arc<AtomicBool> {
+    let enabled = Settings::load().enabled;
+    tracing::info!("macro_sync: initial enabled = {enabled}");
+    Arc::new(AtomicBool::new(enabled))
+}
+
+/// Re-read `settings.toml` and swap `store`'s contents + refresh the flag
+/// mirrors to match — the single reload spelling both watch callbacks below
+/// share.
+fn reload(
+    store: &Arc<Mutex<MacroStore>>,
+    strict: &Arc<AtomicBool>,
+    use_preedit: &Arc<AtomicBool>,
+    enabled: &Arc<AtomicBool>,
+) {
     let settings = Settings::load();
     *store.lock().unwrap_or_else(|e| e.into_inner()) = MacroStore::load_gated(settings.shorthand);
     strict.store(settings.strict_spelling, Ordering::Relaxed);
     use_preedit.store(settings.use_preedit, Ordering::Relaxed);
+    enabled.store(settings.enabled, Ordering::Relaxed);
     tracing::info!(
-        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={})",
+        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={}, enabled={})",
         settings.shorthand,
         settings.strict_spelling,
-        settings.use_preedit
+        settings.use_preedit,
+        settings.enabled
     );
 }
 
@@ -106,6 +125,7 @@ pub fn spawn_watcher(
     store: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
     use_preedit: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
 ) {
     let dirs = watch_dirs();
     if dirs.is_empty() {
@@ -117,6 +137,7 @@ pub fn spawn_watcher(
         let store = store.clone();
         let strict = strict.clone();
         let use_preedit = use_preedit.clone();
+        let enabled = enabled.clone();
         crate::fs_watch::spawn_dir_watch("macro_sync", dir, move |cue| {
             // The watched dirs also hold unrelated state (method file,
             // learning.toml), so filter to the two files that feed the
@@ -134,7 +155,7 @@ pub fn spawn_watcher(
                 }),
             };
             if relevant {
-                reload(&store, &strict, &use_preedit);
+                reload(&store, &strict, &use_preedit, &enabled);
             }
         });
     }

@@ -107,6 +107,10 @@ pub(crate) struct ImeState {
     bridge: EngineBridge,
     method_state: Arc<MethodState>,
     seen_generation: u64,
+    /// `Settings::enabled` mirror (`macro_sync`) — consulted per key so a
+    /// toggle written to `settings.toml` (tray left-click, config window,
+    /// hand-edit) silences or revives this engine directly.
+    enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ImeState {
@@ -114,11 +118,16 @@ impl ImeState {
         method_state: Arc<MethodState>,
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
+        enabled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let method = method_state.method();
         let seen_generation = method_state.generation();
         let mut bridge = EngineBridge::new_with_macros(&method, macros);
         bridge.set_strict_flag(strict);
+        // Start on the persisted on/off state, not always-on.
+        if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            bridge.set_enabled(false);
+        }
         Self {
             seat: None,
             im_manager: None,
@@ -139,6 +148,19 @@ impl ImeState {
             bridge,
             method_state,
             seen_generation,
+            enabled,
+        }
+    }
+
+    /// Apply a pending on/off change from `settings.toml` — same lazy
+    /// per-key check as [`Self::sync_method`]. The returned ops clear any
+    /// live preedit so a mid-word toggle never strands half a word.
+    fn sync_enabled(&mut self) {
+        let want = self.enabled.load(std::sync::atomic::Ordering::Relaxed);
+        if self.bridge.is_enabled() != want {
+            let outcome = self.bridge.set_enabled(want);
+            self.commit_ops(outcome.ops);
+            tracing::info!("Wayland engine enabled={want}");
         }
     }
 
@@ -235,8 +257,14 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     // shared settings watcher keeps its signature, and the no-preedit model can
     // be wired to this backend later without touching macro_sync again.
     let use_preedit = macro_sync::load_initial_use_preedit();
+    let enabled = macro_sync::load_initial_enabled();
 
-    let mut state = ImeState::new(method_state.clone(), macros.clone(), strict.clone());
+    let mut state = ImeState::new(
+        method_state.clone(),
+        macros.clone(),
+        strict.clone(),
+        enabled.clone(),
+    );
     let mut queue = conn.new_event_queue::<ImeState>();
     let qh: QueueHandle<ImeState> = queue.handle();
     display.get_registry(&qh, ());
@@ -267,7 +295,7 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     // method watcher and the shorthand/gõ tắt watcher (no IBus fallback will
     // run in this process, so neither would be orphaned by an early return).
     method_sync::spawn_watcher(method_state);
-    macro_sync::spawn_watcher(macros, strict, use_preedit);
+    macro_sync::spawn_watcher(macros, strict, use_preedit, enabled);
 
     tracing::info!("Wayland input method registered; waiting for text-input activation");
     loop {

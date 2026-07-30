@@ -161,10 +161,11 @@ pub struct EngineBridge {
     /// keyboard.
     ///
     /// Owned by `Settings::enabled` via [`Self::set_enabled`] (ADR-0003).
-    /// `rebuild("english")` still flips it as a MIGRATION SHIM: `"english"`
-    /// remains the wire value in the Linux `method_sync` file until phase 04
-    /// reworks the OS-owned surfaces, and the engine processes reading that
-    /// file cannot be broken from here.
+    /// `rebuild("english")` still flips it as a LEGACY-WIRE shim: no buttre
+    /// surface writes `"english"` into the `method_sync` file anymore, but a
+    /// stale file from an older build — and the fcitx5 addon's own English
+    /// item (`bt_engine_set_method("english")`) — still speak it, and those
+    /// callers cannot be broken from here.
     passthrough: bool,
 }
 
@@ -351,11 +352,12 @@ impl EngineBridge {
     /// The new keyboard keeps the current preedit model (`use_composition`),
     /// except Nôm which always composes.
     ///
-    /// MIGRATION SHIM (remove in phase 04): `"english"` is still the Linux
-    /// `method_sync` wire value for "IME off", and the engine processes reading
-    /// that file cannot be broken from here. It maps to `set_enabled(false)` —
-    /// note it does NOT overwrite [`Self::method`], so the real method survives
-    /// and switching back on lands where the user left off.
+    /// LEGACY-WIRE shim (kept deliberately): `"english"` still arrives here
+    /// from stale `method_sync` files written by older builds and from the
+    /// fcitx5 addon's English item — neither caller can be broken from here.
+    /// It maps to `set_enabled(false)` — note it does NOT overwrite
+    /// [`Self::method`], so the real method survives and switching back on
+    /// lands where the user left off.
     pub fn rebuild(&mut self, method: &str) -> Option<KeyOutcome> {
         if method == "english" {
             return Some(self.set_enabled(false));

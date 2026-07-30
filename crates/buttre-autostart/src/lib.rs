@@ -25,7 +25,10 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
     if enabled {
         let exe = std::env::current_exe()?;
         // Quoted: the install path may contain spaces (Program Files).
-        key.set_value(VALUE_NAME, &format!("\"{}\"", exe.display()))?;
+        // `--autostart` for uniformity with the Linux entry: on Windows it
+        // falls through to the tray (owner is always Buttre there), but a
+        // login launch stays distinguishable from a user click.
+        key.set_value(VALUE_NAME, &format!("\"{}\" --autostart", exe.display()))?;
     } else {
         match key.delete_value(VALUE_NAME) {
             Ok(()) => {}
@@ -72,13 +75,18 @@ mod linux_impl {
     /// without touching the real `$XDG_CONFIG_HOME`.
     pub(super) fn write_autostart(dir: &Path, enabled: bool, exe: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
+        // `--autostart` (not a bare exe): a login launch must never open a
+        // WINDOW. On OS-owned platforms (IBus/fcitx5 — ADR-0003) a bare
+        // `buttre` opens the config window, so the flag lets main.rs tell a
+        // login launch (exit quietly, the daemon spawns the engine) from a
+        // user clicking the app (show the window).
         let content = if enabled {
             format!(
                 "[Desktop Entry]\n\
                  Type=Application\n\
                  Name=buttre\n\
                  Comment=Bộ gõ tiếng Việt\n\
-                 Exec=\"{}\"\n\
+                 Exec=\"{}\" --autostart\n\
                  X-GNOME-Autostart-enabled=true\n",
                 exe.display()
             )
@@ -114,7 +122,7 @@ mod tests {
         let dir = fresh_dir("enable");
         write_autostart(&dir, true, Path::new("/usr/bin/buttre")).unwrap();
         let content = std::fs::read_to_string(entry_path(&dir)).unwrap();
-        assert!(content.contains("Exec=\"/usr/bin/buttre\""));
+        assert!(content.contains("Exec=\"/usr/bin/buttre\" --autostart"));
         assert!(content.contains("X-GNOME-Autostart-enabled=true"));
         assert!(!content.contains("Hidden=true"));
     }

@@ -211,6 +211,9 @@ impl ImeState {
         }
 
         self.sync_method();
+        // AFTER the method sync: a successful rebuild re-enables the bridge,
+        // and the settings store must win that disagreement.
+        self.sync_enabled();
 
         let Some(keysym) = self
             .xkb_state

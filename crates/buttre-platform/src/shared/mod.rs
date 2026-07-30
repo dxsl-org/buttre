@@ -7,6 +7,7 @@ pub mod candidates;
 pub mod config_watcher;
 pub mod engine_bridge;
 pub mod input;
+pub mod method_owner;
 pub mod observers;
 pub mod pipe_server;
 pub mod ui;
