@@ -643,6 +643,25 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
     }
 
+    // TRANSPORT ARBITRATION (phase 03, ADR-0003): if the foreground window is
+    // held by a LIVE buttre text service, this hook must not touch the key —
+    // both layers acting on one keystroke writes it twice. Checked fresh on
+    // every event (an atomic load against shared memory; the thread-alive
+    // syscall only runs on the stand-down path), never cached: a cached "not
+    // claimed" surviving a profile switch IS the double-typing bug.
+    //
+    // SAFETY: GetForegroundWindow/GetWindowThreadProcessId accept null/any
+    // window and return 0 on failure, which `is_claimed_by` treats as
+    // unclaimed — the hook then runs, the recoverable direction.
+    let foreground_thread = unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut())
+    };
+    if crate::platforms::windows::transport_claim::is_claimed_by(foreground_thread) {
+        // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
+        return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
+    }
+
     // Get all modifier states in one pass
     // SAFETY: get_modifier_state calls GetKeyState which is safe from hook context
     let mods = unsafe { get_modifier_state() };

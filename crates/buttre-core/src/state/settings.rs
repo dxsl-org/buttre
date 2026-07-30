@@ -92,6 +92,16 @@ pub struct Settings {
     #[serde(default)]
     pub strict_spelling: bool,
 
+    /// Windows only: run the low-level hook ALONGSIDE the TSF text service, as
+    /// a fallback for apps TSF cannot reach (raw-input readers, some
+    /// terminals). The two never both act on a key — the text service claims
+    /// the foreground window it owns via shared memory and the hook stands
+    /// down there (`transport_claim.rs`). `false` restores one-backend-per-
+    /// session: the kill switch if arbitration misbehaves in the field, which
+    /// is why it ships as a setting rather than a constant.
+    #[serde(default = "default_hook_fallback")]
+    pub hook_fallback: bool,
+
     /// Show the composition as underlined preedit (`true`, the long-standing
     /// behavior) or commit text as-you-go with NO underline (`false`,
     /// Unikey-style). Honored only by the Linux/macOS preedit backends —
@@ -137,6 +147,12 @@ fn default_enabled() -> bool {
     true
 }
 
+/// `serde(default)` value for `Settings::hook_fallback` — ON: the union of the
+/// two transports is the whole point of running both (ADR-0003 phase 03).
+fn default_hook_fallback() -> bool {
+    true
+}
+
 /// `serde(default)` value for `Settings::use_preedit` — preedit ON, matching
 /// the behavior every prior release shipped so an old `settings.toml` (and a
 /// fresh install) keeps the known-good underline model until the user opts out.
@@ -159,6 +175,7 @@ impl Default for Settings {
             backspace_mode: default_backspace_mode(),
             learning_enabled: default_learning_enabled(),
             strict_spelling: false,
+            hook_fallback: default_hook_fallback(),
             use_preedit: default_use_preedit(),
         }
     }

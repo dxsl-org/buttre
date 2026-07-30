@@ -72,6 +72,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Accessibility",
     "Win32_Graphics_Gdi",
     "Win32_System_Threading",
+    # Named shared memory for the TSF transport claim (transport_claim.rs) —
+    # how the hook learns the text service owns the foreground window.
+    "Win32_System_Memory",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_IO",
