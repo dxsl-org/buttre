@@ -643,6 +643,30 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
     }
 
+    // TRANSPORT ARBITRATION (phase 03, ADR-0003): if the foreground window's
+    // PROCESS hosts a live buttre text service, this hook must not touch the
+    // key — both layers acting on one keystroke writes it twice. Process, not
+    // thread: in Chromium/Qt/Notepad the TSF thread is not the foreground
+    // window's thread, and matching on thread ids let the hook type over live
+    // text services (garbled text in browsers). Checked fresh on every event
+    // (an atomic load against shared memory; the process-alive syscall only
+    // runs on the stand-down path), never cached: a cached "not claimed"
+    // surviving a profile switch IS the double-typing bug.
+    //
+    // SAFETY: GetForegroundWindow accepts no args; GetWindowThreadProcessId
+    // accepts any window and leaves pid 0 on failure, which `is_claimed_by`
+    // treats as unclaimed — the hook then runs, the recoverable direction.
+    let foreground_pid = unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+        pid
+    };
+    if crate::platforms::windows::transport_claim::is_claimed_by(foreground_pid) {
+        // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
+        return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
+    }
+
     // Get all modifier states in one pass
     // SAFETY: get_modifier_state calls GetKeyState which is safe from hook context
     let mods = unsafe { get_modifier_state() };

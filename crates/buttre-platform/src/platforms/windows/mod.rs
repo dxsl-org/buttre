@@ -2,6 +2,7 @@
 
 pub mod common;
 pub mod hook;
+pub mod transport_claim;
 pub mod tsf;
 
 use crate::PlatformBackend;
@@ -15,6 +16,11 @@ use std::sync::{Arc, Mutex, RwLock};
 pub enum BackendMode {
     Tsf(tsf::TsfBackend),
     Hook(hook::HookBackend),
+    /// Both transports live at once (phase 03, ADR-0003): TSF types in the
+    /// apps that cooperate with it, the hook covers the rest. Never both on
+    /// one keystroke: the text service claims the foreground window it owns
+    /// through `transport_claim` and the hook stands down there.
+    Both(tsf::TsfBackend, hook::HookBackend),
 }
 
 /// Windows backend implementation with TSF-first fallback
@@ -25,13 +31,25 @@ pub struct WindowsBackend {
 }
 
 impl WindowsBackend {
-    /// Create Windows backend with TSF-first fallback
+    /// Create the Windows backend.
+    ///
+    /// With TSF available AND `Settings::hook_fallback` on, BOTH transports
+    /// start (their union is the coverage goal, see `transport_claim`).
+    /// `hook_fallback = false` is the field kill switch back to
+    /// one-backend-per-session. No TSF (not registered / not added as an
+    /// input method) keeps the plain hook, as before.
     pub fn new() -> Result<Self> {
-        info!("Creating Windows backend with TSF-first fallback");
+        let hook_fallback = buttre_core::Settings::load().hook_fallback;
+        info!("Creating Windows backend (hook_fallback: {hook_fallback})");
 
         let mode = match tsf::TsfBackend::new() {
+            Ok(tsf) if hook_fallback => {
+                let hook = hook::HookBackend::new()?;
+                info!("✓ TSF + Hook fallback initialized (transport_claim arbitrates)");
+                BackendMode::Both(tsf, hook)
+            }
             Ok(tsf) => {
-                info!("✓ TSF backend initialized");
+                info!("✓ TSF backend initialized (hook fallback disabled)");
                 BackendMode::Tsf(tsf)
             }
             Err(e) => {
@@ -61,6 +79,7 @@ impl PlatformBackend for WindowsBackend {
         let mode_name = match &self.mode {
             BackendMode::Tsf(_) => "TSF",
             BackendMode::Hook(_) => "Hook",
+            BackendMode::Both(..) => "TSF+Hook",
         };
         info!(
             "Initializing Windows platform backend (mode: {})",
@@ -70,6 +89,10 @@ impl PlatformBackend for WindowsBackend {
         match &mut self.mode {
             BackendMode::Tsf(tsf) => tsf.init(keyboard),
             BackendMode::Hook(hook) => hook.init(keyboard),
+            BackendMode::Both(tsf, hook) => {
+                tsf.init(keyboard.clone())?;
+                hook.init(keyboard)
+            }
         }
     }
 
@@ -79,20 +102,17 @@ impl PlatformBackend for WindowsBackend {
     }
 
     fn set_enabled(&mut self, enabled: bool) {
-        let mode_name = match &self.mode {
-            BackendMode::Tsf(_) => "TSF",
-            BackendMode::Hook(_) => "Hook",
-        };
-        info!(
-            "Windows backend (mode: {}) toggling enabled state: {}",
-            mode_name, enabled
-        );
+        info!("Windows backend toggling enabled state: {enabled}");
 
         *self.enabled.lock().unwrap() = enabled;
 
         match &mut self.mode {
             BackendMode::Tsf(tsf) => tsf.set_enabled(enabled),
             BackendMode::Hook(hook) => hook.set_enabled(enabled),
+            BackendMode::Both(tsf, hook) => {
+                tsf.set_enabled(enabled);
+                hook.set_enabled(enabled);
+            }
         }
     }
 
@@ -101,6 +121,10 @@ impl PlatformBackend for WindowsBackend {
         match &mut self.mode {
             BackendMode::Tsf(tsf) => tsf.cleanup(),
             BackendMode::Hook(hook) => hook.cleanup(),
+            BackendMode::Both(tsf, hook) => {
+                tsf.cleanup();
+                hook.cleanup();
+            }
         }
     }
 
@@ -109,8 +133,12 @@ impl PlatformBackend for WindowsBackend {
     /// chord unregistered. The Hook backend is the opposite: its own callback
     /// deliberately EXEMPTS the chord from the modifier-reset and waits for the
     /// global hotkey to dispatch it (`hook::dispatch_toggle_last_word`).
+    /// `Both` also claims the chord: registering it globally would swallow the
+    /// keystroke before any focused app's text service saw it. The cost is that
+    /// hook-covered apps (no TSF) lose Ctrl+Shift+Z under `Both`. Accepted:
+    /// rare-and-degraded beats breaking the chord everywhere TSF works.
     fn owns_word_toggle_chord(&self) -> bool {
-        matches!(self.mode, BackendMode::Tsf(_))
+        matches!(self.mode, BackendMode::Tsf(_) | BackendMode::Both(..))
     }
 }
 
@@ -128,14 +156,14 @@ impl StateObserver for WindowsBackend {
         // Since &self is immutable, we use lock-free functions for Hook
         match &self.mode {
             BackendMode::Tsf(_) => {
-                // TSF handles its own state or listens to settings
-                // TODO: Implement TSF state update if needed
+                // TSF reads state through the settings watcher in the DLL.
                 info!("TSF mode: method={}, enabled={}", method, enabled);
             }
-            BackendMode::Hook(_) => {
-                // CRITICAL FIX: Actually enable/disable the hook when method changes
-                // This was the missing piece - hook was installed but not enabled!
-                info!("Hook mode: setting Vietnamese enabled = {}", enabled);
+            BackendMode::Hook(_) | BackendMode::Both(..) => {
+                // The hook side needs the explicit flip (hook was installed
+                // but not enabled without it). Under Both, TSF still gets its
+                // state via the settings watcher, same as the Tsf arm.
+                info!("Hook side: setting Vietnamese enabled = {}", enabled);
                 hook::set_vietnamese_mode(enabled);
             }
         }

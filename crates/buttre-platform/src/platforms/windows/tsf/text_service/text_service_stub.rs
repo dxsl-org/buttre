@@ -488,6 +488,16 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         *self.this.thread_mgr.borrow_mut() = Some(tm);
         self.this.client_id.set(tid);
 
+        // Transport claim (phase 03): tell the hook this PROCESS hosts a live
+        // text service. Process id, not thread id — in Chromium/Qt/Notepad the
+        // activating thread is not the foreground window's thread, and the
+        // mismatch made the hook type over the text service (garbled text).
+        //
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let host_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        crate::platforms::windows::transport_claim::publish(host_pid);
+        debug!("transport claim published for process {host_pid}");
+
         // Register Display Attributes
         // SAFETY:
         // 1. CoCreateInstance is properly declared in windows crate
@@ -583,6 +593,16 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
     fn Deactivate(&self) -> Result<()> {
         debug!("TextService::Deactivate");
+
+        // Release the transport claim FIRST: from this moment the hook may
+        // take over this window, and every line below only tears down COM
+        // plumbing that no longer affects who types. Conditional release (not
+        // publish(0)): another app's activation may have claimed since, and
+        // wiping ITS claim would unguard a live text service.
+        //
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let host_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        crate::platforms::windows::transport_claim::release(host_pid);
 
         // Clone the ITfThreadMgr out of the RefCell BEFORE any COM calls so the
         // borrow is released. COM callbacks triggered by Unadvise* could re-enter
@@ -821,6 +841,19 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
             if let Ok(context) = unsafe { focused.GetBase() } {
                 self.advise_edit_sink(&context);
             }
+
+            // Re-publish the transport claim on every focus gain. `Activate`
+            // fires once per app, but the claim cell is ONE value per session:
+            // with buttre active in two apps, Alt+Tab-ing between them would
+            // leave the claim pointing at the app focused LAST at activation
+            // time — the hook would then see foreground ≠ claim in the other
+            // app and type over its live text service. Focus is the event that
+            // tracks "whose window is in front", so it is where the claim must
+            // be refreshed.
+            //
+            // SAFETY: GetCurrentThreadId has no preconditions.
+            let host_thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+            crate::platforms::windows::transport_claim::publish(host_thread);
         }
 
         if self.this.key_busy.get() {
@@ -858,21 +891,86 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
 }
 
 impl ITfThreadFocusSink_Impl for TextService_Impl {
+    /// The host thread gained input focus — the earliest, most reliable "this
+    /// app is now in front" signal TSF gives us, and it fires BEFORE the first
+    /// keystroke lands. The document-focus sink alone missed app switches in
+    /// hosts that keep one document manager across windows, and the claim has
+    /// to be in place before key one or the hook types that key.
     fn OnSetThreadFocus(&self) -> Result<()> {
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let host_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        crate::platforms::windows::transport_claim::publish(host_pid);
         Ok(())
     }
+
+    /// Deliberately does NOT release the claim: the window gaining focus next
+    /// either hosts its own text service (its OnSetThreadFocus overwrites the
+    /// claim) or does not (its pid never matches, so the hook runs there
+    /// regardless). Releasing here would only open a gap in which the hook
+    /// could race a sibling window of THIS app.
     fn OnKillThreadFocus(&self) -> Result<()> {
         Ok(())
     }
 }
 
 impl ITfActiveLanguageProfileNotifySink_Impl for TextService_Impl {
+    /// The user switched input profiles in THIS app (Win+Space). Treat leaving
+    /// buttre as a COMMAND to turn off (ADR-0003 invariant 3): with the hook
+    /// covering non-TSF apps, this is the only thing that keeps Win+Space
+    /// meaning "off" — without it the hook would take over the moment the
+    /// profile deactivated, and switching to English-US would still type
+    /// Vietnamese.
+    ///
+    /// KNOWN GAP (field-tested 2026-07-30, why `hook_fallback` defaults off):
+    /// switching to the plain "English - US" KEYBOARD LAYOUT did not fire this
+    /// sink at all — a watched log showed zero `OnActivated` lines across the
+    /// switch, in Notepad, with the sink advised. TSF apparently only notifies
+    /// TIP-to-TIP transitions here, and a layout is not a TIP. Before Both
+    /// mode can default on, the off-command needs a source that covers
+    /// layout switches — candidates: `Deactivate` (fires, but also on app
+    /// close), or the tray polling the claim cell going quiet.
+    ///
+    /// Asymmetric on purpose. `fActivated = TRUE` is NOT a command to turn on:
+    /// it also fires when a new app inherits an already-active buttre profile,
+    /// so honouring it would silently re-enable an IME the user just turned
+    /// off from the tray every time they opened a window. Deactivation has no
+    /// such ambiguity — it only fires when the user actively switches away.
+    /// The cost: Win+Space back to buttre while tray-disabled shows the
+    /// profile active but typing off (grey icon says why); turning on is one
+    /// tray click. Logged either way for field diagnosis.
+    // Signature is fixed by the windows-rs-generated trait (COM vtable
+    // contract) — cannot be `unsafe fn`; the pointer read is scoped below.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn OnActivated(
         &self,
-        _clsid: *const GUID,
+        clsid: *const GUID,
         _guidprofile: *const GUID,
-        _factivated: BOOL,
+        factivated: BOOL,
     ) -> Result<()> {
+        // SAFETY: clsid is supplied by TSF for the duration of the call; null
+        // is checked before the read, and GUID is POD.
+        let ours = unsafe {
+            !clsid.is_null() && *clsid == crate::platforms::windows::tsf::CLSID_BUTTRE_TEXT_SERVICE
+        };
+        if !ours {
+            return Ok(());
+        }
+
+        debug!("OnActivated(ours): factivated={}", factivated.as_bool());
+        if !factivated.as_bool() {
+            // Commit whatever is mid-composition before the profile goes away,
+            // then persist the command through the same file the tray owns —
+            // its watcher (and every other TSF process's watcher) picks it up.
+            let mut settings = buttre_core::Settings::load();
+            if settings.enabled {
+                settings.enabled = false;
+                if let Err(e) = settings.save() {
+                    debug!("OnActivated: could not persist enabled=false: {e:?}");
+                } else {
+                    debug!("OnActivated: user left the buttre profile — IME off");
+                }
+            }
+        }
         Ok(())
     }
 }

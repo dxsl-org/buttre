@@ -247,8 +247,10 @@ pub fn run() -> anyhow::Result<()> {
         let new_settings = Settings {
             input_method,
             // Untouched on purpose: on/off belongs to the tray and the OS, not
-            // to this window (ADR-0003).
+            // to this window (ADR-0003). Same for the transport kill switch —
+            // it is a field-diagnostics knob (hand-edit), not a user setting.
             enabled: settings.enabled,
+            hook_fallback: settings.hook_fallback,
             auto_correct: settings.auto_correct,
             shorthand: window.get_shorthand_enabled(),
             startup: window.get_autostart(),
