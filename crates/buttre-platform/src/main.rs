@@ -100,6 +100,17 @@ fn dispatch_toggle_last_word(keyboard: &Arc<RwLock<Option<Keyboard>>>) {
 #[cfg(not(platform_windows))]
 fn dispatch_toggle_last_word(_keyboard: &Arc<RwLock<Option<Keyboard>>>) {}
 
+/// Pick a method AND turn the IME on — the meaning of every method-selection
+/// surface (tray menu, hotkeys, panel radio). One helper so the surfaces
+/// cannot drift: choosing Telex while off must never leave the user staring at
+/// an IME that changed its label but still types nothing (they would read it
+/// as a bug, not a state).
+fn select_method(app_state: &Arc<Mutex<AppState>>, method: &str) -> anyhow::Result<()> {
+    let mut state = app_state.lock().unwrap();
+    state.set_method(method)?;
+    state.set_enabled(true)
+}
+
 /// `buttre --register-tsf` / `--unregister-tsf`: install or remove the TSF
 /// text-service registration for the DLL sitting next to this executable.
 ///
@@ -625,18 +636,16 @@ fn main() -> Result<()> {
         ]
     });
 
-    // Validate input method (fallback to English if method not found)
-    let is_valid_method = match settings.input_method.as_str() {
-        "english" => true,
-        method_id => all_methods.iter().any(|m| m.id == method_id),
-    };
-
+    // Validate input method. A stale id (its custom TOML was deleted) falls
+    // back to telex — the method field must always name a REAL method; "off"
+    // is `Settings::enabled`, not a method value (ADR-0003).
+    let is_valid_method = all_methods.iter().any(|m| m.id == settings.input_method);
     if !is_valid_method {
         warn!(
-            "Input method '{}' not found, falling back to English",
+            "Input method '{}' not found, falling back to telex",
             settings.input_method
         );
-        settings.input_method = "english".to_string();
+        settings.input_method = "telex".to_string();
         if let Err(e) = settings.save() {
             error!("Failed to save settings: {:?}", e);
         }
@@ -765,7 +774,12 @@ fn main() -> Result<()> {
     // wiring it BEFORE `set_method` below mirrors the learning/macros order.
     keyboard_manager.set_strict_spelling(settings.strict_spelling);
 
-    // Apply initial settings to keyboard
+    // Apply initial settings to keyboard. Order matters: the enabled flag must
+    // be in place BEFORE set_method, because set_method only builds a keyboard
+    // while enabled (off records the method without loading anything).
+    if let Err(e) = keyboard_manager.set_enabled(settings.enabled) {
+        error!("Failed to apply enabled state: {:?}", e);
+    }
     if let Err(e) = keyboard_manager.set_method(&settings.input_method) {
         error!("Failed to set initial input method: {:?}", e);
     }
@@ -786,23 +800,13 @@ fn main() -> Result<()> {
     backend.init(keyboard.clone())?;
 
     // ============================================================================
-    // ARCHITECTURE NOTE: backend.set_enabled() is NOT needed anymore!
+    // ARCHITECTURE NOTE: backend.set_enabled() is deliberately NOT called.
     // ============================================================================
-    // Old design (WRONG):
-    //   backend.set_enabled(settings.input_method != "english");
-    //   → This set VIETNAMESE_ENABLED flag, which got out of sync
-    //   → When user selected VNI from menu, keyboard loaded but flag stayed false
-    //   → Result: VNI didn't work!
-    //
-    // New design (CORRECT):
-    //   - Backend shares KEYBOARD Arc with KeyboardManager
-    //   - KeyboardManager.set_method() updates KEYBOARD directly
-    //   - Hook checks KEYBOARD.is_some() (not a separate flag!)
-    //   - Everything syncs automatically via shared Arc
-    //   - No need to call set_enabled() at all!
-    //
-    // The line below is commented out for documentation:
-    // backend.set_enabled(settings.input_method != "english");  // ← NOT NEEDED!
+    // The hook's one source of truth is KEYBOARD.is_some() — a separate flag
+    // once desynced and broke VNI (keyboard loaded, flag stale). The
+    // enabled/method split keeps that invariant: KeyboardManager::set_enabled
+    // loads/unloads the KEYBOARD itself, so the hook needs no flag and the
+    // backend needs no notification.
     // ============================================================================
 
     let backend = Arc::new(backend);
@@ -923,16 +927,11 @@ fn main() -> Result<()> {
     #[cfg(platform_linux)]
     watch_enabled_file(enabled_file_tx);
 
-    // Method stashed by the enabled-file mirror when IT flips the tray to
-    // English on an OS input-source switch away from buttre. "english" is a
-    // real Store-B id now (engine passthrough), so the mirror's own
-    // `set_method("english")` overwrites Store B — without this stash the
-    // re-enable branch could only read back "english" and the user's real
-    // Vietnamese method would be lost across an OS round-trip. `None` whenever
-    // the last disable was NOT mirror-initiated (e.g. the user picked English
-    // themselves, which must persist across the round-trip).
-    #[cfg(platform_linux)]
-    let mut os_disable_stash: Option<String> = None;
+    // NOTE (enabled/method split, ADR-0003): the `os_disable_stash` that used
+    // to live here is gone. It existed only because turning off OVERWROTE the
+    // method with "english", so the pre-disable method had to be remembered
+    // somewhere. With `enabled` separate, nothing overwrites the method and
+    // there is nothing to restore.
 
     // --- Event Loop ---
     let menu_channel = muda::MenuEvent::receiver();
@@ -973,9 +972,10 @@ fn main() -> Result<()> {
                 // Process UI events from observers
                 while let Ok(ui_event) = ui_rx.try_recv() {
                     match ui_event {
-                        UIEvent::UpdateMenuCheckmarks(method) => {
+                        UIEvent::UpdateMenuCheckmarks(method, enabled) => {
                             helpers::update_menu_checkmarks(
                                 &method,
+                                enabled,
                                 &english_item,
                                 &chu_viet_menu,
                                 &telex_item,
@@ -1083,6 +1083,17 @@ fn main() -> Result<()> {
                                 error!("Failed to apply external method change: {:?}", e);
                             }
                         }
+                        // The on/off flag can be edited externally too (hand
+                        // edit today; other surfaces later). Same diff-and-
+                        // apply as the method, through the same setter the
+                        // tray's own toggle uses.
+                        if new_settings.enabled != known.enabled {
+                            if let Err(e) =
+                                app_state.lock().unwrap().set_enabled(new_settings.enabled)
+                            {
+                                error!("Failed to apply external enabled change: {:?}", e);
+                            }
+                        }
                         if new_settings.backspace_mode != known.backspace_mode {
                             let mode =
                                 BackspaceMode::from_settings_str(&new_settings.backspace_mode);
@@ -1175,56 +1186,57 @@ fn main() -> Result<()> {
                 // the settings.toml write it also triggers is likewise a no-op
                 // for the settings watcher (AppState already matches).
                 //
-                // `disk` is any KNOWN_METHODS id — telex/vni/nom, or "english"
-                // since the passthrough method landed (panel "English" radio,
-                // the tray's own echo, or the enabled-mirror below). Comparing
-                // against AppState's current method (which may be a custom
-                // TOML id) is deliberate: a method picked from the IBus panel
-                // always wins and the tray adopts it, in either direction
-                // (English → Vietnamese and Vietnamese → English).
+                // `disk` is any KNOWN_METHODS id. "english" is still a WIRE
+                // value in this file (the engine's passthrough radio — phase 04
+                // reworks the panel); in the split model it is a COMMAND to
+                // turn off, never a method to store (ADR-0003 invariant 1). A
+                // real method picked from the panel expresses intent to type,
+                // so it also switches the IME on — the same rule the tray menu
+                // and hotkeys follow.
                 #[cfg(platform_linux)]
                 if method_file_rx.try_iter().count() > 0 {
                     use buttre_platform::platforms::linux::method_sync;
-                    let known = app_state.lock().unwrap().settings().input_method.clone();
                     let disk = method_sync::read_method();
-                    if disk != known {
+                    let (known_method, known_enabled) = {
+                        let state = app_state.lock().unwrap();
+                        (
+                            state.settings().input_method.clone(),
+                            state.settings().enabled,
+                        )
+                    };
+                    if disk == "english" {
+                        if known_enabled {
+                            info!("panel switched to english — turning the IME off");
+                            if let Err(e) = app_state.lock().unwrap().set_enabled(false) {
+                                error!("Failed to apply panel disable: {e:?}");
+                            }
+                        }
+                    } else if disk != known_method || !known_enabled {
                         info!("method file changed externally — applying {disk}");
-                        if let Err(e) = app_state.lock().unwrap().set_method(&disk) {
+                        let mut state = app_state.lock().unwrap();
+                        if let Err(e) = state.set_method(&disk) {
                             error!("Failed to apply external method change: {e:?}");
+                        }
+                        if let Err(e) = state.set_enabled(true) {
+                            error!("Failed to enable after external method change: {e:?}");
                         }
                     }
                 }
 
                 // The engine writes `enabled` on IBus Enable/Disable — an OS
-                // input-source switch between buttre and another source. Mirror
-                // it in the tray: disabled ⇒ show English; re-enabled ⇒ restore
-                // the method stashed at disable time (see `os_disable_stash` —
-                // `set_method("english")` writes Store B since english became a
-                // real passthrough id, so Store B alone no longer remembers the
-                // pre-disable method). Own-write suppression: only the ENGINE
-                // writes this file; the Store-B write that set_method triggers
-                // refires the METHOD watcher above, where disk == AppState
-                // suppresses it.
+                // input-source switch between buttre and another source. A
+                // straight command onto `Settings::enabled` now: the method is
+                // untouched, so there is no stash and nothing to restore.
+                // Own-write suppression stays value-based: only the ENGINE
+                // writes this file, and equal values are ignored.
                 #[cfg(platform_linux)]
                 if enabled_file_rx.try_iter().count() > 0 {
                     use buttre_platform::platforms::linux::method_sync;
                     let enabled = method_sync::read_enabled();
-                    let known_method = app_state.lock().unwrap().settings().input_method.clone();
-                    let known_enabled = known_method != "english";
+                    let known_enabled = app_state.lock().unwrap().settings().enabled;
                     if enabled != known_enabled {
-                        let target = if enabled {
-                            // No stash ⇒ the disable wasn't mirror-initiated
-                            // (user picked English explicitly): keep whatever
-                            // Store B says — which is exactly that choice.
-                            os_disable_stash
-                                .take()
-                                .unwrap_or_else(method_sync::read_method)
-                        } else {
-                            os_disable_stash = Some(method_sync::read_method());
-                            "english".to_string()
-                        };
-                        info!("engine enabled={enabled} — tray applying method {target}");
-                        if let Err(e) = app_state.lock().unwrap().set_method(&target) {
+                        info!("engine enabled={enabled} — tray mirroring");
+                        if let Err(e) = app_state.lock().unwrap().set_enabled(enabled) {
                             error!("Failed to apply engine enable/disable: {e:?}");
                         }
                     }
@@ -1238,27 +1250,27 @@ fn main() -> Result<()> {
                                 error!("Failed to toggle: {:?}", e);
                             }
                         }
+                        // Picking a method expresses intent to TYPE with it, so
+                        // it also turns the IME on — pre-split behavior
+                        // (set_method used to imply enabled), now explicit.
                         HotkeyAction::Telex => {
-                            if let Err(e) = app_state.lock().unwrap().set_method("telex") {
+                            if let Err(e) = select_method(&app_state, "telex") {
                                 error!("Failed to set method: {:?}", e);
                             }
                         }
                         HotkeyAction::Vni => {
-                            if let Err(e) = app_state.lock().unwrap().set_method("vni") {
+                            if let Err(e) = select_method(&app_state, "vni") {
                                 error!("Failed to set method: {:?}", e);
                             }
                         }
                         HotkeyAction::Nom => {
-                            if let Err(e) = app_state.lock().unwrap().set_method("nom") {
+                            if let Err(e) = select_method(&app_state, "nom") {
                                 error!("Failed to set method: {:?}", e);
                             }
                         }
                         HotkeyAction::Custom(index) => {
                             if let Some((method_data, _)) = custom_items.get(index) {
-                                // Direct .id access
-                                if let Err(e) =
-                                    app_state.lock().unwrap().set_method(&method_data.id)
-                                {
+                                if let Err(e) = select_method(&app_state, &method_data.id) {
                                     error!("Failed to set method: {:?}", e);
                                 }
                             }
@@ -1281,13 +1293,17 @@ fn main() -> Result<()> {
                         buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(false);
                         elwt.exit();
                     } else if event.id == nom_item.id() {
-                        let _ = app_state.lock().unwrap().set_method("nom");
+                        let _ = select_method(&app_state, "nom");
                     } else if event.id == english_item.id() {
-                        let _ = app_state.lock().unwrap().set_method("english");
+                        // The "English" menu item now means OFF (ADR-0003) —
+                        // phase 02 replaces it with a proper "Bật bộ gõ" check
+                        // item + greyscale icon; the wiring is already the
+                        // enabled flag, not a method.
+                        let _ = app_state.lock().unwrap().set_enabled(false);
                     } else if event.id == telex_item.id() {
-                        let _ = app_state.lock().unwrap().set_method("telex");
+                        let _ = select_method(&app_state, "telex");
                     } else if event.id == vni_item.id() {
-                        let _ = app_state.lock().unwrap().set_method("vni");
+                        let _ = select_method(&app_state, "vni");
                     } else if event.id == cau_hinh_item.id() {
                         // Spawn the config window as a separate PROCESS
                         // (same exe, `--config` arg-dispatch in `main`) —
@@ -1310,8 +1326,7 @@ fn main() -> Result<()> {
                     } else {
                         for (method_data, item) in &custom_items {
                             if event.id == item.id() {
-                                // Direct .id access
-                                let _ = app_state.lock().unwrap().set_method(&method_data.id);
+                                let _ = select_method(&app_state, &method_data.id);
                                 break;
                             }
                         }

@@ -50,11 +50,10 @@ struct MethodChoice {
 /// `buttre-platform`, to keep its winit-0.29 tray stack out of this
 /// binary's `--config` code path).
 fn discover_methods() -> Vec<MethodChoice> {
+    // No "English" entry: turning the IME off is `Settings::enabled`, not a
+    // method (ADR-0003). Listing it here would put a second on/off control in
+    // the config window, which is the ownership split this release removes.
     let mut methods = vec![
-        MethodChoice {
-            id: "english".to_string(),
-            name: "English".to_string(),
-        },
         MethodChoice {
             id: "telex".to_string(),
             name: "Telex".to_string(),
@@ -125,7 +124,7 @@ fn apply_settings_to_window(window: &ConfigWindow, settings: &Settings, methods:
         methods
             .get(method_index as usize)
             .map(|m| m.name.as_str())
-            .unwrap_or("English")
+            .unwrap_or("Telex")
             .into(),
     );
     window.set_autostart(settings.startup);
@@ -238,13 +237,18 @@ pub fn run() -> anyhow::Result<()> {
             return;
         };
         let index = window.get_method_index().max(0) as usize;
+        // A bogus index keeps whatever is saved — the picker must never be able
+        // to silently retarget the user's method.
         let input_method = methods
             .get(index)
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| "english".to_string());
+            .unwrap_or_else(|| settings.input_method.clone());
 
         let new_settings = Settings {
             input_method,
+            // Untouched on purpose: on/off belongs to the tray and the OS, not
+            // to this window (ADR-0003).
+            enabled: settings.enabled,
             auto_correct: settings.auto_correct,
             shorthand: window.get_shorthand_enabled(),
             startup: window.get_autostart(),

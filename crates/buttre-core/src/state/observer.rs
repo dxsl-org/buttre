@@ -10,11 +10,14 @@ use super::Settings;
 /// Implementors of this trait will be notified when the application state changes,
 /// allowing them to update UI, backend systems, or perform other side effects.
 pub trait StateObserver: Send + Sync {
-    /// Called when the input method changes
+    /// Called when the input STATE changes — either the method or the on/off
+    /// flag. Both arrive through this one call on purpose: it already carries
+    /// the full pair, so an observer can never act on half of a change.
     ///
     /// # Arguments
-    /// * `method` - The new input method ID (e.g., "telex", "vni", "nom", "english")
-    /// * `enabled` - Whether Vietnamese input is enabled (false for "english")
+    /// * `method` - The new input method ID: `"telex"`, `"vni"`, `"nom"`, or a
+    ///   custom id. NEVER `"english"` — off is carried by `enabled` (ADR-0003).
+    /// * `enabled` - Whether the input method is on
     fn on_method_changed(&self, method: &str, enabled: bool);
 
     /// Called when settings are updated

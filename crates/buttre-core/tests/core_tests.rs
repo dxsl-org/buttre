@@ -54,17 +54,21 @@ fn test_toggle() {
     let mut core = ButtreCore::new().unwrap();
     core.init().unwrap();
 
-    // Start with telex
+    // enabled/method split (ADR-0003): switching methods no longer implies
+    // turning on — the two are commanded separately.
     core.switch_method("telex").unwrap();
+    core.set_enabled(true).unwrap();
     assert!(core.is_enabled());
 
-    // Toggle to english
+    // Toggle off: the method survives untouched.
     core.toggle().unwrap();
     assert!(!core.is_enabled());
+    assert_eq!(core.current_method(), "telex");
 
-    // Toggle back to telex
+    // Toggle back on: same method, nothing to restore.
     core.toggle().unwrap();
     assert!(core.is_enabled());
+    assert_eq!(core.current_method(), "telex");
 }
 
 #[test]

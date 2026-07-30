@@ -8,8 +8,10 @@ fn test_create_settings_service() {
     let settings = Settings::default();
     let service = SettingsService::with_settings(settings, bus);
 
-    // Should have default settings
-    assert_eq!(service.input_method(), "english");
+    // Fresh-install defaults after the enabled/method split (ADR-0003):
+    // a real method is pre-selected, and "off" lives in `enabled`, not here.
+    assert_eq!(service.input_method(), "telex");
+    assert!(!service.settings().enabled);
 }
 
 #[test]

@@ -4,7 +4,7 @@ use std::sync::mpsc;
 
 /// Events sent from UIObserver to the main thread
 pub enum UIEvent {
-    UpdateMenuCheckmarks(String),
+    UpdateMenuCheckmarks(String, bool),
     UpdateTrayIcon(String, bool),
 }
 
@@ -20,11 +20,11 @@ impl MainUICallback {
 }
 
 impl UICallback for MainUICallback {
-    fn update_menu_checkmarks(&self, method: &str) {
+    fn update_menu_checkmarks(&self, method: &str, enabled: bool) {
         info!("Proxying menu update for: {}", method);
         let _ = self
             .sender
-            .send(UIEvent::UpdateMenuCheckmarks(method.to_string()));
+            .send(UIEvent::UpdateMenuCheckmarks(method.to_string(), enabled));
     }
 
     fn update_tray_icon(&self, method: &str, enabled: bool) {

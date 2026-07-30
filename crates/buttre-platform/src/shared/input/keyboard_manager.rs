@@ -39,18 +39,50 @@ pub struct KeyboardManager {
     /// fields above) because a fresh `Keyboard` built in `set_method` always
     /// starts lenient and must have the user's choice re-applied.
     strict_spelling: Mutex<bool>,
+    /// Mirrors `Settings::enabled`. Remembered so [`Self::set_method`] knows
+    /// whether a method change should actually LOAD a keyboard: while the IME
+    /// is off the chosen method is recorded but nothing is built.
+    ///
+    /// Deliberately NOT exposed to the hook as a flag. `keyboard.is_some()`
+    /// stays the one source of truth for "is buttre typing" — a second flag is
+    /// exactly what `hook::HookBackend::set_enabled`'s architecture note
+    /// records as having desynced and broken VNI once already.
+    enabled: Mutex<bool>,
 }
 
 impl KeyboardManager {
-    /// Create a new keyboard manager (starts with no keyboard - English mode)
+    /// Create a new keyboard manager. Starts with no keyboard loaded: the IME is
+    /// off until `set_enabled(true)`, matching `Settings::default()`.
     pub fn new() -> Result<Self> {
         Ok(Self {
             keyboard: Arc::new(RwLock::new(None)),
-            current_method: Arc::new(Mutex::new("english".to_string())),
+            current_method: Arc::new(Mutex::new(String::new())),
             learning: Mutex::new(None),
             macros: Mutex::new(None),
             strict_spelling: Mutex::new(false),
+            enabled: Mutex::new(false),
         })
+    }
+
+    /// Turn the IME on or off.
+    ///
+    /// `false` unloads the `Keyboard`; `true` rebuilds it for the remembered
+    /// method. Unloading rather than keeping it and bypassing is what preserves
+    /// the single-source-of-truth invariant above — and a rebuild costs exactly
+    /// what a method switch costs, a path already exercised constantly.
+    pub fn set_enabled(&self, enabled: bool) -> Result<()> {
+        *self.enabled.lock().unwrap() = enabled;
+        if !enabled {
+            *self.keyboard.write().unwrap() = None;
+            tracing::info!("KeyboardManager: IME off, keyboard unloaded");
+            return Ok(());
+        }
+        let method = self.current_method();
+        if method.is_empty() {
+            tracing::warn!("KeyboardManager: enabled with no method chosen yet");
+            return Ok(());
+        }
+        self.set_method(&method)
     }
 
     /// Get a clone of the keyboard Arc for sharing across threads
@@ -129,15 +161,19 @@ impl KeyboardManager {
         }
     }
 
-    /// Set the input method
+    /// Set the input method.
+    ///
+    /// Records the choice unconditionally, but only BUILDS a keyboard when the
+    /// IME is on — so picking a method while off prepares it for the next
+    /// `set_enabled(true)` without starting to type.
     pub fn set_method(&self, method: &str) -> Result<()> {
         tracing::info!("KeyboardManager: Setting method to '{}'", method);
 
         *self.current_method.lock().unwrap() = method.to_string();
 
-        if method == "english" {
-            // English mode - clear keyboard
+        if !*self.enabled.lock().unwrap() {
             *self.keyboard.write().unwrap() = None;
+            tracing::info!("KeyboardManager: IME off, method '{method}' recorded only");
             return Ok(());
         }
 
@@ -190,7 +226,7 @@ impl KeyboardManager {
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "Failed to load custom keyboard: {}, falling back to English",
+                                "Failed to load custom keyboard: {}, leaving the IME silent",
                                 e
                             );
                             *self.keyboard.write().unwrap() = None;
@@ -199,7 +235,7 @@ impl KeyboardManager {
                     }
                 } else {
                     tracing::warn!(
-                        "Custom keyboard '{}' not found at {:?}, falling back to English",
+                        "Custom keyboard '{}' not found at {:?}, leaving the IME silent",
                         method,
                         config_path
                     );

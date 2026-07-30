@@ -119,11 +119,11 @@ impl ButtreCore {
             .create_preset(Preset::Vni)
             .context("Failed to create VNI keyboard")?;
 
-        // Load current method from settings
+        // Load current method from settings; activate it only when the IME is
+        // on (`Settings::enabled`, ADR-0003 — the method field itself is
+        // always a real method now).
         let current_method = self.settings.input_method().to_string();
-
-        // Switch to it (if it's not english)
-        if current_method != "english" && self.keyboard.has(&current_method) {
+        if self.state.is_enabled() && self.keyboard.has(&current_method) {
             self.keyboard.switch(&current_method)?;
         }
 
@@ -165,11 +165,11 @@ impl ButtreCore {
     ///
     /// # Arguments
     ///
-    /// * `id` - Method ID (e.g., "telex", "vni", "english")
+    /// * `id` - Method ID: `"telex"`, `"vni"`, `"nom"`, or a custom id. Never
+    ///   `"english"` — off is [`Self::set_enabled`] (ADR-0003).
     pub fn switch_method(&mut self, id: &str) -> Result<()> {
-        // If switching to a Vietnamese method, ensure keyboard exists
-        if id != "english" && !self.keyboard.has(id) {
-            // Try to load the config and create the keyboard
+        // Ensure the keyboard exists before recording anything.
+        if !self.keyboard.has(id) {
             let config = self
                 .config
                 .load(id)
@@ -177,10 +177,7 @@ impl ButtreCore {
             self.keyboard.create(id, config)?;
         }
 
-        // Switch keyboard (or set to None for english)
-        if id != "english" {
-            self.keyboard.switch(id)?;
-        }
+        self.keyboard.switch(id)?;
 
         // Update settings
         self.settings.set_input_method(id)?;
@@ -191,17 +188,17 @@ impl ButtreCore {
         Ok(())
     }
 
-    /// Toggle between Vietnamese and English
-    ///
-    /// If currently in English, switches to the last Vietnamese method.
-    /// If currently in Vietnamese, switches to English.
-    pub fn toggle(&mut self) -> Result<()> {
-        self.state.toggle()?;
-
-        let new_method = self.state.current_method().to_string();
-        self.switch_method(&new_method)?;
-
+    /// Turn the input method on or off. The chosen method is untouched, so
+    /// toggling off and on lands back on it.
+    pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.state.set_enabled(enabled)?;
+        self.settings.set_enabled(enabled)?;
         Ok(())
+    }
+
+    /// Flip the input method on/off.
+    pub fn toggle(&mut self) -> Result<()> {
+        self.set_enabled(!self.state.is_enabled())
     }
 
     /// Get the current input method ID

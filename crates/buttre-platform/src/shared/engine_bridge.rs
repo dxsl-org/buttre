@@ -153,13 +153,18 @@ pub struct EngineBridge {
     /// only the IBus engine flips it off via [`Self::set_use_composition`] once
     /// the client is confirmed to support in-place deletion. Nôm ignores it.
     use_composition: bool,
-    /// English/passthrough mode (`method == "english"`): the bridge stops
-    /// composing entirely — every key returns unhandled with no ops, so the
-    /// raw keystroke reaches the app. This is how "tắt bộ gõ" works WITHOUT
-    /// touching the OS input source (Unikey model): the engine stays the
-    /// active IBus engine, it just goes silent. The `keyboard` field keeps its
-    /// last real build (never consulted while passthrough) so no call path
-    /// has to handle a missing keyboard.
+    /// Passthrough mode — the IME is OFF: the bridge stops composing entirely,
+    /// every key returns unhandled with no ops, so the raw keystroke reaches
+    /// the app. The engine stays the active IBus engine, it just goes silent
+    /// (Unikey model). The `keyboard` field keeps its last real build (never
+    /// consulted while passthrough) so no call path has to handle a missing
+    /// keyboard.
+    ///
+    /// Owned by `Settings::enabled` via [`Self::set_enabled`] (ADR-0003).
+    /// `rebuild("english")` still flips it as a MIGRATION SHIM: `"english"`
+    /// remains the wire value in the Linux `method_sync` file until phase 04
+    /// reworks the OS-owned surfaces, and the engine processes reading that
+    /// file cannot be broken from here.
     passthrough: bool,
 }
 
@@ -246,6 +251,30 @@ impl EngineBridge {
         &self.preedit
     }
 
+    /// Turn the IME on or off — the model-level control [`Self::passthrough`]
+    /// belongs to. Turning off flushes nothing by itself; hosts that need the
+    /// pending word committed first call [`Self::flush_pending`] before this.
+    /// Returns the ops that clear any live preedit/candidates so the switch
+    /// never strands half a word on screen.
+    pub fn set_enabled(&mut self, enabled: bool) -> KeyOutcome {
+        if self.passthrough == enabled {
+            self.passthrough = !enabled;
+            if !enabled {
+                self.keyboard.reset();
+                return self.reset_outcome();
+            }
+        }
+        KeyOutcome {
+            ops: Vec::new(),
+            handled: true,
+        }
+    }
+
+    /// Is the IME on?
+    pub fn is_enabled(&self) -> bool {
+        !self.passthrough
+    }
+
     /// Inject the host's `Settings::strict_spelling` mirror (see the
     /// `strict_spelling` field doc) and apply its current value immediately.
     /// Hosts call this once, right after construction — later changes flow
@@ -322,14 +351,14 @@ impl EngineBridge {
     /// The new keyboard keeps the current preedit model (`use_composition`),
     /// except Nôm which always composes.
     ///
-    /// `"english"` needs no keyboard build at all: it flips [`Self::passthrough`]
-    /// on and keeps the previous keyboard idle (see the field doc) — so it can
-    /// never fail, and switching back to a real method clears the flag.
+    /// MIGRATION SHIM (remove in phase 04): `"english"` is still the Linux
+    /// `method_sync` wire value for "IME off", and the engine processes reading
+    /// that file cannot be broken from here. It maps to `set_enabled(false)` —
+    /// note it does NOT overwrite [`Self::method`], so the real method survives
+    /// and switching back on lands where the user left off.
     pub fn rebuild(&mut self, method: &str) -> Option<KeyOutcome> {
         if method == "english" {
-            self.method = method.to_string();
-            self.passthrough = true;
-            return Some(self.reset_outcome());
+            return Some(self.set_enabled(false));
         }
         let keyboard = build_keyboard(method, self.use_composition)?;
         self.method = method.to_string();

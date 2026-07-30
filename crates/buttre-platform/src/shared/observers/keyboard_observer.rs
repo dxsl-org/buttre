@@ -23,11 +23,19 @@ impl KeyboardObserver {
 }
 
 impl StateObserver for KeyboardObserver {
-    fn on_method_changed(&self, method: &str, _enabled: bool) {
-        info!("KeyboardObserver: Updating keyboard to method '{}'", method);
+    fn on_method_changed(&self, method: &str, enabled: bool) {
+        info!("KeyboardObserver: method '{method}', enabled={enabled}");
 
-        if let Err(e) = self.keyboard_manager.set_method(method) {
-            log::error!("Failed to set keyboard method: {:?}", e);
+        // Order matters: the manager only BUILDS a keyboard while enabled, so
+        // the flag must land first or an off→on notification would record the
+        // method and then build nothing.
+        if let Err(e) = self.keyboard_manager.set_enabled(enabled) {
+            log::error!("Failed to apply enabled state: {:?}", e);
+        }
+        if enabled {
+            if let Err(e) = self.keyboard_manager.set_method(method) {
+                log::error!("Failed to set keyboard method: {:?}", e);
+            }
         }
     }
 

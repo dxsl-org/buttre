@@ -43,8 +43,10 @@ impl WindowsBackend {
         };
 
         Ok(Self {
+            // Off + no method yet; the first `on_method_changed` notification
+            // fills both. "english" is not a method value anymore (ADR-0003).
             enabled: Arc::new(Mutex::new(false)),
-            current_method: Arc::new(Mutex::new("english".to_string())),
+            current_method: Arc::new(Mutex::new(String::new())),
             mode,
         })
     }

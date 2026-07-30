@@ -15,8 +15,34 @@ use std::path::PathBuf;
 /// These settings are persisted to disk and loaded on application startup.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
-    /// Current input method ID (e.g., "english", "telex", "vni", "nom", or custom method ID)
+    /// Current input method ID: `"telex"`, `"vni"`, `"nom"`, or a custom
+    /// method id (a `keyboards/<id>.toml` filename stem).
+    ///
+    /// NEVER `"english"`. Turning the IME off is [`Self::enabled`], a separate
+    /// field — see its doc for why the two cannot share one field. A
+    /// `settings.toml` written before the split is migrated on load.
     pub input_method: String,
+
+    /// Is the input method ON at all?
+    ///
+    /// Separate from [`Self::input_method`] because the two answer different
+    /// questions, and cramming both into one field is what made every
+    /// tray↔system sync attempt fail: `"english"` was stored AS a method, but
+    /// to an operating system "English" is not a state of buttre — it is the
+    /// ABSENCE of buttre. One side held a value the other could not express,
+    /// so no amount of mirroring could reconcile them (see ADR-0003).
+    ///
+    /// Consequences of the split, relied upon elsewhere:
+    /// - turning off and on again preserves the chosen method (nothing
+    ///   overwrites `input_method`, so nothing has to be restored)
+    /// - several places may WRITE this flag (tray click, hotkey, the OS
+    ///   telling us the user switched away); none of them MIRRORS another
+    ///
+    /// `serde(default)` is `true`, which is the right answer for the case it
+    /// actually covers: a `settings.toml` that predates this field but names a
+    /// real method — that user had the IME on.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 
     /// Enable auto-correction features
     pub auto_correct: bool,
@@ -89,6 +115,28 @@ fn default_learning_enabled() -> bool {
     true
 }
 
+/// The method a user lands on when nothing better is known — a fresh install,
+/// or a pre-split `settings.toml` that only recorded "off".
+fn default_method() -> String {
+    "telex".to_string()
+}
+
+/// `serde(default)` value for `Settings::enabled`.
+///
+/// `true`, and deliberately DIFFERENT from what `Settings::default()` uses.
+/// The two answer different questions:
+///
+/// - this one: "an existing `settings.toml` has no `enabled` field" — it was
+///   written before the split, and if it names a real method then the IME was
+///   on, so `true`.
+/// - `Settings::default()`: "there is no file at all" — a fresh install, which
+///   has always started with the IME off (the old default was
+///   `input_method = "english"`). Kept off so installing buttre does not
+///   silently start rewriting the user's keystrokes.
+fn default_enabled() -> bool {
+    true
+}
+
 /// `serde(default)` value for `Settings::use_preedit` — preedit ON, matching
 /// the behavior every prior release shipped so an old `settings.toml` (and a
 /// fresh install) keeps the known-good underline model until the user opts out.
@@ -99,7 +147,12 @@ fn default_use_preedit() -> bool {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            input_method: "english".to_string(),
+            // Fresh install: a method is pre-selected but the IME is OFF, which
+            // is exactly what `input_method = "english"` meant before the split.
+            // See `default_enabled`'s doc for why this differs from the
+            // `serde(default)`.
+            input_method: "telex".to_string(),
+            enabled: false,
             auto_correct: false,
             shorthand: false,
             startup: true,
@@ -136,8 +189,8 @@ impl Settings {
             Ok(path) => {
                 if path.exists() {
                     if let Ok(content) = fs::read_to_string(&path) {
-                        if let Ok(settings) = toml::from_str(&content) {
-                            return settings;
+                        if let Ok(settings) = toml::from_str::<Self>(&content) {
+                            return settings.migrated();
                         }
                     }
                 }
@@ -145,6 +198,36 @@ impl Settings {
             Err(e) => eprintln!("Failed to get settings path: {:?}", e),
         }
         Self::default()
+    }
+
+    /// Fold a pre-split `settings.toml` into the `enabled` + `input_method`
+    /// model, and write the result back so the next load needs no inference.
+    ///
+    /// `input_method = "english"` used to mean "IME off". It carried no record
+    /// of which Vietnamese method to return to — `last_vietnamese_method` lived
+    /// only in memory — so the method resets to Telex. That is the one thing
+    /// this migration cannot preserve, and it is why it must happen ONCE and be
+    /// persisted: re-deriving it on every load would re-apply the reset over a
+    /// choice the user made after upgrading.
+    ///
+    /// A save failure is logged and ignored: the in-memory value is already
+    /// correct, so the session behaves properly and the migration simply runs
+    /// again next time.
+    fn migrated(mut self) -> Self {
+        if !Self::is_off_sentinel(&self.input_method) {
+            return self;
+        }
+        self.enabled = false;
+        self.input_method = default_method();
+        if let Err(e) = self.save() {
+            eprintln!("Failed to persist migrated settings: {:?}", e);
+        }
+        self
+    }
+
+    /// Did this `input_method` value mean "IME off" in the pre-split model?
+    fn is_off_sentinel(method: &str) -> bool {
+        method.eq_ignore_ascii_case("english")
     }
 
     /// Save settings to file — atomically (temp file + rename).
@@ -216,6 +299,88 @@ mod tests {
             toml::from_str(toml_str).expect("must deserialize without use_preedit present");
         assert!(settings.use_preedit);
         assert!(Settings::default().use_preedit);
+    }
+
+    // ── enabled / input_method split (ADR-0003) ─────────────────────────────
+
+    #[test]
+    fn fresh_install_preselects_telex_but_stays_off() {
+        // What `input_method = "english"` used to mean. Installing buttre must
+        // not start rewriting keystrokes on its own.
+        let fresh = Settings::default();
+        assert!(!fresh.enabled);
+        assert_eq!(fresh.input_method, "telex");
+    }
+
+    #[test]
+    fn input_method_is_never_the_off_sentinel() {
+        assert!(!Settings::is_off_sentinel(
+            &Settings::default().input_method
+        ));
+    }
+
+    #[test]
+    fn pre_split_file_with_a_real_method_loads_as_on() {
+        // The case `serde(default)` exists for: no `enabled` field, but a method
+        // is named — that user had the IME running.
+        let toml_str = r#"
+            input_method = "vni"
+            auto_correct = false
+            shorthand = false
+            startup = false
+        "#;
+        let settings: Settings = toml::from_str(toml_str).expect("deserialize");
+        assert!(settings.enabled, "an named method meant the IME was on");
+        assert_eq!(settings.input_method, "vni");
+    }
+
+    #[test]
+    fn migration_turns_the_english_sentinel_into_off_plus_a_real_method() {
+        let toml_str = r#"
+            input_method = "english"
+            auto_correct = false
+            shorthand = false
+            startup = false
+        "#;
+        // Deserialize + migrate WITHOUT touching the real settings file: the
+        // in-memory fold is what `load()` applies, and it is the part worth
+        // pinning (`migrated()` also persists, which needs a real path).
+        let raw: Settings = toml::from_str(toml_str).expect("deserialize");
+        assert!(raw.enabled, "serde default fires before migration");
+
+        let mut folded = raw;
+        folded.enabled = false;
+        folded.input_method = default_method();
+        assert!(!folded.enabled);
+        assert_eq!(folded.input_method, "telex");
+        assert!(!Settings::is_off_sentinel(&folded.input_method));
+    }
+
+    #[test]
+    fn off_sentinel_recognised_whatever_the_case() {
+        // Hand-edited files exist; "English" must not slip through as a method.
+        for value in ["english", "English", "ENGLISH"] {
+            assert!(Settings::is_off_sentinel(value), "{value}");
+        }
+        for value in ["telex", "vni", "nom", "cham", ""] {
+            assert!(!Settings::is_off_sentinel(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn enabled_round_trips_through_toml() {
+        let settings = Settings {
+            enabled: false,
+            input_method: "nom".to_string(),
+            ..Settings::default()
+        };
+        let restored: Settings =
+            toml::from_str(&toml::to_string_pretty(&settings).expect("ser")).expect("deserialize");
+        assert!(
+            !restored.enabled,
+            "an explicit false must survive the round trip"
+        );
+        assert_eq!(restored.input_method, "nom");
     }
 
     #[test]

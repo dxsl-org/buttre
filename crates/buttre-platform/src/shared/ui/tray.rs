@@ -46,10 +46,17 @@ pub fn create_tray_icon(
     let vietnamese_icon = load_icon_from_bytes(VIETNAMESE_ICON_BYTES)
         .unwrap_or_else(|_| TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap());
 
-    // Determine initial tooltip and icon
-    let initial_tooltip = get_tooltip(&settings.input_method, custom_items);
+    // Determine initial tooltip and icon. OFF shows the English icon for now —
+    // phase 02 replaces this with a greyscale variant of the chosen method's
+    // icon; the "english" pseudo-method value itself is gone (ADR-0003).
+    let initial_key = if settings.enabled {
+        settings.input_method.as_str()
+    } else {
+        "english"
+    };
+    let initial_tooltip = get_tooltip(initial_key, custom_items);
     let initial_icon = get_icon_for_method(
-        &settings.input_method,
+        initial_key,
         custom_items,
         &telex_icon,
         &vni_icon,
@@ -75,10 +82,14 @@ pub fn create_tray_icon(
     ))
 }
 
-/// Get tooltip text for a given input method
+/// Get tooltip text for a given input method.
+///
+/// `"english"` here is a RENDERING key meaning "the IME is off", passed by the
+/// icon call sites — it is no longer a method id anywhere in state (ADR-0003).
+/// Phase 02 reworks these signatures to take `enabled` explicitly.
 pub fn get_tooltip(method: &str, custom_items: &[(MethodMetadata, MethodMenuItem)]) -> String {
     match method {
-        "english" => "buttre\nEnglish".to_string(),
+        "english" => "buttre\nĐã tắt".to_string(),
         "telex" => "buttre\nChữ Việt\nTELEX".to_string(),
         "vni" => "buttre\nChữ Việt\nVNI".to_string(),
         "nom" => "buttre\nChữ Nôm".to_string(),

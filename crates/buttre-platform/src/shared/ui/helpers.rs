@@ -17,8 +17,10 @@ use tray_icon::{Icon as TrayIcon, TrayIcon as TrayIconType};
 ///
 /// NOTE: muda's `Submenu` has no check state, so the "Chữ Việt" parent stays
 /// unmarked (text-prefix hacks were explicitly rejected).
+#[allow(clippy::too_many_arguments)] // reason: same shape as update_tray_icon below — the item-group struct is phase 02's IconSet cleanup
 pub fn update_menu_checkmarks(
     method: &str,
+    enabled: bool,
     english_item: &MethodMenuItem,
     _chu_viet_menu: &Submenu,
     telex_item: &MethodMenuItem,
@@ -26,12 +28,16 @@ pub fn update_menu_checkmarks(
     nom_item: &MethodMenuItem,
     custom_items: &[(MethodMetadata, MethodMenuItem)],
 ) {
-    set_method_checked(english_item, method == "english");
-    set_method_checked(telex_item, method == "telex");
-    set_method_checked(vni_item, method == "vni");
-    set_method_checked(nom_item, method == "nom");
+    // OFF renders as: "English" checked, no method checked — a method checkmark
+    // must never claim the IME is typing Vietnamese while it is not. The items
+    // stay CLICKABLE so the user can pick the method to come back on with
+    // (picking one re-enables — see `select_method` in main.rs).
+    set_method_checked(english_item, !enabled);
+    set_method_checked(telex_item, enabled && method == "telex");
+    set_method_checked(vni_item, enabled && method == "vni");
+    set_method_checked(nom_item, enabled && method == "nom");
     for (data, item) in custom_items {
-        set_method_checked(item, data.id == method);
+        set_method_checked(item, enabled && data.id == method);
     }
 }
 

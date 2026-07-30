@@ -18,14 +18,13 @@ use std::sync::Arc;
 /// # Thread Safety
 /// `AppState` is designed to be shared across threads using `Arc<Mutex<AppState>>`.
 pub struct AppState {
-    /// Whether Vietnamese input is currently enabled
+    /// Whether the input method is on. Mirrors `Settings::enabled`; NOT derived
+    /// from `current_method` (see ADR-0003 and `Settings::enabled`'s doc).
     enabled: bool,
 
-    /// Current input method ID (e.g., "telex", "vni", "nom", "english")
+    /// Current input method ID: `"telex"`, `"vni"`, `"nom"`, or a custom id.
+    /// Never `"english"` — off is [`Self::enabled`].
     current_method: String,
-
-    /// Last Vietnamese method used (for toggle functionality)
-    last_vietnamese_method: String,
 
     /// Application settings (persisted to disk)
     settings: Settings,
@@ -39,45 +38,21 @@ impl AppState {
     ///
     /// This will load settings from disk and initialize the state accordingly.
     pub fn new() -> Self {
-        let settings = Settings::load();
-        let enabled = settings.input_method != "english";
-        let current_method = settings.input_method.clone();
-        let last_vietnamese_method = if enabled {
-            current_method.clone()
-        } else {
-            "telex".to_string() // Default Vietnamese method
-        };
-
+        let state = Self::with_settings(Settings::load());
         info!(
             "Initialized AppState: method={}, enabled={}",
-            current_method, enabled
+            state.current_method, state.enabled
         );
-
-        Self {
-            enabled,
-            current_method,
-            last_vietnamese_method,
-            settings,
-            observers: Vec::new(),
-        }
+        state
     }
 
     /// Create a new `AppState` with custom settings
     ///
     /// Useful for testing or when you want to override default settings.
     pub fn with_settings(settings: Settings) -> Self {
-        let enabled = settings.input_method != "english";
-        let current_method = settings.input_method.clone();
-        let last_vietnamese_method = if enabled {
-            current_method.clone()
-        } else {
-            "telex".to_string()
-        };
-
         Self {
-            enabled,
-            current_method,
-            last_vietnamese_method,
+            enabled: settings.enabled,
+            current_method: settings.input_method.clone(),
             settings,
             observers: Vec::new(),
         }
@@ -165,7 +140,8 @@ impl AppState {
     /// 3. Notify all observers
     ///
     /// # Arguments
-    /// * `method` - The new input method ID (e.g., "telex", "vni", "nom", "english")
+    /// * `method` - The new input method ID: `"telex"`, `"vni"`, `"nom"`, or a
+    ///   custom id. NEVER `"english"` — use [`Self::set_enabled`].
     ///
     /// # Returns
     /// `Ok(())` if successful, or an error if settings could not be saved
@@ -175,48 +151,50 @@ impl AppState {
             method, self.current_method
         );
 
-        // Remember last Vietnamese method if switching away from one
-        if self.enabled && method == "english" {
-            self.last_vietnamese_method = self.current_method.clone();
-        }
-
-        // Update state
+        // Deliberately does NOT touch `enabled` (ADR-0003 invariant 2). Turning
+        // off used to overwrite this field with "english", which is why a
+        // `last_vietnamese_method` stash had to exist to undo it. With the two
+        // separate, off/on preserves the method for free — nothing to restore.
         self.current_method = method.to_string();
-        self.enabled = method != "english";
-
-        // Update last_vietnamese_method if switching to a Vietnamese method
-        if self.enabled {
-            self.last_vietnamese_method = method.to_string();
-        }
-
-        // Update and save settings
         self.settings.input_method = method.to_string();
         self.settings.save()?;
 
-        // Notify observers
         self.notify_method_changed();
 
         Ok(())
     }
 
-    /// Toggle between Vietnamese and English input
+    /// Turn the input method on or off, and notify observers.
     ///
-    /// If currently in English mode, switches to the last used Vietnamese method (or Telex as default).
-    /// If currently in Vietnamese mode, switches to English.
+    /// Independent of [`Self::set_method`]: toggling off and on again lands back
+    /// on the same method. Observers receive the same
+    /// [`StateObserver::on_method_changed`] notification as a method switch —
+    /// it already carries `(method, enabled)`, so one notification path keeps
+    /// observers from ever seeing half of a change.
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, or an error if settings could not be saved
+    pub fn set_enabled(&mut self, enabled: bool) -> anyhow::Result<()> {
+        if self.enabled == enabled {
+            return Ok(());
+        }
+        info!("Input method {}", if enabled { "on" } else { "off" });
+
+        self.enabled = enabled;
+        self.settings.enabled = enabled;
+        self.settings.save()?;
+
+        self.notify_method_changed();
+
+        Ok(())
+    }
+
+    /// Flip the input method on/off — the tray click and the toggle hotkey.
     ///
     /// # Returns
     /// `Ok(())` if successful, or an error if settings could not be saved
     pub fn toggle(&mut self) -> anyhow::Result<()> {
-        let new_method = if self.enabled {
-            // Currently enabled -> switch to English
-            "english".to_string()
-        } else {
-            // Currently disabled -> switch to last Vietnamese method
-            self.last_vietnamese_method.clone()
-        };
-
-        info!("Toggling: {} -> {}", self.current_method, new_method);
-        self.set_method(&new_method)
+        self.set_enabled(!self.enabled)
     }
 
     /// Save current settings to disk
