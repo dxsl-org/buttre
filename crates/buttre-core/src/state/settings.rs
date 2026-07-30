@@ -92,13 +92,20 @@ pub struct Settings {
     #[serde(default)]
     pub strict_spelling: bool,
 
-    /// Windows only: run the low-level hook ALONGSIDE the TSF text service, as
-    /// a fallback for apps TSF cannot reach (raw-input readers, some
-    /// terminals). The two never both act on a key — the text service claims
-    /// the foreground window it owns via shared memory and the hook stands
-    /// down there (`transport_claim.rs`). `false` restores one-backend-per-
-    /// session: the kill switch if arbitration misbehaves in the field, which
-    /// is why it ships as a setting rather than a constant.
+    /// Windows only, EXPERIMENTAL: run the low-level hook ALONGSIDE the TSF
+    /// text service, as a fallback for apps TSF cannot reach (raw-input
+    /// readers, some terminals, elevated windows). The text service claims the
+    /// foreground process it owns via shared memory and the hook stands down
+    /// there (`transport_claim.rs`).
+    ///
+    /// Default OFF. Field testing showed the claim still misses some hosts —
+    /// browsers glitched (caret jumps mid-word) and Telegram dropped words on
+    /// space, both symptoms of the two layers touching one keystroke, while
+    /// TSF alone served every tested app cleanly. Until the arbitration is
+    /// proven per-host (suspected gap: TIPs activating inside
+    /// TextInputHost.exe rather than the focused app), the union coverage is
+    /// not worth risking garbled text in the most common apps. Opt-in for
+    /// users who need the hook-only apps.
     #[serde(default = "default_hook_fallback")]
     pub hook_fallback: bool,
 
@@ -147,10 +154,11 @@ fn default_enabled() -> bool {
     true
 }
 
-/// `serde(default)` value for `Settings::hook_fallback` — ON: the union of the
-/// two transports is the whole point of running both (ADR-0003 phase 03).
+/// `serde(default)` value for `Settings::hook_fallback` — OFF until the
+/// transport arbitration is proven per-host (see the field's doc for the
+/// observed failures). Flipping this default is the release gate for phase 03.
 fn default_hook_fallback() -> bool {
-    true
+    false
 }
 
 /// `serde(default)` value for `Settings::use_preedit` — preedit ON, matching
@@ -175,6 +183,8 @@ impl Default for Settings {
             backspace_mode: default_backspace_mode(),
             learning_enabled: default_learning_enabled(),
             strict_spelling: false,
+            // Same OFF as the serde default: this knob has one meaning
+            // everywhere until the arbitration earns its default-on.
             hook_fallback: default_hook_fallback(),
             use_preedit: default_use_preedit(),
         }

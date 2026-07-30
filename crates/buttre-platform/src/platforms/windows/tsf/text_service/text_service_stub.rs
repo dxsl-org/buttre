@@ -916,10 +916,19 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
 impl ITfActiveLanguageProfileNotifySink_Impl for TextService_Impl {
     /// The user switched input profiles in THIS app (Win+Space). Treat leaving
     /// buttre as a COMMAND to turn off (ADR-0003 invariant 3): with the hook
-    /// now covering non-TSF apps, this is the only thing that keeps Win+Space
+    /// covering non-TSF apps, this is the only thing that keeps Win+Space
     /// meaning "off" — without it the hook would take over the moment the
     /// profile deactivated, and switching to English-US would still type
     /// Vietnamese.
+    ///
+    /// KNOWN GAP (field-tested 2026-07-30, why `hook_fallback` defaults off):
+    /// switching to the plain "English - US" KEYBOARD LAYOUT did not fire this
+    /// sink at all — a watched log showed zero `OnActivated` lines across the
+    /// switch, in Notepad, with the sink advised. TSF apparently only notifies
+    /// TIP-to-TIP transitions here, and a layout is not a TIP. Before Both
+    /// mode can default on, the off-command needs a source that covers
+    /// layout switches — candidates: `Deactivate` (fires, but also on app
+    /// close), or the tray polling the claim cell going quiet.
     ///
     /// Asymmetric on purpose. `fActivated = TRUE` is NOT a command to turn on:
     /// it also fires when a new app inherits an already-active buttre profile,
