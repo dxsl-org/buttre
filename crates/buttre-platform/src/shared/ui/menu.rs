@@ -60,7 +60,10 @@ pub fn set_method_checked(item: &MethodMenuItem, checked: bool) {
 
 /// Menu items that need to be accessed for event handling
 pub struct MenuItems {
-    pub english_item: MethodMenuItem,
+    /// "Bật bộ gõ" — the on/off check item (`Settings::enabled`, ADR-0003).
+    /// Checked = on. Clicking it toggles; so does left-clicking the tray icon
+    /// and the Ctrl+Shift+Space hotkey — all three land on `AppState::toggle`.
+    pub enable_item: MethodMenuItem,
     pub chu_viet_menu: Submenu,
     pub telex_item: MethodMenuItem,
     pub vni_item: MethodMenuItem,
@@ -92,11 +95,12 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
         })
         .collect();
 
-    // 0. English = the IME is OFF (`Settings::enabled`, ADR-0003) — phase 02
-    // replaces this row with a proper "Bật bộ gõ" check item.
-    let english_item = new_method_item(
-        "English",
-        !settings.enabled,
+    // 0. "Bật bộ gõ" — the on/off switch. A CHECK item, not a method radio:
+    // off is not a method (ADR-0003), and the old "English" row misread as
+    // "some other method is active".
+    let enable_item = new_method_item(
+        "Bật bộ gõ",
+        settings.enabled,
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Space,
@@ -239,7 +243,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     let menu = Menu::new();
 
     // Add built-in items
-    let _ = menu.append_items(&[&english_item, &chu_viet_menu, &nom_item]);
+    let _ = menu.append_items(&[&enable_item, &chu_viet_menu, &nom_item]);
 
     // Add custom items directly to main menu
     for (_, item) in &custom_items {
@@ -254,7 +258,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     ]);
 
     let menu_items = MenuItems {
-        english_item,
+        enable_item,
         chu_viet_menu,
         telex_item,
         vni_item,

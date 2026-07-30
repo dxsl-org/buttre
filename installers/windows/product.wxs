@@ -31,6 +31,7 @@
     <Feature Id="MainFeature" Title="buttre" Level="1">
       <ComponentRef Id="CoreBinary" />
       <ComponentRef Id="TsfDll" />
+      <ComponentRef Id="StartMenuShortcuts" />
       <ComponentGroupRef Id="KeyboardConfigs" />
       <?ifdef IncludeNomDb ?>
         <ComponentRef Id="NomDb" />
@@ -38,6 +39,38 @@
     </Feature>
 
     <Directory Id="TARGETDIR" Name="SourceDir">
+      <!--
+        Start-menu shortcuts. The settings shortcut is the guaranteed door into
+        the config window: the tray is a per-session process the user may have
+        quit, and under the TSF backend nothing else offers a UI entry point —
+        without this, a user hunting for settings has no path at all.
+      -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ButtreMenuFolder" Name="buttre">
+          <Component Id="StartMenuShortcuts" Guid="7A3E1F52-9C04-4B8E-A1D6-3F82B5C4E907">
+            <Shortcut Id="ButtreTrayShortcut"
+                      Name="buttre"
+                      Description="Bộ gõ tiếng Việt buttre"
+                      Target="[INSTALLDIR]buttre.exe"
+                      WorkingDirectory="INSTALLDIR" />
+            <Shortcut Id="ButtreConfigShortcut"
+                      Name="buttre - Cấu hình"
+                      Description="Cấu hình bộ gõ buttre"
+                      Target="[INSTALLDIR]buttre.exe"
+                      Arguments="--config"
+                      WorkingDirectory="INSTALLDIR" />
+            <RemoveFolder Id="RemoveButtreMenuFolder" On="uninstall" />
+            <!-- Shortcuts cannot be a component KeyPath; the conventional
+                 marker is a per-user registry value. -->
+            <RegistryValue Root="HKCU"
+                           Key="Software\buttre"
+                           Name="StartMenuShortcuts"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLDIR" Name="buttre">
 

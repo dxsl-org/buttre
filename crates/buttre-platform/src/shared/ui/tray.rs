@@ -1,147 +1,152 @@
-//! Tray icon management for buttre application
+//! Tray icon management for buttre application (Windows + Wayland-native — the
+//! platforms where buttre owns method selection, ADR-0003).
 
 use crate::shared::ui::menu::MethodMenuItem;
 use crate::shared::ui::{
-    load_icon_from_bytes, CUSTOM_ICON_BYTES, ENGLISH_ICON_BYTES, NOM_ICON_BYTES, TELEX_ICON_BYTES,
-    VIETNAMESE_ICON_BYTES, VNI_ICON_BYTES,
+    IconSet, CUSTOM_ICON_BYTES, NOM_ICON_BYTES, TELEX_ICON_BYTES, VIETNAMESE_ICON_BYTES,
+    VNI_ICON_BYTES,
 };
 use anyhow::Result;
 use buttre_core::state::Settings;
 use buttre_core::vietnamese::config_loader::MethodMetadata;
 use buttre_core::vietnamese::get_custom_dir;
 use std::fs;
-use tray_icon::{Icon as TrayIcon, TrayIconBuilder};
+use tray_icon::TrayIconBuilder;
 
-/// Create tray icon with the given menu and initial settings
-/// Returns the tray icon and pre-loaded icon resources
-pub fn create_tray_icon(
-    menu: &muda::Menu,
-    settings: &Settings,
-    custom_items: &[(MethodMetadata, MethodMenuItem)],
-) -> Result<(
-    tray_icon::TrayIcon,
-    TrayIcon, // telex_icon
-    TrayIcon, // vni_icon
-    TrayIcon, // english_icon
-    TrayIcon, // nom_icon
-    TrayIcon, // custom_icon
-)> {
-    // Load all icons
-    let telex_icon = load_icon_from_bytes(TELEX_ICON_BYTES)
-        .unwrap_or_else(|_| TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap());
-
-    let vni_icon = load_icon_from_bytes(VNI_ICON_BYTES)
-        .unwrap_or_else(|_| TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap());
-
-    let english_icon = load_icon_from_bytes(ENGLISH_ICON_BYTES)
-        .unwrap_or_else(|_| TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap());
-
-    let nom_icon = load_icon_from_bytes(NOM_ICON_BYTES)
-        .unwrap_or_else(|_| TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap());
-
-    let custom_icon = load_icon_from_bytes(CUSTOM_ICON_BYTES)
-        .unwrap_or_else(|_| TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap());
-
-    // Fallback Vietnamese icon (for unknown methods)
-    let vietnamese_icon = load_icon_from_bytes(VIETNAMESE_ICON_BYTES)
-        .unwrap_or_else(|_| TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap());
-
-    // Determine initial tooltip and icon. OFF shows the English icon for now —
-    // phase 02 replaces this with a greyscale variant of the chosen method's
-    // icon; the "english" pseudo-method value itself is gone (ADR-0003).
-    let initial_key = if settings.enabled {
-        settings.input_method.as_str()
-    } else {
-        "english"
-    };
-    let initial_tooltip = get_tooltip(initial_key, custom_items);
-    let initial_icon = get_icon_for_method(
-        initial_key,
-        custom_items,
-        &telex_icon,
-        &vni_icon,
-        &english_icon,
-        &nom_icon,
-        &custom_icon,
-        &vietnamese_icon,
-    );
-
-    let tray_icon = TrayIconBuilder::new()
-        .with_menu(Box::new(menu.clone()))
-        .with_tooltip(&initial_tooltip)
-        .with_icon(initial_icon)
-        .build()?;
-
-    Ok((
-        tray_icon,
-        telex_icon,
-        vni_icon,
-        english_icon,
-        nom_icon,
-        custom_icon,
-    ))
+/// Every icon the tray can show, each in its ON (colour) and OFF (greyscale)
+/// variant. Built once at startup; owned by `main.rs` for the tray's lifetime.
+pub struct TrayIcons {
+    pub telex: IconSet,
+    pub vni: IconSet,
+    pub nom: IconSet,
+    pub custom: IconSet,
+    /// Fallback for method ids nothing else matches.
+    pub vietnamese: IconSet,
 }
 
-/// Get tooltip text for a given input method.
-///
-/// `"english"` here is a RENDERING key meaning "the IME is off", passed by the
-/// icon call sites — it is no longer a method id anywhere in state (ADR-0003).
-/// Phase 02 reworks these signatures to take `enabled` explicitly.
-pub fn get_tooltip(method: &str, custom_items: &[(MethodMetadata, MethodMenuItem)]) -> String {
-    match method {
-        "english" => "buttre\nĐã tắt".to_string(),
-        "telex" => "buttre\nChữ Việt\nTELEX".to_string(),
-        "vni" => "buttre\nChữ Việt\nVNI".to_string(),
-        "nom" => "buttre\nChữ Nôm".to_string(),
-        method_id => {
-            if let Some((data, _)) = custom_items.iter().find(|(d, _)| d.id == method_id) {
-                format!("buttre\nCustom\n{}", data.name)
-            } else {
-                // Fallback
-                format!("buttre\nChữ Việt\n{}", method_id.to_uppercase())
+impl TrayIcons {
+    pub fn load() -> Self {
+        Self {
+            telex: IconSet::from_bytes(TELEX_ICON_BYTES),
+            vni: IconSet::from_bytes(VNI_ICON_BYTES),
+            nom: IconSet::from_bytes(NOM_ICON_BYTES),
+            custom: IconSet::from_bytes(CUSTOM_ICON_BYTES),
+            vietnamese: IconSet::from_bytes(VIETNAMESE_ICON_BYTES),
+        }
+    }
+
+    /// The icon set for a method id. OFF is not a method: callers pick the
+    /// variant with [`IconSet::variant`], so a disabled IME shows the CHOSEN
+    /// method's icon in greyscale — the user still sees what they will get
+    /// when they switch back on, and grey reads unambiguously as "off"
+    /// (the old English icon read as "some other method is active").
+    pub fn for_method(
+        &self,
+        method: &str,
+        custom_items: &[(MethodMetadata, MethodMenuItem)],
+    ) -> IconSet {
+        match method {
+            "telex" => self.telex.clone(),
+            "vni" => self.vni.clone(),
+            "nom" => self.nom.clone(),
+            method_id => {
+                // A custom method may ship its own icon file next to its TOML.
+                if let Some((data, _)) = custom_items.iter().find(|(d, _)| d.id == method_id) {
+                    if let Some(icon_path_str) = &data.icon {
+                        let icon_path = get_custom_dir().join(icon_path_str);
+                        if let Ok(bytes) = fs::read(&icon_path) {
+                            return IconSet::from_bytes(&bytes);
+                        }
+                    }
+                }
+                if custom_items.iter().any(|(d, _)| d.id == method_id) {
+                    self.custom.clone()
+                } else {
+                    self.vietnamese.clone()
+                }
             }
         }
     }
 }
 
-/// Get the appropriate icon for a given input method
+/// Create the tray icon with the given menu and initial settings. Returns the
+/// live tray handle plus the loaded icon sets.
 ///
-/// One parameter per method icon — see `helpers::update_tray_icon`'s doc for
-/// why this isn't grouped into a struct in this cleanup pass.
-#[allow(clippy::too_many_arguments)]
-pub fn get_icon_for_method(
-    method: &str,
+/// `show_menu_on_left_click(false)`: left-click is the on/off toggle (the
+/// single most frequent interaction an IME has), handled via `TrayIconEvent`
+/// in `main.rs`'s event loop. The menu stays on right-click.
+pub fn create_tray_icon(
+    menu: &muda::Menu,
+    settings: &Settings,
     custom_items: &[(MethodMetadata, MethodMenuItem)],
-    telex_icon: &TrayIcon,
-    vni_icon: &TrayIcon,
-    english_icon: &TrayIcon,
-    nom_icon: &TrayIcon,
-    custom_icon: &TrayIcon,
-    vietnamese_icon: &TrayIcon, // fallback
-) -> TrayIcon {
-    match method {
-        "english" => english_icon.clone(),
-        "telex" => telex_icon.clone(),
-        "vni" => vni_icon.clone(),
-        "nom" => nom_icon.clone(),
-        method_id => {
-            // Check if it's a custom method with an icon
-            if let Some((data, _)) = custom_items.iter().find(|(d, _)| d.id == method_id) {
-                if let Some(icon_path_str) = &data.icon {
-                    let icon_path = get_custom_dir().join(icon_path_str);
-                    if let Ok(bytes) = fs::read(&icon_path) {
-                        if let Ok(loaded_icon) = load_icon_from_bytes(&bytes) {
-                            return loaded_icon;
-                        }
-                    }
-                }
-            }
+) -> Result<(tray_icon::TrayIcon, TrayIcons)> {
+    let icons = TrayIcons::load();
 
-            // Use custom icon if it's a custom method, otherwise Vietnamese fallback
-            if custom_items.iter().any(|(d, _)| d.id == method_id) {
-                custom_icon.clone()
+    let initial_tooltip = get_tooltip(&settings.input_method, settings.enabled, custom_items);
+    let initial_icon = icons
+        .for_method(&settings.input_method, custom_items)
+        .variant(settings.enabled)
+        .clone();
+
+    let tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(menu.clone()))
+        .with_menu_on_left_click(false)
+        .with_tooltip(&initial_tooltip)
+        .with_icon(initial_icon)
+        .build()?;
+
+    Ok((tray_icon, icons))
+}
+
+/// Tooltip for the current state. OFF still names the chosen method — the
+/// tooltip answers "what will I get when I turn it back on".
+pub fn get_tooltip(
+    method: &str,
+    enabled: bool,
+    custom_items: &[(MethodMetadata, MethodMenuItem)],
+) -> String {
+    let method_label = match method {
+        "telex" => "Chữ Việt\nTELEX".to_string(),
+        "vni" => "Chữ Việt\nVNI".to_string(),
+        "nom" => "Chữ Nôm".to_string(),
+        method_id => {
+            if let Some((data, _)) = custom_items.iter().find(|(d, _)| d.id == method_id) {
+                format!("Custom\n{}", data.name)
             } else {
-                vietnamese_icon.clone()
+                format!("Chữ Việt\n{}", method_id.to_uppercase())
+            }
+        }
+    };
+    if enabled {
+        format!("buttre\n{method_label}")
+    } else {
+        format!("buttre\nĐã tắt ({})", method_label.replace('\n', " "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_when_off_still_names_the_method() {
+        let on = get_tooltip("telex", true, &[]);
+        let off = get_tooltip("telex", false, &[]);
+        assert!(on.contains("TELEX"));
+        assert!(off.contains("Đã tắt"), "off must say so: {off}");
+        assert!(
+            off.contains("TELEX"),
+            "off must still show what turning on gives: {off}"
+        );
+    }
+
+    #[test]
+    fn tooltip_never_mentions_english() {
+        // "english" is not a method (ADR-0003) — no state renders it.
+        for method in ["telex", "vni", "nom", "sometoml"] {
+            for enabled in [true, false] {
+                let tip = get_tooltip(method, enabled, &[]);
+                assert!(!tip.to_lowercase().contains("english"), "{tip}");
             }
         }
     }

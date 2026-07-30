@@ -683,7 +683,7 @@ fn main() -> Result<()> {
 
     // Extract menu items for event handling
     let MenuItems {
-        english_item,
+        enable_item,
         chu_viet_menu,
         telex_item,
         vni_item,
@@ -710,9 +710,9 @@ fn main() -> Result<()> {
     }
 
     // --- Tray Setup ---
-    // update_tray_icon in helpers handles custom_items with MethodMetadata now
-    let (mut _tray_icon, telex_icon, vni_icon, english_icon, nom_icon, custom_icon) =
-        create_tray_icon(&menu, &settings, &custom_items)?;
+    let (mut _tray_icon, tray_icons) = create_tray_icon(&menu, &settings, &custom_items)?;
+    // Skip-repaint memory for update_tray_icon (icon flicker guard).
+    let mut last_tray_state: Option<(String, bool)> = None;
 
     // --- buttre Keyboard Setup ---
     // Arc-shared: the `KeyboardObserver` drives it on method switches, and
@@ -935,6 +935,7 @@ fn main() -> Result<()> {
 
     // --- Event Loop ---
     let menu_channel = muda::MenuEvent::receiver();
+    let tray_channel = tray_icon::TrayIconEvent::receiver();
 
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::WaitUntil(
@@ -976,7 +977,7 @@ fn main() -> Result<()> {
                             helpers::update_menu_checkmarks(
                                 &method,
                                 enabled,
-                                &english_item,
+                                &enable_item,
                                 &chu_viet_menu,
                                 &telex_item,
                                 &vni_item,
@@ -989,11 +990,8 @@ fn main() -> Result<()> {
                                 &method,
                                 enabled,
                                 &mut _tray_icon,
-                                &telex_icon,
-                                &vni_icon,
-                                &english_icon,
-                                &nom_icon,
-                                &custom_icon,
+                                &tray_icons,
+                                &mut last_tray_state,
                                 custom_items.as_slice(),
                             );
                         }
@@ -1282,6 +1280,26 @@ fn main() -> Result<()> {
                     }
                 }
 
+                // Tray icon events: left-click (release) toggles the IME —
+                // the single most frequent interaction, one click instead of
+                // click→menu→item. Right-click still opens the menu (the
+                // builder set `with_menu_on_left_click(false)`, so muda only
+                // binds the menu to right-click). Fires on button UP so a
+                // press-and-drag off the icon doesn't toggle.
+                while let Ok(tray_event) = tray_channel.try_recv() {
+                    if let tray_icon::TrayIconEvent::Click {
+                        button: tray_icon::MouseButton::Left,
+                        button_state: tray_icon::MouseButtonState::Up,
+                        ..
+                    } = tray_event
+                    {
+                        info!("Tray left-click: toggling IME");
+                        if let Err(e) = app_state.lock().unwrap().toggle() {
+                            error!("Failed to toggle from tray click: {:?}", e);
+                        }
+                    }
+                }
+
                 // Menu events
                 if let Ok(event) = menu_channel.try_recv() {
                     if event.id == thoat_item.id() {
@@ -1294,12 +1312,10 @@ fn main() -> Result<()> {
                         elwt.exit();
                     } else if event.id == nom_item.id() {
                         let _ = select_method(&app_state, "nom");
-                    } else if event.id == english_item.id() {
-                        // The "English" menu item now means OFF (ADR-0003) —
-                        // phase 02 replaces it with a proper "Bật bộ gõ" check
-                        // item + greyscale icon; the wiring is already the
-                        // enabled flag, not a method.
-                        let _ = app_state.lock().unwrap().set_enabled(false);
+                    } else if event.id == enable_item.id() {
+                        // "Bật bộ gõ" — same toggle as tray left-click and
+                        // Ctrl+Shift+Space; three doors, one command.
+                        let _ = app_state.lock().unwrap().toggle();
                     } else if event.id == telex_item.id() {
                         let _ = select_method(&app_state, "telex");
                     } else if event.id == vni_item.id() {
