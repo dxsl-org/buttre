@@ -42,6 +42,7 @@ pub fn spawn_reload_watcher(
     store: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
     method: Arc<Mutex<String>>,
+    enabled: Arc<AtomicBool>,
 ) -> Option<RecommendedWatcher> {
     let dir = match MacroStore::get_path() {
         Ok(path) => path.parent()?.to_path_buf(),
@@ -80,6 +81,9 @@ pub fn spawn_reload_watcher(
             // this process — the text service lives inside the host
             // application and shares no state with the tray.
             *method.lock().unwrap_or_else(PoisonError::into_inner) = settings.input_method;
+            // `Settings::enabled` travels the same road (ADR-0003): the tray
+            // owns the flag, this file is the only bridge into this process.
+            enabled.store(settings.enabled, Ordering::Relaxed);
         }) {
             Ok(w) => w,
             Err(e) => {
@@ -111,6 +115,7 @@ mod tests {
             store,
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(String::new())),
+            Arc::new(AtomicBool::new(true)),
         );
     }
 }

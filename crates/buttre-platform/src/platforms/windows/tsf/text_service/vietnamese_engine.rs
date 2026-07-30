@@ -24,13 +24,12 @@ pub enum VietnameseMode {
     VNI,
     Nom,
     Custom(String), // Custom config with method ID
-    /// Pass every key through untouched — the tray's "english" choice.
-    English,
 }
 
 impl VietnameseMode {
-    /// Parse a `Settings::input_method` id ("telex", "vni", "nom",
-    /// "english", or a custom method id).
+    /// Parse a `Settings::input_method` id ("telex", "vni", "nom", or a
+    /// custom method id). Off is NOT a mode: `Settings::enabled` carries it
+    /// (ADR-0003), consumed by `sync_enabled` on the keystroke path.
     ///
     /// Unknown ids become [`VietnameseMode::Custom`], which looks for a
     /// matching `<id>.toml`; if that is missing the engine loads no keyboard
@@ -41,7 +40,6 @@ impl VietnameseMode {
             "telex" => Self::Telex,
             "vni" => Self::VNI,
             "nom" => Self::Nom,
-            "english" => Self::English,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -82,6 +80,12 @@ pub struct VietnameseEngine {
     /// Method id last applied to the live `Keyboard`, so the per-keystroke
     /// check is a string compare rather than an unconditional rebuild.
     method_applied: String,
+    /// `Settings::enabled` mirror — is the IME on at all? Same transport and
+    /// same lazy-consumption contract as `strict_spelling`; ADR-0003 makes the
+    /// tray its owner and this file its only bridge into this process. While
+    /// `false`, [`Self::is_active`] reports inactive and the key sink claims
+    /// nothing, so every key reaches the host application untouched.
+    enabled: Arc<AtomicBool>,
     /// Nôm candidates offered for the open composition, plus the highlight.
     /// Absorbed from `Action::ShowCandidates` by [`Self::process_key`] — see
     /// that method's contract for why the caller renders from HERE and not
@@ -123,10 +127,12 @@ impl VietnameseEngine {
             .input_method
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = settings.input_method;
+        engine.enabled.store(settings.enabled, Ordering::Relaxed);
         engine._macros_watcher = spawn_reload_watcher(
             macros,
             engine.strict_spelling.clone(),
             engine.input_method.clone(),
+            engine.enabled.clone(),
         );
         engine
     }
@@ -150,6 +156,9 @@ impl VietnameseEngine {
             strict_applied: false,
             input_method: Arc::new(Mutex::new(String::new())),
             method_applied: String::new(),
+            // Tests construct through here and expect typing to work; `new()`
+            // overwrites this with the real `Settings::enabled` right after.
+            enabled: Arc::new(AtomicBool::new(true)),
             candidates: CandidateState::default(),
             _macros_watcher: None,
         }
@@ -161,9 +170,6 @@ impl VietnameseEngine {
     /// is a no-op, byte-identical to shorthand being unwired entirely.
     fn load_keyboard(mode: &VietnameseMode, macros: &Arc<Mutex<MacroStore>>) -> Option<Keyboard> {
         let mut kb = match mode {
-            // No keyboard at all: `process_key` then returns DoNothing and the
-            // host application sees the raw keystroke.
-            VietnameseMode::English => None,
             VietnameseMode::Telex => KeyboardBuilder::telex_with_composition(true).ok(),
             VietnameseMode::VNI => KeyboardBuilder::vni_with_composition(true).ok(),
             VietnameseMode::Nom => {
@@ -220,6 +226,12 @@ impl VietnameseEngine {
     pub fn process_key(&mut self, ch: char) -> Vec<Action> {
         self.sync_method();
         self.sync_strict_spelling();
+        // Belt to `is_active`'s braces: the key sink already refuses to claim
+        // keys while disabled, so this is only reached by paths that bypass it
+        // (candidate routing, tests). Off means UNTOUCHED keys, always.
+        if !self.enabled.load(Ordering::Relaxed) {
+            return vec![Action::DoNothing];
+        }
         let Some(kb) = self.keyboard.as_mut() else {
             return vec![Action::DoNothing];
         };
@@ -271,16 +283,22 @@ impl VietnameseEngine {
         }
     }
 
-    /// Whether a keyboard is loaded, i.e. whether this engine transforms
-    /// anything at all.
+    /// Whether this engine transforms anything at all: the IME is ON
+    /// (`Settings::enabled`, ADR-0003) AND a keyboard is loaded (a custom
+    /// layout whose TOML is missing or unparseable loads none).
     ///
-    /// `false` for [`VietnameseMode::English`] and for a custom layout whose
-    /// TOML was missing or unparseable. The key sink MUST consult this before
-    /// claiming a key: with no keyboard, `process_key` returns `DoNothing` for
-    /// everything, and a key claimed but then declined is swallowed rather than
-    /// passed on.
+    /// The key sink MUST consult this before claiming a key: when inactive,
+    /// `process_key` returns `DoNothing` for everything, and a key claimed but
+    /// then declined is swallowed rather than passed on.
     pub fn is_active(&self) -> bool {
-        self.keyboard.is_some()
+        self.enabled.load(Ordering::Relaxed) && self.keyboard.is_some()
+    }
+
+    /// Set the enabled flag directly — integration tests only, which have no
+    /// settings watcher to deliver it. Production flips arrive through
+    /// `spawn_reload_watcher` writing the shared atomic.
+    pub fn set_enabled_for_test(&mut self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// The candidates currently offered, for rendering and for deciding

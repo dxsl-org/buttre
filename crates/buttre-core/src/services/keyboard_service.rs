@@ -166,10 +166,10 @@ impl KeyboardService {
 
         self.current_id = Some(id.to_string());
 
-        // Publish method changed event
-        let enabled = id != "english";
-        self.event_bus
-            .publish(AppEvent::method_changed(id, enabled));
+        // A registered keyboard is by definition a real method, so switching to
+        // one always reports enabled. Off is not a keyboard (ADR-0003) — it is
+        // `current_id = None`, and no event claims otherwise.
+        self.event_bus.publish(AppEvent::method_changed(id, true));
 
         Ok(())
     }

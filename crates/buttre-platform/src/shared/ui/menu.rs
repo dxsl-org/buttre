@@ -92,10 +92,11 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
         })
         .collect();
 
-    // 0. English (disable input method)
+    // 0. English = the IME is OFF (`Settings::enabled`, ADR-0003) — phase 02
+    // replaces this row with a proper "Bật bộ gõ" check item.
     let english_item = new_method_item(
         "English",
-        settings.input_method == "english",
+        !settings.enabled,
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Space,
@@ -151,7 +152,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
 
     let telex_item = new_method_item(
         &telex_meta.name,
-        settings.input_method == "telex",
+        settings.enabled && settings.input_method == "telex",
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Digit1,
@@ -159,7 +160,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     );
     let vni_item = new_method_item(
         &vni_meta.name,
-        settings.input_method == "vni",
+        settings.enabled && settings.input_method == "vni",
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Digit2,
@@ -170,7 +171,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
     // 2. Chữ Nôm - single unified method (no submenu)
     let nom_item = new_method_item(
         &nom_meta.name,
-        settings.input_method == "nom",
+        settings.enabled && settings.input_method == "nom",
         Some(Accelerator::new(
             Some(Modifiers::CONTROL | Modifiers::SHIFT),
             Code::Digit3,
@@ -220,7 +221,7 @@ pub fn build_menu(settings: &Settings, registry: &MethodRegistry) -> (Menu, Menu
 
         let item = new_method_item(
             &method.name,
-            settings.input_method == method.id,
+            settings.enabled && settings.input_method == method.id,
             accelerator,
         );
         custom_items.push((method, item));

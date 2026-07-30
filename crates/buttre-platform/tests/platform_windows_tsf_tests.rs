@@ -449,7 +449,6 @@ fn test_settings_ids_map_to_modes() {
     assert_eq!(Mode::from_settings_id("telex"), Mode::Telex);
     assert_eq!(Mode::from_settings_id("vni"), Mode::VNI);
     assert_eq!(Mode::from_settings_id("nom"), Mode::Nom);
-    assert_eq!(Mode::from_settings_id("english"), Mode::English);
 }
 
 #[test]
@@ -461,15 +460,24 @@ fn test_unknown_method_id_becomes_a_custom_lookup() {
 }
 
 #[test]
-fn test_english_mode_passes_keys_through() {
-    // No keyboard is loaded, so the host application receives the raw key.
-    let mut engine = VietnameseEngine::new_with_macros(Mode::English, vn_macro_store());
+fn test_disabled_engine_passes_keys_through() {
+    // Off is `Settings::enabled`, not a mode (ADR-0003): the engine keeps its
+    // keyboard but must not compose — the host application receives raw keys.
+    let mut engine = VietnameseEngine::new_with_macros(Mode::Telex, vn_macro_store());
+    engine.set_enabled_for_test(false);
     let actions = engine.process_key('a');
     assert!(
         actions.iter().all(|a| matches!(a, Action::DoNothing)),
-        "english mode must not compose: {actions:?}"
+        "a disabled engine must not compose: {actions:?}"
     );
-    assert!(engine.buffer_content().is_empty());
+    assert!(!engine.is_active(), "the key sink must claim nothing");
+
+    // Flipping back on resumes composing with the SAME method — nothing to
+    // restore, because turning off never overwrote it.
+    engine.set_enabled_for_test(true);
+    engine.process_key('a');
+    engine.process_key('s');
+    assert_eq!(engine.buffer_content(), "á");
 }
 
 #[test]

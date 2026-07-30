@@ -19,11 +19,11 @@ use std::sync::Arc;
 /// This trait is implemented in main.rs where UI references (tray icon, menu items)
 /// are available. The observer calls these methods when state changes.
 pub trait UICallback: Send + Sync {
-    /// Update menu checkmarks for the given method
-    ///
-    /// # Arguments
-    /// * `method` - The new input method ID
-    fn update_menu_checkmarks(&self, method: &str);
+    /// Update menu checkmarks for the given state. `enabled` rides along
+    /// because an unchecked-everything menu is the correct rendering of OFF —
+    /// method checkmarks must never claim a method is active while the IME is
+    /// not (ADR-0003).
+    fn update_menu_checkmarks(&self, method: &str, enabled: bool);
 
     /// Update tray icon and tooltip
     ///
@@ -50,7 +50,7 @@ pub trait UICallback: Send + Sync {
 /// }
 ///
 /// impl UICallback for MyUICallback {
-///     fn update_menu_checkmarks(&self, method: &str) {
+///     fn update_menu_checkmarks(&self, method: &str, enabled: bool) {
 ///         // Update menu items
 ///     }
 ///     
@@ -88,7 +88,7 @@ impl StateObserver for UIObserver {
         );
 
         // Update menu checkmarks via callback
-        self.callback.update_menu_checkmarks(method);
+        self.callback.update_menu_checkmarks(method, enabled);
 
         // Update tray icon via callback
         self.callback.update_tray_icon(method, enabled);

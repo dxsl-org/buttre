@@ -17,13 +17,13 @@ pub enum AppEvent {
     // ========================================================================
     // State Events - Application state changes
     // ========================================================================
-    /// Input method changed
-    ///
-    /// Published when user switches between input methods (telex, vni, nom, english)
+    /// Input state changed — the method, or the on/off flag (one event for
+    /// both, so no subscriber ever sees half of a change).
     MethodChanged {
-        /// New method ID
+        /// New method ID: `"telex"`, `"vni"`, `"nom"`, or a custom id. Never
+        /// `"english"` — off is carried by `enabled` (ADR-0003).
         method: String,
-        /// Whether Vietnamese input is enabled (false for "english")
+        /// Whether the input method is on
         enabled: bool,
     },
 
