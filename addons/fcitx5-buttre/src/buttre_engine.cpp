@@ -131,7 +131,13 @@ public:
          * "select the highlighted candidate" and eat the shortcut. Same
          * ordering the Windows text service uses (`should_ignore` ahead of
          * `handle_candidate_key`). */
-        if (keyEvent.rawKey().states().testAny(fcitx::KeyState::Ctrl_Alt_Super)) {
+        /* Built from the three plain flags, not the Ctrl_Alt_Super alias:
+         * the alias is not present in every fcitx5 5.x header line, and the
+         * addon must compile against whatever libfcitx5core-dev the distro
+         * ships. */
+        const fcitx::KeyStates comboMask{fcitx::KeyState::Ctrl, fcitx::KeyState::Alt,
+                                         fcitx::KeyState::Super};
+        if (keyEvent.rawKey().states().testAny(comboMask)) {
             applyResult(ic, bt_engine_flush(engine_));
             return;
         }

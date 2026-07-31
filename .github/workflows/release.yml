@@ -75,7 +75,7 @@ jobs:
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
 
             **Windows**: Run the MSI installer. SmartScreen may warn on first run (unsigned build) — click "More info → Run anyway".
-            **Linux**: `sudo dpkg -i buttre-*-linux-x86_64.deb` (Debian/Ubuntu) or `sudo dnf install buttre-*-linux-x86_64.rpm` (Fedora/RHEL).
+            **Linux**: `sudo dpkg -i buttre-*-linux-x86_64.deb` (Debian/Ubuntu) or `sudo dnf install buttre-*-linux-x86_64.rpm` (Fedora/RHEL). Dùng fcitx5? Cài thêm `sudo dpkg -i fcitx5-buttre-*.deb` để có menu kiểu gõ ngay trên panel fcitx5 (Fedora: build addon từ source — xem addons/fcitx5-buttre).
             **macOS**: Developer artifact only. Extract the zip; strip quarantine with `xattr -d com.apple.quarantine libbuttre_platform.dylib` before linking.
 
   build-linux:
@@ -102,7 +102,8 @@ jobs:
             pkg-config \
             libx11-dev libxi-dev libxtst-dev libxkbcommon-dev \
             libdbus-1-dev libgtk-3-dev libayatana-appindicator3-dev \
-            libxdo-dev
+            libxdo-dev \
+            cmake extra-cmake-modules libfcitx5core-dev
 
       - name: Install packaging tools
         run: |
@@ -135,6 +136,11 @@ jobs:
           V="${{ steps.ver.outputs.version }}"
           mv target/debian/buttre_*.deb "target/debian/buttre-${V}-linux-x86_64.deb"
           mv target/generate-rpm/buttre-*.rpm "target/generate-rpm/buttre-${V}-linux-x86_64.rpm"
+          # The fcitx5 addon package is OPTIONAL (build_packages.sh warns
+          # instead of failing) — rename only when it was produced.
+          if ls target/debian/fcitx5-buttre_*.deb >/dev/null 2>&1; then
+            mv target/debian/fcitx5-buttre_*.deb "target/debian/fcitx5-buttre-${V}-linux-x86_64.deb"
+          fi
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
@@ -142,9 +148,12 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
           name: buttre ${{ steps.ver.outputs.version }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
+          # fcitx5-buttre is a glob on purpose: absent when the optional
+          # addon build was skipped, and the release must still publish.
           files: |
             target/debian/buttre-${{ steps.ver.outputs.version }}-linux-x86_64.deb
             target/generate-rpm/buttre-${{ steps.ver.outputs.version }}-linux-x86_64.rpm
+            target/debian/fcitx5-buttre-*.deb
 
   build-windows-hook:
     name: Build Windows hook ZIP
