@@ -246,11 +246,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # The full GUI dev stack too, not just fcitx5: buttre-ffi sits on
+      # buttre-platform, whose build.rs demands the gtk/x11 pkg-config set.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake extra-cmake-modules libfcitx5core-dev file
+            pkg-config cmake extra-cmake-modules libfcitx5core-dev file \
+            libx11-dev libxi-dev libxtst-dev libxkbcommon-dev \
+            libdbus-1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libxdo-dev
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
