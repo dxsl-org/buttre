@@ -515,6 +515,10 @@ fn main() -> Result<()> {
     // BEFORE the first println. See `attach_parent_console`.
     attach_parent_console(&args);
     init_tracing(&args);
+    // Self-heal a corrupt settings.toml ONCE, before anything loads it: the
+    // strict-reading writers refuse to touch an unparseable file, so without
+    // this quarantine every save would stay refused until a hand-fix.
+    Settings::quarantine_if_corrupt();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("buttre {}", env!("CARGO_PKG_VERSION"));
         return Ok(());

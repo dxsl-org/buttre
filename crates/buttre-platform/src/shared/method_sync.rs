@@ -29,7 +29,6 @@ use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
 
 /// Built-in method ids ("english" = passthrough, no keyboard — see module
 /// docs). NOT the full vocabulary of the sync channel: custom ids whose
@@ -181,12 +180,16 @@ pub fn read_enabled() -> bool {
 pub struct MethodState {
     method: Mutex<String>,
     generation: AtomicU64,
-    /// Woken on every genuine method change so an async consumer (the engine's
-    /// property-refresh task) can react immediately instead of waiting for the
-    /// next keystroke. `None` for backends that don't need the push (Wayland
-    /// has no IBus panel to re-publish). Interior-mutable because `load` hands
-    /// back an `Arc` before the consumer's `Notify` exists.
-    change_notify: Mutex<Option<Arc<Notify>>>,
+    /// Invoked on every genuine method change so a consumer (the IBus
+    /// engine's property-refresh task) can react immediately instead of
+    /// waiting for the next keystroke. A plain callback, not a
+    /// `tokio::sync::Notify`: this module now serves the macOS host too,
+    /// and tokio is a Linux-only dependency — the IBus caller wraps its own
+    /// `Notify` in the closure. `None` for backends that don't need the
+    /// push (Wayland has no IBus panel to re-publish; macOS's menu follows
+    /// on the next keystroke). Interior-mutable because `load` hands back
+    /// an `Arc` before the consumer exists.
+    change_notify: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl MethodState {
@@ -212,11 +215,11 @@ impl MethodState {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// Register the [`Notify`] woken on each change (see the field doc). Set
-    /// once by the IBus engine before its watcher starts; a later `set` that
-    /// actually changes the method wakes it.
-    pub fn set_change_notify(&self, notify: Arc<Notify>) {
-        *self.change_notify.lock().unwrap() = Some(notify);
+    /// Register the callback invoked on each change (see the field doc).
+    /// Set once by the IBus engine before its watcher starts; a later `set`
+    /// that actually changes the method invokes it.
+    pub fn set_change_notify(&self, notify: impl Fn() + Send + Sync + 'static) {
+        *self.change_notify.lock().unwrap() = Some(Box::new(notify));
     }
 
     fn set(&self, method: String) {
@@ -225,11 +228,11 @@ impl MethodState {
             tracing::info!("method_sync: method changed {} -> {}", *current, method);
             *current = method;
             self.generation.fetch_add(1, Ordering::Release);
-            // Drop the method lock before waking so the consumer can read
+            // Drop the method lock before notifying so the consumer can read
             // `method()` without contending on it.
             drop(current);
             if let Some(notify) = &*self.change_notify.lock().unwrap() {
-                notify.notify_one();
+                notify();
             }
         }
     }

@@ -29,13 +29,71 @@
 //! release profile rules out anyway).
 
 use crate::shared::engine_bridge::{EngineBridge, ImeOp, KeyOutcome};
+use crate::shared::learning_sync::{self, LearningWiring};
+use crate::shared::method_sync::{self, MethodState};
+use crate::shared::{macro_sync, method_owner};
+use buttre_core::state::macros::MacroStore;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex, PoisonError,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex, OnceLock, PoisonError,
 };
+
+// ============================================================================
+// Per-process shared state (tri-surface sync — the same watchers the Linux
+// engine processes run)
+// ============================================================================
+
+/// Everything the IMKit host process shares across its engine instances:
+/// the method file state, the settings mirrors, the shorthand store, and
+/// the learning wiring — kept current by the `method_sync`/`macro_sync`/
+/// `learning_sync` watchers, consumed lazily per keystroke exactly like the
+/// IBus engine does. Initialized on the FIRST `buttre_engine_new` (never at
+/// dylib load: watchers own threads, and constructors must stay cheap and
+/// panic-free inside someone else's process).
+struct HostSync {
+    method_state: Arc<MethodState>,
+    macros: Arc<Mutex<MacroStore>>,
+    strict: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
+    learning: LearningWiring,
+}
+
+static HOST_SYNC: OnceLock<HostSync> = OnceLock::new();
+
+fn host_sync() -> &'static HostSync {
+    HOST_SYNC.get_or_init(|| {
+        let method_state = MethodState::load();
+        method_sync::spawn_watcher(method_state.clone());
+
+        let macros = macro_sync::load_initial();
+        let strict = macro_sync::load_initial_strict();
+        // Loaded for the shared watcher signature only — IMKit is a preedit
+        // (marked-text) host, the no-preedit model does not apply.
+        let use_preedit = macro_sync::load_initial_use_preedit();
+        let enabled = macro_sync::load_initial_enabled();
+        macro_sync::spawn_watcher(macros.clone(), strict.clone(), use_preedit, enabled.clone());
+
+        let (learning, learning_rx) = learning_sync::load_initial();
+        learning_sync::spawn_writer(learning_rx);
+        learning_sync::spawn_watcher(&learning);
+
+        tracing::info!(
+            "macOS host sync initialized (method={}, owner={:?})",
+            method_state.method(),
+            method_owner::decide(),
+        );
+        HostSync {
+            method_state,
+            macros,
+            strict,
+            enabled,
+            learning,
+        }
+    })
+}
 
 // ============================================================================
 // Result type (mirror of include/buttre_platform.h)
@@ -72,11 +130,55 @@ impl ButtreKeyResult {
 
 struct EngineState {
     bridge: EngineBridge,
+    /// Host-driven switch ([`buttre_engine_set_enabled`]) — the IMKit
+    /// controller's own gate (deactivate, secure input). Independent of the
+    /// `Settings::enabled` mirror, which drives the bridge's passthrough via
+    /// [`sync_shared`]: either one off means keys pass untouched.
     enabled: bool,
+    /// Last [`MethodState::generation`] applied — one atomic compare per
+    /// keystroke, same lazy rebuild the IBus engine uses.
+    seen_generation: u64,
     /// Backing storage for the pointers handed across the FFI — replaced
     /// on every call, hence the "valid until next call" contract.
     commit_c: Option<CString>,
     preedit_c: CString,
+}
+
+/// Apply pending tri-surface changes before a key is processed — method
+/// switch, `Settings::enabled`, and the "Học thông minh" toggle, each a
+/// cheap compare against the shared mirrors. The ORDER mirrors the IBus
+/// engine and is load-bearing: a successful rebuild re-enables the bridge,
+/// and the settings store must win that disagreement.
+fn sync_shared(state: &mut EngineState) {
+    let sync = host_sync();
+
+    let generation = sync.method_state.generation();
+    if generation != state.seen_generation {
+        state.seen_generation = generation;
+        let method = sync.method_state.method();
+        // Outcome ops deliberately dropped: the next marshal re-reads the
+        // bridge's (now empty) preedit, and IMKit replaces the whole marked
+        // range on every update — there is no stale-region hazard.
+        if state.bridge.rebuild(&method).is_none() {
+            tracing::warn!("macOS engine: method switch to {method} failed; keeping current");
+        }
+    }
+
+    let want = sync.enabled.load(Ordering::Relaxed);
+    if state.bridge.is_enabled() != want {
+        state.bridge.set_enabled(want);
+    }
+
+    let want_learning = sync.learning.enabled.load(Ordering::Relaxed);
+    if state.bridge.has_learning() != want_learning {
+        if want_learning {
+            state
+                .bridge
+                .set_learning(sync.learning.store.clone(), sync.learning.save_tx.clone());
+        } else {
+            state.bridge.clear_learning();
+        }
+    }
 }
 
 static ENGINES: Mutex<Option<HashMap<u64, EngineState>>> = Mutex::new(None);
@@ -118,13 +220,30 @@ fn marshal(state: &mut EngineState, outcome: KeyOutcome) -> ButtreKeyResult {
 // Public FFI surface
 // ============================================================================
 
-/// Create a new engine instance (telex). Returns a non-zero handle, or 0
-/// on failure.
+/// Create a new engine instance. Returns a non-zero handle, or 0 on failure.
+///
+/// The FIRST call also brings up the per-process tri-surface sync (method
+/// file + settings + macros + learning watchers) — from then on the engine
+/// starts in the SAVED method with shorthand/strict/learning wired, and
+/// external changes (config window, hand-edits, another session's writes)
+/// apply on the next keystroke. The host never has to know any of this.
 #[no_mangle]
 pub extern "C" fn buttre_engine_new() -> u64 {
-    let Some(bridge) = EngineBridge::try_new("telex") else {
+    let sync = host_sync();
+    let Some(mut bridge) =
+        EngineBridge::try_new_with_macros(&sync.method_state.method(), sync.macros.clone())
+    else {
         return 0;
     };
+    bridge.set_strict_flag(sync.strict.clone());
+    // Start on the persisted states — a keystroke must not have to arrive
+    // before a saved "off" (or an already-earned learning store) applies.
+    if !sync.enabled.load(Ordering::Relaxed) {
+        bridge.set_enabled(false);
+    }
+    if sync.learning.enabled.load(Ordering::Relaxed) {
+        bridge.set_learning(sync.learning.store.clone(), sync.learning.save_tx.clone());
+    }
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let mut engines = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
     engines.get_or_insert_with(HashMap::new).insert(
@@ -132,6 +251,7 @@ pub extern "C" fn buttre_engine_new() -> u64 {
         EngineState {
             bridge,
             enabled: true,
+            seen_generation: sync.method_state.generation(),
             commit_c: None,
             preedit_c: CString::default(),
         },
@@ -170,6 +290,7 @@ pub extern "C" fn buttre_engine_process_key(
     capslock: bool,
 ) -> ButtreKeyResult {
     with_engine(engine_id, |state| {
+        sync_shared(state);
         if !state.enabled {
             return ButtreKeyResult::pass();
         }
@@ -187,6 +308,7 @@ pub extern "C" fn buttre_engine_process_key(
 #[no_mangle]
 pub extern "C" fn buttre_engine_process_backspace(engine_id: u64) -> ButtreKeyResult {
     with_engine(engine_id, |state| {
+        sync_shared(state);
         if !state.enabled {
             return ButtreKeyResult::pass();
         }
@@ -219,6 +341,13 @@ pub extern "C" fn buttre_engine_reset(engine_id: u64) {
 
 /// Switch the input method: 0 = telex, 1 = vni, 2 = nom. Discards any live
 /// composition (a mode switch is a reset). Returns true on success.
+///
+/// Also PERSISTS the choice to the shared method file (best-effort), so it
+/// survives a restart and every other engine instance/process converges —
+/// picking a method is a command, the same rule every other surface follows.
+/// The primary method channel is that file (config window / another
+/// session's write applies with no host involvement); this export remains
+/// for a host-side menu.
 #[no_mangle]
 pub extern "C" fn buttre_engine_set_method(engine_id: u64, method: u8) -> bool {
     let name = match method {
@@ -230,6 +359,13 @@ pub extern "C" fn buttre_engine_set_method(engine_id: u64, method: u8) -> bool {
     with_engine(engine_id, |state| match state.bridge.rebuild(name) {
         Some(outcome) => {
             marshal(state, outcome);
+            if let Err(e) = method_sync::write_method(name) {
+                tracing::warn!("buttre_engine_set_method: persist failed: {e}");
+            }
+            // The file write above re-fires the watcher and bumps the
+            // generation; adopt it now so sync_shared doesn't rebuild the
+            // same method again on the next key.
+            state.seen_generation = host_sync().method_state.generation();
             true
         }
         None => false, // builder failed — keyboard unchanged, report failure

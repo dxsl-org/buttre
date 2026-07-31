@@ -243,7 +243,12 @@ pub async fn run_engine() -> Result<()> {
     // below re-publishes the panel properties immediately (not just on the next
     // keystroke). Wired before the watcher starts so no early change is missed.
     let method_changed = Arc::new(Notify::new());
-    method_state.set_change_notify(method_changed.clone());
+    {
+        // MethodState is platform-neutral now (the macOS host shares it), so
+        // it takes a plain callback — this engine's tokio Notify rides in it.
+        let method_changed = method_changed.clone();
+        method_state.set_change_notify(move || method_changed.notify_one());
+    }
     method_sync::spawn_watcher(method_state.clone());
 
     // Shared focused-engine path (see ButtreFactory::focused).

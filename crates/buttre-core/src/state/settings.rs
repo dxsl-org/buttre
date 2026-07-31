@@ -227,6 +227,74 @@ impl Settings {
         Self::default()
     }
 
+    /// Read `settings.toml` distinguishing the cases [`Self::load`]
+    /// deliberately flattens: `Ok(None)` = file absent (fresh machine),
+    /// `Ok(Some)` = parsed, `Err` = file PRESENT but unreadable/unparseable.
+    ///
+    /// Load-modify-save writers (the config window, the engines' command
+    /// paths) must use THIS and refuse to save on `Err` — saving the
+    /// defaults `load()` hands back would rewrite the user's whole file
+    /// over one typo. Read-only consumers keep the infallible `load()`.
+    ///
+    /// # Errors
+    /// Path resolution, file I/O, or a present-but-unparseable file (the
+    /// message names the file and the parse error — the log line IS the
+    /// diagnosis).
+    pub fn read_strict() -> Result<Option<Self>> {
+        let path = Self::get_path()?;
+        Self::read_strict_from(&path)
+    }
+
+    /// [`Self::read_strict`] against an explicit path (testable core).
+    fn read_strict_from(path: &std::path::Path) -> Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        let settings = toml::from_str::<Self>(&content).map_err(|e| {
+            anyhow::anyhow!(
+                "settings.toml exists but does not parse ({e}) — refusing to overwrite it"
+            )
+        })?;
+        Ok(Some(settings.migrated()))
+    }
+
+    /// Startup self-heal for a corrupt `settings.toml`: rename it aside to
+    /// `settings.toml.bad` so later saves are legitimate fresh writes
+    /// instead of silent clobbers, and the user's original bytes survive
+    /// for hand-recovery. Returns `true` when a quarantine happened.
+    /// Call once at process startup (the tray does), never on a hot path.
+    /// Racing processes are safe: rename is atomic, first one wins, the
+    /// loser's rename fails on a path that no longer exists.
+    pub fn quarantine_if_corrupt() -> bool {
+        match Self::read_strict() {
+            Ok(_) => false,
+            Err(e) => {
+                let Ok(path) = Self::get_path() else {
+                    return false;
+                };
+                let bad = path.with_extension("toml.bad");
+                match fs::rename(&path, &bad) {
+                    Ok(()) => {
+                        tracing::warn!(
+                            "settings.toml không đọc được ({e}); đã cách ly sang {} — \
+                             cấu hình quay về mặc định",
+                            bad.display()
+                        );
+                        true
+                    }
+                    Err(rename_err) => {
+                        tracing::warn!(
+                            "settings.toml không đọc được ({e}) và cũng không cách ly được \
+                             ({rename_err}) — các thao tác lưu sẽ bị từ chối"
+                        );
+                        false
+                    }
+                }
+            }
+        }
+    }
+
     /// Fold a pre-split `settings.toml` into the `enabled` + `input_method`
     /// model, and write the result back so the next load needs no inference.
     ///
@@ -289,6 +357,30 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_strict_distinguishes_absent_parsed_and_corrupt() {
+        let dir = std::env::temp_dir().join("buttre-settings-strict-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+
+        // Absent → Ok(None): a fresh machine is not an error.
+        assert!(matches!(Settings::read_strict_from(&path), Ok(None)));
+
+        // Parsed → Ok(Some) with the file's values, not defaults.
+        fs::write(&path, "input_method = \"vni\"\nauto_correct = false\nshorthand = false\nstartup = false\nbackspace_mode = \"grapheme\"\nlearning_enabled = true\n").unwrap();
+        let loaded = Settings::read_strict_from(&path)
+            .unwrap()
+            .expect("file present must parse");
+        assert_eq!(loaded.input_method, "vni");
+
+        // Corrupt → Err, NEVER silently defaults: this is the branch that
+        // stops a load-modify-save writer from rewriting the user's file.
+        fs::write(&path, "not valid toml {{{").unwrap();
+        assert!(Settings::read_strict_from(&path).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn default_backspace_mode_is_grapheme() {

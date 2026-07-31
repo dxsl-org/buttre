@@ -52,10 +52,60 @@ xattr -dr com.apple.quarantine ~/Library/Input\ Methods/Buttre.app   # if downlo
 Select buttre, then type `vieejt` → `việt` (marked/underlined preedit while
 composing, committed on space). No Accessibility prompt should appear.
 
+## What the Rust side already wires (no host code needed)
+
+The first `buttre_engine_new()` brings up the SAME tri-surface sync the
+Linux engine processes run (`shared/method_sync`, `macro_sync`,
+`learning_sync` — see `platforms/macos/ffi.rs::host_sync`). Per keystroke
+the engine lazily applies:
+
+- **method** from `~/Library/Application Support/buttre/`'s shared method
+  file — engines start in the SAVED method, and the config window /
+  hand-edits switch it live; `buttre_engine_set_method` persists to the
+  same file (a host menu is optional, not required)
+- **`Settings::enabled`** — fresh install (no `settings.toml`) counts as ON
+  (picking buttre as an input source IS intent to type); an explicit
+  `enabled = false` sticks
+- **shorthand/gõ tắt** (`macros.toml`) + **strict spelling** + **học thông
+  minh** (learning collects at word commits, saves via the merged-write
+  thread — many-writer safe against the tray/other sessions)
+
 ## Status
 
-🚧 **In development.** The host compiles (verified by the `macos-imkit` CI
-job) but end-to-end typing must be confirmed on a real Mac — IMKit has no
-headless harness. Not yet shipped to end users. Signing/notarization with a
-Developer ID is a later step; until then the unsigned bundle needs the
-`xattr` step above.
+🚧 **Awaiting real-Mac verification.** Compiles + bundles on CI
+(`macos-imkit` job); the Rust wiring above is exercised by the shared
+bridge/sync tests on Linux/Windows. IMKit runtime behavior has no headless
+harness — verify by hand below.
+
+## Verification checklist (real Mac)
+
+Cầm checklist này khi sang máy Mac — mọi thứ compile sẵn, việc còn lại là
+kiểm chứng runtime:
+
+1. **Cài & đăng ký**: build + install như trên; buttre xuất hiện trong
+   Input Sources sau logout/login; KHÔNG có prompt Accessibility.
+2. **Gõ cơ bản**: `vieejt` → `việt` (preedit gạch chân, space chốt);
+   `hoaf` → `hoà`; backspace giữa từ giữ composition; Enter/điều hướng
+   chốt từ (flush).
+3. **Giả định ADR-0003**: menu Input Sources của macOS có cho đổi kiểu gõ
+   của buttre không? KHÔNG → đổi MỘT dòng trong
+   `crates/buttre-platform/src/shared/method_owner.rs` (`MacosImkit` sang
+   nhóm `Buttre`) — thiết kế sẵn cho việc này; radio bảng quyết định trong
+   test cùng file phải sửa theo, có chủ đích.
+4. **Tri-surface sync**: sửa method file / `settings.toml` (strict,
+   shorthand, learning, enabled) từ ngoài trong lúc gõ → áp dụng ở phím kế
+   tiếp, không cần restart host.
+5. **Học thông minh**: gõ một âm tiết lạ (vd `daat`)×3 → `learning.toml`
+   có `"dât" = 3`; tắt "Học thông minh" → ngừng học ngay.
+6. **Password bypass**: ô mật khẩu không nhận composition (đúng thiết kế,
+   TN2150).
+7. **Smoke từng app**: TextEdit, Notes, Safari (cả address bar), Terminal,
+   Chrome. Ghi lại quirk (tương đương vụ Chromium omnibox trên Windows).
+8. **`buttre` binary không tham số** trên macOS → mở cửa sổ Cấu hình
+   (nhánh Os của `method_owner`); checkbox autostart phải ẨN.
+
+Sau v1: entitlement `com.apple.security.inputmethod`, ký Developer ID +
+notarization (bỏ bước `xattr`).
+
+> Lưu ý hạ tầng: plan chi tiết nằm trong `.agents/` (gitignored — KHÔNG đi
+> theo clone) nên checklist này là nguồn chính khi làm việc trên máy khác.
