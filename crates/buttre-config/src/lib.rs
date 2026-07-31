@@ -19,8 +19,6 @@
 use buttre_core::state::learning::LearningStore;
 use buttre_core::state::macros::MacroStore;
 use buttre_core::state::Settings;
-use buttre_core::vietnamese::get_custom_dir;
-use buttre_core::Config as KeyboardConfig;
 
 mod learned_adapter;
 mod macro_adapter;
@@ -36,59 +34,6 @@ mod generated {
     slint::include_modules!();
 }
 use generated::*;
-
-/// One selectable entry in the General tab's method dropdown.
-#[derive(Clone)]
-struct MethodChoice {
-    id: String,
-    name: String,
-}
-
-/// Built-ins plus a scan of the custom-keyboards directory — mirrors
-/// `buttre-platform`'s `MethodRegistry` discovery logic using only
-/// `buttre_core` APIs (this crate deliberately does not depend on
-/// `buttre-platform`, to keep its winit-0.29 tray stack out of this
-/// binary's `--config` code path).
-fn discover_methods() -> Vec<MethodChoice> {
-    // No "English" entry: turning the IME off is `Settings::enabled`, not a
-    // method (ADR-0003). Listing it here would put a second on/off control in
-    // the config window, which is the ownership split this release removes.
-    let mut methods = vec![
-        MethodChoice {
-            id: "telex".to_string(),
-            name: "Telex".to_string(),
-        },
-        MethodChoice {
-            id: "vni".to_string(),
-            name: "VNI".to_string(),
-        },
-        MethodChoice {
-            id: "nom".to_string(),
-            name: "Chữ Nôm".to_string(),
-        },
-    ];
-
-    let custom_dir = get_custom_dir();
-    if let Ok(entries) = std::fs::read_dir(&custom_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
-                continue;
-            }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if matches!(stem, "telex" | "vni" | "nom") {
-                continue; // already listed as built-in
-            }
-            if let Ok(cfg) = KeyboardConfig::load(&path.to_string_lossy()) {
-                methods.push(MethodChoice {
-                    id: cfg.metadata.id.clone(),
-                    name: cfg.metadata.name.clone(),
-                });
-            }
-        }
-    }
-    methods
-}
 
 /// Open `path` in the platform's default editor. Small enough to keep
 /// self-contained rather than pull in a shared helper crate — sharing it
@@ -110,23 +55,9 @@ fn open_in_editor(path: &std::path::Path) {
 
 /// Push persisted settings onto the window's value widgets. Shared by the
 /// initial open and the live-refresh poll so the two paths can never drift.
-/// The method-name LIST is static (set once at open) and deliberately not
-/// touched here.
-fn apply_settings_to_window(window: &ConfigWindow, settings: &Settings, methods: &[MethodChoice]) {
-    let method_index = methods
-        .iter()
-        .position(|m| m.id == settings.input_method)
-        .unwrap_or(0) as i32;
-    window.set_method_index(method_index);
-    // ComboBox renders `current-value`; setting the index alone does not
-    // refresh it, so set the value too (see the open-time single-shot fix).
-    window.set_method_value(
-        methods
-            .get(method_index as usize)
-            .map(|m| m.name.as_str())
-            .unwrap_or("Telex")
-            .into(),
-    );
+/// No method picker: kiểu gõ thuộc menu của OS hoặc tray, không thuộc cửa
+/// sổ này (ADR-0003 — "một chỗ chọn là đủ").
+fn apply_settings_to_window(window: &ConfigWindow, settings: &Settings) {
     window.set_autostart(settings.startup);
     window.set_raw_backspace(settings.backspace_mode == "raw");
     window.set_strict_spelling(settings.strict_spelling);
@@ -171,7 +102,13 @@ fn refresh_macro_rows(window: &ConfigWindow) {
 /// Blocks until the window is closed (Slint owns this process's event loop
 /// for its lifetime) — the caller must invoke this BEFORE any tray/hook
 /// setup, never after, since the two event loops can never coexist.
-pub fn run() -> anyhow::Result<()> {
+///
+/// # Arguments
+/// * `show_autostart` - `false` trên nền tảng OS-sở-hữu (ADR-0003): ở đó
+///   entry autostart chỉ thoát im lặng, nên checkbox bị ẩn thay vì nói dối.
+///   Chỉ `main.rs` (nơi biết `MethodOwner`) quyết định được giá trị này —
+///   crate này cố ý không phụ thuộc `buttre-platform`.
+pub fn run(show_autostart: bool) -> anyhow::Result<()> {
     // Single-instance: a second `buttre --config` invocation (e.g. the user
     // clicks "Cấu hình…" twice) should not open a second window. There is no
     // cross-process "focus the existing window" primitive without extra
@@ -184,17 +121,10 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     let settings = Settings::load();
-    let methods = discover_methods();
-    let method_index = methods
-        .iter()
-        .position(|m| m.id == settings.input_method)
-        .unwrap_or(0) as i32;
-    let method_names: Vec<slint::SharedString> =
-        methods.iter().map(|m| m.name.as_str().into()).collect();
 
     let window = ConfigWindow::new()?;
-    window.set_method_names(slint::ModelRc::new(slint::VecModel::from(method_names)));
-    apply_settings_to_window(&window, &settings, &methods);
+    window.set_show_autostart(show_autostart);
+    apply_settings_to_window(&window, &settings);
     // Single-sourced from Cargo.toml — the old help_dialog.rs MessageBox
     // had this hardcoded ("0.7.7-beta") and silently went stale after every
     // release bump; `CARGO_PKG_VERSION` can never drift.
@@ -226,9 +156,7 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
 
-    // Snapshots for the live-refresh poll timer below — on_save_settings moves
-    // the originals, so capture what the poll needs before that.
-    let poll_methods = methods.clone();
+    // Snapshot for the live-refresh poll timer below.
     let mut poll_last = settings.clone();
 
     let weak = window.as_weak();
@@ -236,22 +164,13 @@ pub fn run() -> anyhow::Result<()> {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        let index = window.get_method_index().max(0) as usize;
-        // A bogus index keeps whatever is saved — the picker must never be able
-        // to silently retarget the user's method.
-        let input_method = methods
-            .get(index)
-            .map(|m| m.id.clone())
-            .unwrap_or_else(|| settings.input_method.clone());
-
+        // Fields this window does NOT own — kiểu gõ, on/off (tray/menu OS,
+        // ADR-0003), the transport kill switch, auto_correct — must carry the
+        // CURRENT store value, not the open-time snapshot: the tray or the
+        // IBus panel may have changed them while this window was open, and
+        // re-saving a stale copy would silently revert that change.
+        let base = Settings::load();
         let new_settings = Settings {
-            input_method,
-            // Untouched on purpose: on/off belongs to the tray and the OS, not
-            // to this window (ADR-0003). Same for the transport kill switch —
-            // it is a field-diagnostics knob (hand-edit), not a user setting.
-            enabled: settings.enabled,
-            hook_fallback: settings.hook_fallback,
-            auto_correct: settings.auto_correct,
             shorthand: window.get_shorthand_enabled(),
             startup: window.get_autostart(),
             backspace_mode: if window.get_raw_backspace() {
@@ -262,6 +181,7 @@ pub fn run() -> anyhow::Result<()> {
             learning_enabled: window.get_learning_enabled(),
             strict_spelling: window.get_strict_spelling(),
             use_preedit: !window.get_use_preedit_off(),
+            ..base
         };
 
         // Autostart registration is a per-OS side effect, not just a
@@ -359,18 +279,11 @@ pub fn run() -> anyhow::Result<()> {
     window.show()?;
     center_on_screen(&window);
 
-    // ComboBox discards its selection (back to the model's first entry) when
-    // its model is replaced, and that reset runs lazily during the FIRST
-    // rendered frame — i.e. after every property set above, which is why
-    // setting `method-index` before `show()` is not enough. Re-assert the
-    // loaded selection once that frame is done, and re-center now that the
-    // window reports its real size instead of the pre-frame estimate.
+    // Re-center after the first rendered frame: only then does the window
+    // report its real outer size instead of the pre-frame estimate.
     let weak = window.as_weak();
-    let method_name = window.get_method_value();
     slint::Timer::single_shot(std::time::Duration::from_millis(80), move || {
         let Some(window) = weak.upgrade() else { return };
-        window.set_method_index(method_index);
-        window.set_method_value(method_name);
         center_on_screen(&window);
     });
 
@@ -393,7 +306,7 @@ pub fn run() -> anyhow::Result<()> {
             let Some(window) = weak.upgrade() else { return };
             let disk = Settings::load();
             if disk != poll_last {
-                apply_settings_to_window(&window, &disk, &poll_methods);
+                apply_settings_to_window(&window, &disk);
                 poll_last = disk;
             }
         },

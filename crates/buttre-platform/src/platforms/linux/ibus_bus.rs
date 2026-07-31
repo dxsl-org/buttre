@@ -142,6 +142,10 @@ struct ButtreFactory {
     /// it per keystroke to choose the preedit vs commit-as-you-go model
     /// (gated on the client's surrounding-text capability).
     use_preedit: Arc<std::sync::atomic::AtomicBool>,
+    /// `Settings::enabled` mirror on the same watcher — each engine consults
+    /// it per keystroke (`sync_enabled`) so an on/off toggle written to
+    /// `settings.toml` applies without a tray process relaying it.
+    enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Currently focused engine path, shared with every engine and the async
     /// property-refresh task (`run_engine`). An engine claims it on `focus_in`
     /// and releases it on `focus_out`; the task emits `RegisterProperties` here
@@ -173,6 +177,7 @@ impl ButtreFactory {
             self.macros.clone(),
             self.strict.clone(),
             self.use_preedit.clone(),
+            self.enabled.clone(),
             path.clone(),
             self.focused.clone(),
         );
@@ -239,11 +244,18 @@ pub async fn run_engine() -> Result<()> {
     let focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>> = Arc::new(Mutex::new(None));
 
     // Shorthand/gõ tắt (phase-02): shared macro store + its own watcher over
-    // macros.toml + settings.toml.
+    // macros.toml + settings.toml. The same watcher keeps the enabled mirror
+    // fresh — with no tray on IBus, the engine owns its own on/off.
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
     let use_preedit = macro_sync::load_initial_use_preedit();
-    macro_sync::spawn_watcher(macros.clone(), strict.clone(), use_preedit.clone());
+    let enabled = macro_sync::load_initial_enabled();
+    macro_sync::spawn_watcher(
+        macros.clone(),
+        strict.clone(),
+        use_preedit.clone(),
+        enabled.clone(),
+    );
 
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
@@ -256,6 +268,7 @@ pub async fn run_engine() -> Result<()> {
                 macros,
                 strict,
                 use_preedit,
+                enabled: enabled.clone(),
                 focused: focused.clone(),
             },
         )?
@@ -274,7 +287,13 @@ pub async fn run_engine() -> Result<()> {
     tokio::spawn(async move {
         loop {
             method_changed.notified().await;
-            let method = method_state.method();
+            // The radio the panel should check: the method — unless the IME
+            // is off, which the panel renders as the English radio.
+            let method = if enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                method_state.method()
+            } else {
+                "english".to_string()
+            };
             let target = focused.lock().unwrap().clone();
             let Some(path) = target else { continue };
             match SignalContext::new(&connection, &path) {

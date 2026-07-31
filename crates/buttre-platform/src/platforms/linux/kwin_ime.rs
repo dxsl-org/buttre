@@ -63,7 +63,17 @@ fn kwinrc_points_at_buttre(content: &str) -> bool {
 
 /// True when this session can and should drive KWin's IME switch: a
 /// Wayland session whose kwinrc input method is buttre.
-fn manages_buttre_ime() -> bool {
+///
+/// `pub` vì `method_owner` cũng cần nó: KWin sở hữu tiến trình IME nghĩa là
+/// đường gõ thật là wayland-native — bất kể ibus-daemon có sống hay không —
+/// nên máy đó thuộc nhóm "buttre sở hữu + tray" (ADR-0003).
+///
+/// CỐ Ý không kiểm KWin có đang chạy: một kwinrc sót lại trên máy GNOME chỉ
+/// gây THỪA một bề mặt (tray + menu top-bar — vô hại, vẫn còn công tắc),
+/// còn một lần probe bus trượt trên Plasma thật sẽ xếp máy đó vào nhóm
+/// IBus/Os và lấy mất tray — nút "Thoát" duy nhất tắt được KWin IME. Sai về
+/// phía an toàn.
+pub fn manages_buttre_ime() -> bool {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
         || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
     if !wayland {
@@ -98,7 +108,6 @@ pub fn set_kwin_ime_enabled(enabled: bool) {
             ),
         )
         .map(|_| ())
-        .map_err(Into::into)
     });
     match result {
         Ok(()) => tracing::info!("kwin_ime: set VirtualKeyboard.enabled = {enabled}"),

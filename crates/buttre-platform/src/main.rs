@@ -23,6 +23,7 @@ use buttre_core::state::macros::MacroStore;
 use buttre_core::state::{Settings, StateObserver};
 use buttre_core::AppState;
 use buttre_core::Keyboard;
+use buttre_platform::shared::method_owner::{self, MethodOwner};
 use buttre_platform::shared::observers::{KeyboardObserver, MainUICallback, UIEvent, UIObserver};
 use buttre_platform::shared::ui::{build_menu, create_tray_icon, helpers, MenuItems};
 use buttre_platform::shared::{pipe_server, KeyboardManager, MethodRegistry};
@@ -475,6 +476,19 @@ fn run_doctor() {
         "kwinrc:   [Wayland] InputMethod = {}",
         kwin_ime::kwinrc_input_method().unwrap_or_else(|| "(không đặt)".into())
     );
+    // Mô hình đang hiệu lực (ADR-0003): ai sở hữu lựa chọn kiểu gõ ở đây.
+    // In cả surface vì "backend:" và "owner:" có thể lệch nhau hợp lệ —
+    // Plasma Wayland có ibus-daemon chạy kèm vẫn thuộc nhóm tray (KWin sở
+    // hữu tiến trình IME), và dòng surface là thứ giải thích vì sao.
+    let surface = method_owner::current_surface();
+    match method_owner::owner_of(surface) {
+        MethodOwner::Os => {
+            println!("owner:    OS sở hữu kiểu gõ (menu IBus/fcitx5) — không tray ({surface:?})")
+        }
+        MethodOwner::Buttre => {
+            println!("owner:    buttre sở hữu kiểu gõ — tray ({surface:?})")
+        }
+    }
     println!(
         "state:    method={:?} enabled={} (files trong ~/.config/buttre/)",
         method_sync::read_method(),
@@ -510,7 +524,9 @@ fn main() -> Result<()> {
             "buttre {ver} — Vietnamese input method\n\n\
              Usage: buttre [FLAG]\n\n\
              Flags:\n  \
-             (none)      Launch the system-tray app (choose method, open settings)\n  \
+             (none)      Tray app (Windows, Wayland-native) — or the settings window\n  \
+             \x20           on OS-owned platforms (IBus, fcitx5, macOS; ADR-0003)\n  \
+             --autostart Login launch: tray where a tray exists, silent exit elsewhere\n  \
              --ibus      Run as the IBus engine (spawned by ibus-daemon, not by hand)\n  \
              --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
              --config    Open the settings window\n  \
@@ -572,7 +588,36 @@ fn main() -> Result<()> {
     // see `buttre-config`'s crate doc for why the two winit versions can
     // never coexist.
     if std::env::args().any(|arg| arg == "--config") {
-        return buttre_config::run();
+        // Checkbox autostart chỉ hiện nơi tray tồn tại — trên nền tảng
+        // OS-sở-hữu nó không điều khiển được gì (xem nhánh Os bên dưới).
+        return buttre_config::run(method_owner::decide() == MethodOwner::Buttre);
+    }
+
+    // Ai sở hữu lựa chọn kiểu gõ trên máy này (ADR-0003). Trên
+    // nền tảng OS-sở-hữu (IBus/fcitx5/macOS) buttre KHÔNG dựng tray — menu
+    // của OS đã là nơi chọn kiểu gõ, tray chỉ là nơi điều khiển thứ hai.
+    // `buttre` không tham số ở đó mở cửa sổ Cấu hình: người dùng bấm vào app
+    // phải được một thứ hữu ích.
+    let surface = method_owner::current_surface();
+    let owner = method_owner::owner_of(surface);
+    info!("method owner: {owner:?} (surface: {surface:?})");
+    if owner == MethodOwner::Os {
+        // Đưa entry autostart về dạng mới (`--autostart`): entry cũ chạy
+        // `buttre` trần, mà ở nhánh này nghĩa là bật cửa sổ Cấu hình mỗi lần
+        // đăng nhập. Ghi lại theo đúng setting hiện tại là idempotent và tự
+        // lành sau một lần chạy. Linux-only: macOS không có autostart
+        // (IMKit do hệ thống khởi chạy — buttre-autostart bail có chủ ý).
+        #[cfg(platform_linux)]
+        if let Err(e) = buttre_autostart::set_enabled(Settings::load().startup) {
+            warn!("autostart reconciliation on OS-owned platform failed: {e:?}");
+        }
+        // Login launch: engine do daemon/OS spawn, không có gì để chạy — và
+        // tuyệt đối không được bật cửa sổ lên giữa lúc đăng nhập.
+        if args.iter().any(|a| a == "--autostart") {
+            info!("OS-owned platform: nothing to autostart (engine is daemon-spawned)");
+            return Ok(());
+        }
+        return buttre_config::run(false);
     }
 
     // Single instance check
@@ -1184,13 +1229,15 @@ fn main() -> Result<()> {
                 // the settings.toml write it also triggers is likewise a no-op
                 // for the settings watcher (AppState already matches).
                 //
-                // `disk` is any KNOWN_METHODS id. "english" is still a WIRE
-                // value in this file (the engine's passthrough radio — phase 04
-                // reworks the panel); in the split model it is a COMMAND to
-                // turn off, never a method to store (ADR-0003 invariant 1). A
-                // real method picked from the panel expresses intent to type,
-                // so it also switches the IME on — the same rule the tray menu
-                // and hotkeys follow.
+                // `disk` is any KNOWN_METHODS id. "english" is a LEGACY wire
+                // value in this file: the IBus panel no longer writes it (its
+                // English radio commands `Settings::enabled` directly), but a
+                // stale file from an older build — or the fcitx5 addon's own
+                // surface — can still carry it. In the split model it is a
+                // COMMAND to turn off, never a method to store (ADR-0003
+                // invariant 1). A real method picked from the panel expresses
+                // intent to type, so it also switches the IME on — the same
+                // rule the tray menu and hotkeys follow.
                 #[cfg(platform_linux)]
                 if method_file_rx.try_iter().count() > 0 {
                     use buttre_platform::platforms::linux::method_sync;

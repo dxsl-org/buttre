@@ -1,4 +1,4 @@
-import { TabWidget, ComboBox, CheckBox, Button, LineEdit, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+import { TabWidget, CheckBox, Button, LineEdit, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 
 export struct LearnedWordRow {
     word: string,
@@ -20,13 +20,12 @@ export component ConfigWindow inherits Window {
 
     // Mirrors `buttre_core::state::Settings` field-for-field — `run()` sets
     // these from `Settings::load()` and reads them back in `on-save`.
-    in-out property <[string]> method-names: ["English", "Telex", "VNI"];
-    in-out property <int> method-index: 1;
-    // Display text of the selected method — kept in lock-step with
-    // `method-index` by `run()` because ComboBox does not re-render its
-    // value when only the index is set programmatically.
-    in-out property <string> method-value: "";
+    // No method picker: kiểu gõ được chọn ở menu của OS (IBus/fcitx5/macOS)
+    // hoặc ở tray (Windows/Wayland) — một chỗ chọn là đủ (ADR-0003).
     in-out property <bool> autostart: false;
+    // Trên nền tảng OS-sở-hữu, entry autostart chỉ thoát im lặng (engine do
+    // daemon spawn) — một checkbox không làm gì là một lời nói dối, ẩn đi.
+    in property <bool> show-autostart: true;
     in-out property <bool> raw-backspace: false;
     in-out property <bool> strict-spelling: false;
     in-out property <bool> learning-enabled: true;
@@ -95,30 +94,9 @@ export component ConfigWindow inherits Window {
                 VerticalBox {
                     // Pack controls at the top with their preferred heights —
                     // without this the box distributes the tab's spare
-                    // vertical space across children and the ComboBox row
-                    // balloons.
+                    // vertical space across children.
                     alignment: start;
-                    HorizontalBox {
-                        Text {
-                            text: "Kiểu gõ mặc định:";
-                            vertical-alignment: center;
-                        }
-                        ComboBox {
-                            model: method-names;
-                            current-index <=> method-index;
-                            // Two-way on the displayed text too: setting
-                            // current-index from Rust alone does not refresh
-                            // the rendered value, so the box would keep
-                            // showing the first entry ("English") no matter
-                            // which method is actually active.
-                            current-value <=> method-value;
-                            // User-initiated only (programmatic sets don't
-                            // fire it) — safe with run()'s post-frame
-                            // selection re-assert.
-                            selected => { root.save-settings(); }
-                        }
-                    }
-                    CheckBox {
+                    if show-autostart: CheckBox {
                         text: "Tự động khởi động cùng hệ điều hành";
                         checked <=> autostart;
                         toggled => { root.save-settings(); }

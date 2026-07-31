@@ -105,6 +105,10 @@ pub(crate) struct ImeV1State {
     bridge: EngineBridge,
     method_state: Arc<MethodState>,
     seen_generation: u64,
+    /// `Settings::enabled` mirror (`macro_sync`) — consulted per key so a
+    /// toggle written to `settings.toml` (tray left-click, config window,
+    /// hand-edit) silences or revives this engine directly.
+    enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ImeV1State {
@@ -113,11 +117,16 @@ impl ImeV1State {
         macros: Arc<Mutex<buttre_core::state::macros::MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
         use_preedit: Arc<std::sync::atomic::AtomicBool>,
+        enabled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let method = method_state.method();
         let seen_generation = method_state.generation();
         let mut bridge = EngineBridge::new_with_macros(&method, macros);
         bridge.set_strict_flag(strict);
+        // Start on the persisted on/off state, not always-on.
+        if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            bridge.set_enabled(false);
+        }
         Self {
             im: None,
             context: None,
@@ -134,6 +143,20 @@ impl ImeV1State {
             bridge,
             method_state,
             seen_generation,
+            enabled,
+        }
+    }
+
+    /// Apply a pending on/off change from `settings.toml` — same lazy
+    /// per-key check as [`Self::sync_method`]. Clears the committed-word
+    /// shadow: while off, nothing tracks what the app receives.
+    fn sync_enabled(&mut self) {
+        let want = self.enabled.load(std::sync::atomic::Ordering::Relaxed);
+        if self.bridge.is_enabled() != want {
+            let outcome = self.bridge.set_enabled(want);
+            self.commit_ops(outcome.ops);
+            self.committed_word.clear();
+            tracing::info!("Wayland v1 engine enabled={want}");
         }
     }
 
@@ -206,6 +229,13 @@ impl ImeV1State {
     /// Clients without it (terminals) stay on preedit, where
     /// `delete_surrounding_text` is never needed.
     fn sync_use_preedit(&mut self) {
+        // Passthrough: set_use_composition no-ops, so recording
+        // `applied_composition` would wedge this check until restart. The
+        // model is re-negotiated on the first key after re-enable
+        // (sync_enabled runs before this in handle_key).
+        if !self.bridge.is_enabled() {
+            return;
+        }
         let want_composition = self.use_preedit.load(std::sync::atomic::Ordering::Relaxed)
             || !self.saw_surrounding
             || self.content_purpose == PURPOSE_TERMINAL_V1;
@@ -258,6 +288,9 @@ impl ImeV1State {
         }
 
         self.sync_method();
+        // AFTER the method sync: a successful rebuild re-enables the bridge,
+        // and the settings store must win that disagreement.
+        self.sync_enabled();
         self.sync_use_preedit();
 
         let Some(keysym) = self
@@ -527,12 +560,14 @@ pub(super) fn run_engine(conn: Connection) -> Result<()> {
     // Loaded for the shared watcher signature only — v1 stays on the preedit
     // model, exactly like v2 (see mod.rs on `use_preedit`).
     let use_preedit = macro_sync::load_initial_use_preedit();
+    let enabled = macro_sync::load_initial_enabled();
 
     let mut state = ImeV1State::new(
         method_state.clone(),
         macros.clone(),
         strict.clone(),
         use_preedit.clone(),
+        enabled.clone(),
     );
     let mut queue = conn.new_event_queue::<ImeV1State>();
     let qh: QueueHandle<ImeV1State> = queue.handle();
@@ -546,7 +581,7 @@ pub(super) fn run_engine(conn: Connection) -> Result<()> {
     }
 
     method_sync::spawn_watcher(method_state);
-    macro_sync::spawn_watcher(macros, strict, use_preedit);
+    macro_sync::spawn_watcher(macros, strict, use_preedit, enabled);
 
     tracing::info!("Wayland v1 (KDE) input method registered; waiting for activation");
     loop {

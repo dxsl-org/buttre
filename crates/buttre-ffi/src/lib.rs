@@ -162,8 +162,8 @@ unsafe fn method_from_ptr<'a>(method: *const c_char) -> Option<&'a str> {
 /// `is_engine_method` covers built-ins already, so this would be dead code.
 ///
 /// `"english"` stays accepted as a WIRE value only (the method-file protocol's
-/// "IME off" — a migration shim until phase 04 reworks the OS-owned surfaces);
-/// it is not a storable method anywhere in `Settings` (ADR-0003).
+/// "IME off" — legacy files and the fcitx5 addon's English item still speak
+/// it); it is not a storable method anywhere in `Settings` (ADR-0003).
 #[cfg(not(target_os = "linux"))]
 const BUILTIN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 

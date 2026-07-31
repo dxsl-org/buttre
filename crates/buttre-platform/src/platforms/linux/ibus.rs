@@ -81,6 +81,12 @@ pub struct ButtreEngine {
     /// standalone construction (tests). `true` = preedit/underline model,
     /// `false` = commit-as-you-go. Consulted per keystroke.
     use_preedit: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Shared `Settings::enabled` mirror (`macro_sync`). `None` in
+    /// standalone construction (tests) — treated as always-on. Consulted per
+    /// keystroke (`sync_enabled`): with no tray on IBus, this is how a
+    /// toggle written to `settings.toml` (config window, hand-edit, or this
+    /// engine's own English radio) reaches the bridge's passthrough.
+    enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Client capability bits from the last `SetCapabilities`. The no-preedit
     /// model is only engaged when `caps & IBUS_CAP_SURROUNDING_TEXT != 0`
     /// (the client can delete already-committed text); otherwise the engine
@@ -112,6 +118,7 @@ impl ButtreEngine {
             method_state: None,
             seen_generation: 0,
             use_preedit: None,
+            enabled: None,
             caps: 0,
             applied_no_preedit: false,
             path: None,
@@ -139,16 +146,23 @@ impl ButtreEngine {
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
         use_preedit: Arc<std::sync::atomic::AtomicBool>,
+        enabled: Arc<std::sync::atomic::AtomicBool>,
         path: zvariant::OwnedObjectPath,
         focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>>,
     ) -> Self {
         let mut bridge = EngineBridge::new_with_macros(&state.method(), macros);
         bridge.set_strict_flag(strict);
+        // Start on the persisted on/off state — without this a keystroke
+        // would have to arrive before a saved "off" took effect.
+        if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            bridge.set_enabled(false);
+        }
         Self {
             seen_generation: state.generation(),
             bridge: Arc::new(Mutex::new(bridge)),
             method_state: Some(state),
             use_preedit: Some(use_preedit),
+            enabled: Some(enabled),
             caps: 0,
             applied_no_preedit: false,
             path: Some(path),
@@ -159,6 +173,61 @@ impl ButtreEngine {
     /// Current preedit text (test/diagnostic accessor).
     pub fn preedit_text(&self) -> String {
         self.bridge.lock().unwrap().preedit().to_string()
+    }
+
+    /// The radio the panel should show checked: the current method — unless
+    /// the IME is off, which the panel renders as the English radio (the
+    /// Unikey model: the engine stays active, it just goes silent).
+    fn current_radio(&self) -> String {
+        let on = self
+            .enabled
+            .as_ref()
+            .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(true);
+        if !on {
+            return "english".to_string();
+        }
+        self.method_state
+            .as_ref()
+            .map(|s| s.method())
+            .unwrap_or_else(|| "telex".to_string())
+    }
+
+    /// Write the panel's COMMAND into the settings store — `Settings::enabled`,
+    /// plus the picked `input_method` when given — and the shared mirror, so
+    /// every engine instance AND every later session converge (with no tray
+    /// on this platform, nothing else mirrors a panel switch into
+    /// settings.toml, and a later Wayland/Windows session boots from it).
+    /// ADR-0003: many writers, one store, no reflection; `method` is never
+    /// `"english"` here (invariant 1 — the English radio is intercepted
+    /// before this). The settings watcher re-reads our own write — a no-op
+    /// by value. Blocking file I/O, but click-frequency only: the same cost
+    /// class as the `write_method` this handler already performs.
+    fn command_state(&self, on: bool, method: Option<&str>) {
+        if let Some(flag) = &self.enabled {
+            flag.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mut settings = buttre_core::state::Settings::load();
+        let method_changed = method.is_some_and(|m| settings.input_method != m);
+        // A missing settings.toml must always be MATERIALIZED: on a fresh
+        // install the engine treats "no file" as enabled (the user picked
+        // buttre as an OS input source — see `macro_sync::effective_enabled`),
+        // so an English-radio click whose value happens to equal the unsaved
+        // default would otherwise return here without writing, and the
+        // fresh-install rule would immediately overrule the user's click.
+        let file_exists = buttre_core::state::Settings::get_path()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        if file_exists && settings.enabled == on && !method_changed {
+            return;
+        }
+        settings.enabled = on;
+        if let Some(m) = method {
+            settings.input_method = m.to_string();
+        }
+        if let Err(e) = settings.save() {
+            tracing::warn!("command_state(on={on}, {method:?}): settings.toml save failed: {e:?}");
+        }
     }
 
     /// Push the current method's radio states to the panel: a full
@@ -315,6 +384,12 @@ impl ButtreEngine {
         // Apply a pending tray-side method switch before processing (B5).
         self.sync_method(&ctx).await;
 
+        // Apply a pending on/off change from `settings.toml` AFTER the
+        // method sync: a successful rebuild sets the bridge enabled, and the
+        // settings store must win that disagreement — the store is canonical
+        // for on/off, the method file carries only the method.
+        self.sync_enabled(&ctx).await;
+
         // Apply a pending preedit-model change (setting toggle or capability
         // update) before processing this key.
         self.sync_use_preedit(&ctx).await;
@@ -400,11 +475,7 @@ impl ButtreEngine {
         if let (Some(focused), Some(path)) = (&self.focused, &self.path) {
             *focused.lock().unwrap() = Some(path.clone());
         }
-        let current = self
-            .method_state
-            .as_ref()
-            .map(|s| s.method())
-            .unwrap_or_else(|| "telex".to_string());
+        let current = self.current_radio();
         // Register (consumed by GNOME Shell's one-shot handler after an engine
         // switch) AND per-radio updates (repaint when already registered) — a
         // method switched while this engine was unfocused lands either way.
@@ -438,9 +509,32 @@ impl ButtreEngine {
         let Some(method) = ibus_props::method_for_activation(name, state) else {
             return;
         };
-        if let Err(e) = method_sync::write_method(method) {
-            tracing::warn!("PropertyActivate: write_method({method}) failed: {e}");
+        // The English radio is a COMMAND to turn off (ADR-0003), not a method
+        // to store: it lands on `Settings::enabled`, never in the method file
+        // — that file's "english" wire value is legacy-only (stale files, the
+        // fcitx addon's own surface), and this engine stops producing it.
+        if method == "english" {
+            self.command_state(false, None);
+            let ops = self.bridge.lock().unwrap().set_enabled(false).ops;
+            self.emit_ops(&ctx, ops).await;
+            Self::publish_method_props(&ctx, "english").await;
+            return;
         }
+        // The method file is what engines actually follow; settings.toml only
+        // records the choice when that write LANDED — persisting a method the
+        // engine will never type would leave three surfaces disagreeing.
+        let method_written = match method_sync::write_method(method) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("PropertyActivate: write_method({method}) failed: {e}");
+                false
+            }
+        };
+        // Picking a method expresses intent to TYPE with it, so it also turns
+        // the IME on — the same rule the tray menu and hotkeys follow.
+        self.command_state(true, method_written.then_some(method));
+        let ops = self.bridge.lock().unwrap().set_enabled(true).ops;
+        self.emit_ops(&ctx, ops).await;
         Self::publish_method_props(&ctx, method).await;
     }
 
@@ -687,6 +781,28 @@ impl ButtreEngine {
         }
     }
 
+    /// Apply a pending on/off change: push the `Settings::enabled`
+    /// mirror into the bridge's passthrough exactly once per change, clearing
+    /// any live preedit/candidates so a mid-word toggle never strands half a
+    /// word, then move the panel radio (English ⇄ method).
+    async fn sync_enabled(&mut self, ctx: &SignalContext<'_>) {
+        let Some(flag) = &self.enabled else {
+            return;
+        };
+        let want = flag.load(std::sync::atomic::Ordering::Relaxed);
+        let ops = {
+            let mut bridge = self.bridge.lock().unwrap();
+            if bridge.is_enabled() == want {
+                return;
+            }
+            bridge.set_enabled(want).ops
+            // Guard dropped here — no lock across the awaits below.
+        };
+        self.emit_ops(ctx, ops).await;
+        Self::publish_method_props(ctx, &self.current_radio()).await;
+        tracing::info!("Engine enabled={want} (settings.toml)");
+    }
+
     /// Apply a pending preedit-model change. No-preedit (commit-as-you-go)
     /// engages only when the user turned the setting off AND the client can
     /// delete already-committed text (`IBUS_CAP_SURROUNDING_TEXT`). Clients
@@ -706,10 +822,23 @@ impl ButtreEngine {
         if effective == self.applied_no_preedit {
             return;
         }
-        self.applied_no_preedit = effective;
         // set_use_composition commits any pending word before switching models;
         // the guard is dropped before the await (owned outcome returned).
-        let outcome = self.bridge.lock().unwrap().set_use_composition(!effective);
+        let outcome = {
+            let mut bridge = self.bridge.lock().unwrap();
+            // Passthrough: set_use_composition no-ops (nothing to rebuild),
+            // so recording `applied_no_preedit` now would wedge this check
+            // forever — passthrough is ROUTINE here (every English-radio
+            // click), and a use_preedit toggle while off must still apply
+            // after re-enable. sync_enabled runs before this in
+            // process_key_event, so the first key after re-enable
+            // negotiates the model.
+            if !bridge.is_enabled() {
+                return;
+            }
+            bridge.set_use_composition(!effective)
+        };
+        self.applied_no_preedit = effective;
         self.emit_ops(ctx, outcome.ops).await;
         tracing::info!("Preedit model: no_preedit={effective}");
     }

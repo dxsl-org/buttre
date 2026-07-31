@@ -55,19 +55,64 @@ pub fn load_initial_use_preedit() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(use_preedit))
 }
 
-/// Re-read `settings.toml` and swap `store`'s contents + refresh `strict` and
-/// `use_preedit` to match — the single reload spelling both watch callbacks
-/// below share.
-fn reload(store: &Arc<Mutex<MacroStore>>, strict: &Arc<AtomicBool>, use_preedit: &Arc<AtomicBool>) {
+/// `Settings::enabled` as the ENGINE processes must read it, with the
+/// fresh-install nuance `Settings::default()` cannot express:
+///
+/// - **No `settings.toml` at all** = the user has never made an on/off
+///   choice — but keys only reach this engine because they DID select
+///   buttre as an OS input source, and picking an input source is intent
+///   to type with it (the same command rule the tray menu and hotkeys
+///   follow, ADR-0003). An engine that stays silent out of the box reads
+///   as broken, and on OS-owned platforms there is no tray to turn it on.
+///   `Settings::default().enabled = false` stays correct where it applies:
+///   the Windows tray/hook, which would otherwise start rewriting
+///   keystrokes right after install with no user act at all.
+/// - **File present** = read verbatim: an explicit `enabled = false`
+///   (English radio, config window, hand-edit) sticks. The panel's radio
+///   writes materialize the file, so the fresh-install rule applies at
+///   most until the first explicit choice.
+fn effective_enabled() -> bool {
+    match Settings::get_path() {
+        Ok(path) if !path.exists() => true,
+        _ => Settings::load().enabled,
+    }
+}
+
+/// Build the initial `Settings::enabled` mirror for engine-process startup —
+/// the engine owns its own on/off. Consulted per keystroke by every engine
+/// (`sync_enabled`) so a toggle written to `settings.toml` from ANY process
+/// — tray left-click on Wayland, a hand-edit on IBus, the panel's English
+/// radio via the engine itself — silences or revives typing without a tray
+/// relaying it.
+pub fn load_initial_enabled() -> Arc<AtomicBool> {
+    let enabled = effective_enabled();
+    tracing::info!("macro_sync: initial enabled = {enabled}");
+    Arc::new(AtomicBool::new(enabled))
+}
+
+/// Re-read `settings.toml` and swap `store`'s contents + refresh the flag
+/// mirrors to match — the single reload spelling both watch callbacks below
+/// share.
+fn reload(
+    store: &Arc<Mutex<MacroStore>>,
+    strict: &Arc<AtomicBool>,
+    use_preedit: &Arc<AtomicBool>,
+    enabled: &Arc<AtomicBool>,
+) {
     let settings = Settings::load();
     *store.lock().unwrap_or_else(|e| e.into_inner()) = MacroStore::load_gated(settings.shorthand);
     strict.store(settings.strict_spelling, Ordering::Relaxed);
     use_preedit.store(settings.use_preedit, Ordering::Relaxed);
+    // Same fresh-install rule as startup: this reload also fires for
+    // neighbor writes (macros.toml) while settings.toml may still not
+    // exist, and that must not silence a fresh engine.
+    let enabled_now = effective_enabled();
+    enabled.store(enabled_now, Ordering::Relaxed);
     tracing::info!(
-        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={})",
+        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={}, enabled={enabled_now})",
         settings.shorthand,
         settings.strict_spelling,
-        settings.use_preedit
+        settings.use_preedit,
     );
 }
 
@@ -106,6 +151,7 @@ pub fn spawn_watcher(
     store: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
     use_preedit: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
 ) {
     let dirs = watch_dirs();
     if dirs.is_empty() {
@@ -117,6 +163,7 @@ pub fn spawn_watcher(
         let store = store.clone();
         let strict = strict.clone();
         let use_preedit = use_preedit.clone();
+        let enabled = enabled.clone();
         crate::fs_watch::spawn_dir_watch("macro_sync", dir, move |cue| {
             // The watched dirs also hold unrelated state (method file,
             // learning.toml), so filter to the two files that feed the
@@ -134,7 +181,7 @@ pub fn spawn_watcher(
                 }),
             };
             if relevant {
-                reload(&store, &strict, &use_preedit);
+                reload(&store, &strict, &use_preedit, &enabled);
             }
         });
     }

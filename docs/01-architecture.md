@@ -609,6 +609,32 @@ brb = { expand = "be right back" }    # enabled defaults to true
 
 ## Tích Hợp Platform
 
+### Mô Hình Sở Hữu Kiểu Gõ (ADR-0003)
+
+**Trạng thái**: ✅ Đã cài đặt (phase-04)
+
+buttre không sở hữu lựa chọn kiểu gõ ở mọi nơi — quyết định này phụ thuộc **runtime** và **theo từng nền tảng**. Hàm [`method_owner::decide()`](crates/buttre-platform/src/shared/method_owner.rs) probe đường IME (Linux D-Bus probes, macOS giả định, Windows hardcode) và phân nhánh hành vi:
+
+| Nền tảng | Menu của OS | Sở hữu | Tray | Cửa Sổ Cấu Hình |
+|---|---|---|---|---|
+| Linux IBus | ✅ Properties radio | OS | ❌ Không | Settings window |
+| Linux fcitx5 + addon | ✅ Panel status area | OS | ❌ Không | Settings window |
+| macOS IMKit | ✅ Input Source menu | OS | ❌ Không | Settings window |
+| Linux Wayland-native | ❌ Không có | buttre | ✅ Có | Tray + Settings |
+| Windows | ❌ Không có | buttre | ✅ Có | Tray + Settings |
+
+**Hệ quả**:
+
+- **Trên nền tảng OS-sở-hữu**: `buttre` lệnh không tham số hiển thị cửa sổ Cấu hình (không tham số mở config), engine chạy dưới daemon của OS (IBus/fcitx5 launcher hoặc IMKit), không tray trong process tray user. Tuy nhiên, engine Linux tự áp dụng `Settings::enabled` khi file config thay đổi (file-watch via `macro_sync.rs`), nên người dùng vẫn có thể toggle bộ gõ bằng cách chỉnh sửa tay hoặc qua config window.
+- **Trên nền tảng Buttre-sở-hữu**: `buttre` lệnh mở tray trực tiếp; tray sở hữu lựa chọn kiểu gõ (bấm/hotkey nạp `Settings::input_method` và `Settings::enabled`).
+- **Flag `--autostart`**: Login launch khác với click. Trên OS-owned, nó thoát im lặng (engine do OS spawn); trên Buttre-owned, nó khởi động tray.
+- **Radio English**: Trên IBus, nó viết lệnh toggle `Settings::enabled` chứ không phải lựa chọn kiểu gõ — nó tắt engine, không chuyển sang kiểu English fake.
+- **`--doctor`**: In owner + surface để tìm phía máy bị lệch nhau.
+
+Xem chi tiết [docs/adr/0003-per-platform-method-ownership.md](adr/0003-per-platform-method-ownership.md).
+
+---
+
 ### Windows TSF (Text Services Framework)
 
 **Trạng thái**: ✅ Đã cài đặt và hoạt động
