@@ -9,10 +9,12 @@ pub mod ibus;
 pub mod ibus_bus;
 mod ibus_props;
 pub mod kwin_ime;
-pub mod learning_sync;
-pub mod macro_sync;
-pub mod method_sync;
 pub mod wayland;
+
+/// Tri-surface sync moved to `shared/` (the macOS IMKit host runs the same
+/// watchers); re-exported here so every existing `platforms::linux::*_sync`
+/// path — including `main.rs`'s — keeps compiling unchanged.
+pub use crate::shared::{learning_sync, macro_sync, method_sync};
 
 /// Composition semantics shared with the macOS FFI — see `shared/engine_bridge.rs`.
 pub use crate::shared::engine_bridge;

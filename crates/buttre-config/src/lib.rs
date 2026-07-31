@@ -169,7 +169,19 @@ pub fn run(show_autostart: bool) -> anyhow::Result<()> {
         // CURRENT store value, not the open-time snapshot: the tray or the
         // IBus panel may have changed them while this window was open, and
         // re-saving a stale copy would silently revert that change.
-        let base = Settings::load();
+        //
+        // Strict read, not `load()`: a settings.toml that exists but does
+        // not parse must REFUSE the save — merging widgets over the
+        // defaults `load()` degrades to would rewrite the user's whole
+        // file over one typo.
+        let base = match Settings::read_strict() {
+            Ok(Some(s)) => s,
+            Ok(None) => Settings::default(),
+            Err(e) => {
+                eprintln!("không lưu cấu hình: {e:?}");
+                return;
+            }
+        };
         let new_settings = Settings {
             shorthand: window.get_shorthand_enabled(),
             startup: window.get_autostart(),

@@ -220,17 +220,23 @@ impl ButtreEngine {
         if let Some(flag) = &self.enabled {
             flag.store(on, std::sync::atomic::Ordering::Relaxed);
         }
-        let mut settings = buttre_core::state::Settings::load();
+        // Strict read: a settings.toml that exists but does not parse must
+        // refuse this write — load-modify-save over the defaults `load()`
+        // degrades to would rewrite the user's whole file over one typo.
+        // (`Ok(None)` = fresh install, no file yet: proceed and MATERIALIZE
+        // it — the engine treats "no file" as enabled, see
+        // `macro_sync::effective_enabled`, so an English-radio click whose
+        // value equals the unsaved default must still write or the
+        // fresh-install rule would immediately overrule the user's click.)
+        let (mut settings, file_exists) = match buttre_core::state::Settings::read_strict() {
+            Ok(Some(s)) => (s, true),
+            Ok(None) => (buttre_core::state::Settings::default(), false),
+            Err(e) => {
+                tracing::warn!("command_state(on={on}, {method:?}): {e:?} — không ghi");
+                return;
+            }
+        };
         let method_changed = method.is_some_and(|m| settings.input_method != m);
-        // A missing settings.toml must always be MATERIALIZED: on a fresh
-        // install the engine treats "no file" as enabled (the user picked
-        // buttre as an OS input source — see `macro_sync::effective_enabled`),
-        // so an English-radio click whose value happens to equal the unsaved
-        // default would otherwise return here without writing, and the
-        // fresh-install rule would immediately overrule the user's click.
-        let file_exists = buttre_core::state::Settings::get_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
         if file_exists && settings.enabled == on && !method_changed {
             return;
         }
