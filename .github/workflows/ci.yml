@@ -231,6 +231,60 @@ jobs:
       - name: Wayland smoke (headless sway binding + fallback)
         run: bash scripts/ci-wayland-smoke.sh
 
+  # The fcitx5 addon is the one C++ artifact in the repo and nothing else
+  # compiles it — a header/ABI break would otherwise surface only as a
+  # WARN-and-skip inside the release job (build_packages.sh keeps the addon
+  # failure-tolerant so it can never block the main packages). ubuntu-22.04
+  # on purpose: the same image the release job packages on.
+  fcitx5-addon:
+    name: Build fcitx5 addon (.deb)
+    runs-on: ubuntu-22.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The full GUI dev stack too, not just fcitx5: buttre-ffi sits on
+      # buttre-platform, whose build.rs demands the gtk/x11 pkg-config set.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake extra-cmake-modules libfcitx5core-dev file \
+            libx11-dev libxi-dev libxtst-dev libxkbcommon-dev \
+            libdbus-1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libxdo-dev
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build buttre-ffi
+        run: cargo build -p buttre-ffi --release
+
+      - name: Configure, compile, package
+        run: |
+          cmake -S addons/fcitx5-buttre -B target/fcitx5-addon \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DBUTTRE_PACKAGED=ON \
+            -DBUTTRE_FFI_LIB="$PWD/target/release/libbuttre_ffi.so" \
+            -DCPACK_PACKAGE_VERSION=0.0.0-ci
+          cmake --build target/fcitx5-addon -j"$(nproc)"
+          (cd target/fcitx5-addon && cpack -G DEB -B "$PWD/../debian")
+
+      - name: Assert package contents
+        run: |
+          DEB=$(ls target/debian/fcitx5-buttre_*.deb)
+          dpkg-deb -c "$DEB"
+          # The four files an install must deliver: addon .so, the ffi lib
+          # it links, and the two fcitx5 registration .confs.
+          dpkg-deb -c "$DEB" | grep -q "fcitx5/libbuttre-fcitx5.so"
+          dpkg-deb -c "$DEB" | grep -q "buttre/libbuttre_ffi.so"
+          dpkg-deb -c "$DEB" | grep -q "share/fcitx5/addon/buttre.conf"
+          dpkg-deb -c "$DEB" | grep -q "share/fcitx5/inputmethod/buttre.conf"
+
   # Build and test on macOS (FFI bridge)
   test-macos:
     name: Test on macOS
