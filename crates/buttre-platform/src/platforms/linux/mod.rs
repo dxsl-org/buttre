@@ -9,6 +9,7 @@ pub mod ibus;
 pub mod ibus_bus;
 mod ibus_props;
 pub mod kwin_ime;
+pub mod learning_sync;
 pub mod macro_sync;
 pub mod method_sync;
 pub mod wayland;

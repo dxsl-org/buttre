@@ -2,7 +2,7 @@
 
 > Kế hoạch chiến lược cho sự phát triển buttre trên các nền tảng và tính năng
 
-**Cập nhật lần cuối**: 2026-07-03 (event-sourcing-completion Phase 8 đã hoàn thành)
+**Cập nhật lần cuối**: 2026-07-31 (method-sync-tri-surface pha 01-05 đã hoàn thành, chờ merge PR #21 + feat/learning-everywhere)
 **Phiên bản**: 0.7.0-beta
 **Trạng thái**: Windows Core & Installer Hoàn Thành, Đang Mở Rộng Đa Nền Tảng
 

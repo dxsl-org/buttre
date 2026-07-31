@@ -10,6 +10,7 @@
 //! itself: flipping it externally (config window) must reload the store
 //! into the empty/non-empty state without a TSF restart.
 
+use buttre_core::state::learning::LearningStore;
 use buttre_core::state::macros::MacroStore;
 use buttre_core::Settings;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -38,11 +39,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// is deliberate: it ties the watch to the `VietnameseEngine`'s (and thus
 /// the TSF text service instance's) lifetime, so no watcher thread survives
 /// deactivation.
+#[allow(clippy::too_many_arguments)] // reason: one watcher serves every settings/store mirror in this process
 pub fn spawn_reload_watcher(
     store: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
     method: Arc<Mutex<String>>,
     enabled: Arc<AtomicBool>,
+    learning_store: Arc<Mutex<LearningStore>>,
+    learning_enabled: Arc<AtomicBool>,
 ) -> Option<RecommendedWatcher> {
     let dir = match MacroStore::get_path() {
         Ok(path) => path.parent()?.to_path_buf(),
@@ -61,29 +65,53 @@ pub fn spawn_reload_watcher(
             let Ok(event) = res else {
                 return;
             };
-            let relevant = event.paths.iter().any(|p| {
-                matches!(
-                    p.file_name().and_then(|n| n.to_str()),
-                    Some("macros.toml") | Some("settings.toml")
-                )
-            });
-            if !relevant {
+            let hit = |name: &str| {
+                event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name().and_then(|n| n.to_str()) == Some(name))
+            };
+            let settings_changed = hit("macros.toml") || hit("settings.toml");
+            let learning_changed = hit("learning.toml");
+            if !settings_changed && !learning_changed {
                 return;
             }
-            // Build the replacement BEFORE taking the lock: the same Mutex
-            // sits on the keystroke path (`apply_macro`), so holding it
-            // across file IO would stall the host app's input thread.
-            let settings = Settings::load();
-            let next = MacroStore::load_gated(settings.shorthand);
-            *store.lock().unwrap_or_else(PoisonError::into_inner) = next;
-            strict.store(settings.strict_spelling, Ordering::Relaxed);
-            // `settings.toml` is also how the tray's method choice reaches
-            // this process — the text service lives inside the host
-            // application and shares no state with the tray.
-            *method.lock().unwrap_or_else(PoisonError::into_inner) = settings.input_method;
-            // `Settings::enabled` travels the same road (ADR-0003): the tray
-            // owns the flag, this file is the only bridge into this process.
-            enabled.store(settings.enabled, Ordering::Relaxed);
+            let mut reload_learning = learning_changed;
+            if settings_changed {
+                // Build the replacement BEFORE taking the lock: the same
+                // Mutex sits on the keystroke path (`apply_macro`), so
+                // holding it across file IO would stall the host app's
+                // input thread.
+                let settings = Settings::load();
+                let next = MacroStore::load_gated(settings.shorthand);
+                *store.lock().unwrap_or_else(PoisonError::into_inner) = next;
+                strict.store(settings.strict_spelling, Ordering::Relaxed);
+                // `settings.toml` is also how the tray's method choice
+                // reaches this process — the text service lives inside the
+                // host application and shares no state with the tray.
+                *method.lock().unwrap_or_else(PoisonError::into_inner) = settings.input_method;
+                // `Settings::enabled` travels the same road (ADR-0003): the
+                // tray owns the flag, this file is the only bridge into
+                // this process.
+                enabled.store(settings.enabled, Ordering::Relaxed);
+                let was = learning_enabled.swap(settings.learning_enabled, Ordering::Relaxed);
+                // Runtime OFF→ON: the store was never loaded (construction
+                // skips disk while off) — reload now or the session learns
+                // against an EMPTY store.
+                if settings.learning_enabled && !was {
+                    reload_learning = true;
+                }
+            }
+            if reload_learning && learning_enabled.load(Ordering::Relaxed) {
+                // Another process's merged write (tray, a sibling TSF host,
+                // a Linux session's engine) or a config-window edit —
+                // content-swap so this process converges. Same
+                // build-before-lock rule as the macro store.
+                let next = LearningStore::load();
+                *learning_store
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = next;
+            }
         }) {
             Ok(w) => w,
             Err(e) => {
@@ -115,6 +143,8 @@ mod tests {
             store,
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(String::new())),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(Mutex::new(LearningStore::default())),
             Arc::new(AtomicBool::new(true)),
         );
     }

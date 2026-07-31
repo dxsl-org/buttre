@@ -471,6 +471,28 @@ impl Keyboard {
         std::mem::take(&mut self.toggle_signals)
     }
 
+    /// Learning collection for a composition-mode word committed OUT OF
+    /// BAND — break keys, shortcuts, focus flush — where the host commits
+    /// via `boundary_repair` + `reset` instead of a separator-driven
+    /// `ConfirmComposition`. Must be called BEFORE the reset: it collects
+    /// on the raw the executor still holds; after `reset` there is nothing
+    /// left to learn from.
+    ///
+    /// No-op in multiword mode (its own `scroll_out_overflow` collects, and
+    /// this raw would be the whole multi-word window, not one word) and for
+    /// Nôm (see the `ConfirmComposition` arm: candidate selection, not the
+    /// typed syllable, is what the user accepted).
+    pub fn collect_pending_learning(&mut self) {
+        if self.multiword || self.method == "nom" {
+            return;
+        }
+        let raw = self.executor.raw_char_vec();
+        if raw.is_empty() {
+            return;
+        }
+        self.collect_and_refresh_learning(&raw);
+    }
+
     /// Process a keystroke
     ///
     /// Returns a vector of actions to perform. Usually contains 1-2 actions:
@@ -563,6 +585,21 @@ impl Keyboard {
                     let raw = self.executor.take_confirmed_raw();
                     let confirmed = self.apply_macro(&raw, text.clone());
                     self.buffer = confirmed.clone();
+                    // Learning collection, composition-mode half: this is
+                    // the once-per-committed-word moment (the multiword
+                    // counterpart is `scroll_out_overflow`) — the user just
+                    // accepted this word by typing its separator. Nôm is
+                    // excluded: its words commit through candidate
+                    // selection, not through the syllable the user typed,
+                    // so a direct-typed signal here would attest the
+                    // PREEDIT quốc ngữ the user never accepted as-is. A
+                    // shorthand expansion is excluded the same way: what
+                    // landed is the EXPANSION, so attesting the trigger
+                    // ("ko" when the user accepted "không") would teach a
+                    // word they never accepted as itself.
+                    if self.method != "nom" && confirmed == *text {
+                        self.collect_and_refresh_learning(&raw);
+                    }
                     result.push(Action::ConfirmComposition(confirmed));
                 }
                 EngineAction::ShowCandidates { candidates, input } => {

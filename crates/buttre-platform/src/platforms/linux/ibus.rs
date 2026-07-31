@@ -20,6 +20,7 @@
 
 use super::engine_bridge::{is_break_keysym, is_modifier_keysym, keysym_to_char, EngineBridge};
 use super::ibus_props;
+use super::learning_sync::LearningWiring;
 use super::method_sync::{self, MethodState};
 use buttre_core::state::macros::MacroStore;
 use std::sync::{Arc, Mutex};
@@ -87,6 +88,10 @@ pub struct ButtreEngine {
     /// toggle written to `settings.toml` (config window, hand-edit, or this
     /// engine's own English radio) reaches the bridge's passthrough.
     enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Personal-learning handles (`learning_sync`). `None` in standalone
+    /// construction (tests). Consulted per keystroke (`sync_learning`) so
+    /// the "Học thông minh" toggle applies without a restart.
+    learning: Option<LearningWiring>,
     /// Client capability bits from the last `SetCapabilities`. The no-preedit
     /// model is only engaged when `caps & IBUS_CAP_SURROUNDING_TEXT != 0`
     /// (the client can delete already-committed text); otherwise the engine
@@ -119,6 +124,7 @@ impl ButtreEngine {
             seen_generation: 0,
             use_preedit: None,
             enabled: None,
+            learning: None,
             caps: 0,
             applied_no_preedit: false,
             path: None,
@@ -147,6 +153,7 @@ impl ButtreEngine {
         strict: Arc<std::sync::atomic::AtomicBool>,
         use_preedit: Arc<std::sync::atomic::AtomicBool>,
         enabled: Arc<std::sync::atomic::AtomicBool>,
+        learning: LearningWiring,
         path: zvariant::OwnedObjectPath,
         focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>>,
     ) -> Self {
@@ -157,12 +164,18 @@ impl ButtreEngine {
         if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
             bridge.set_enabled(false);
         }
+        // Same for learning: wire it now if the setting is on, so the very
+        // first committed word already collects.
+        if learning.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            bridge.set_learning(learning.store.clone(), learning.save_tx.clone());
+        }
         Self {
             seen_generation: state.generation(),
             bridge: Arc::new(Mutex::new(bridge)),
             method_state: Some(state),
             use_preedit: Some(use_preedit),
             enabled: Some(enabled),
+            learning: Some(learning),
             caps: 0,
             applied_no_preedit: false,
             path: Some(path),
@@ -380,6 +393,10 @@ impl ButtreEngine {
         // settings store must win that disagreement — the store is canonical
         // for on/off, the method file carries only the method.
         self.sync_enabled(&ctx).await;
+
+        // Apply a pending "Học thông minh" toggle — no visual ops, so this
+        // sync is plain (no signal emission).
+        self.sync_learning();
 
         // Apply a pending preedit-model change (setting toggle or capability
         // update) before processing this key.
@@ -792,6 +809,27 @@ impl ButtreEngine {
         self.emit_ops(ctx, ops).await;
         Self::publish_method_props(ctx, &self.current_radio()).await;
         tracing::info!("Engine enabled={want} (settings.toml)");
+    }
+
+    /// Apply a pending "Học thông minh" toggle: wire or detach the learning
+    /// store exactly once per change of the `learning_enabled` mirror —
+    /// same lazy per-keystroke pattern as `sync_enabled`, minus the panel
+    /// repaint (learning has no visual state).
+    fn sync_learning(&mut self) {
+        let Some(wiring) = &self.learning else {
+            return;
+        };
+        let want = wiring.enabled.load(std::sync::atomic::Ordering::Relaxed);
+        let mut bridge = self.bridge.lock().unwrap();
+        if bridge.has_learning() == want {
+            return;
+        }
+        if want {
+            bridge.set_learning(wiring.store.clone(), wiring.save_tx.clone());
+        } else {
+            bridge.clear_learning();
+        }
+        tracing::info!("Engine learning_enabled={want} (settings.toml)");
     }
 
     /// Apply a pending preedit-model change. No-preedit (commit-as-you-go)
