@@ -104,6 +104,29 @@ fn plain_session(store: &Arc<Mutex<LearningStore>>, words: &[&str]) -> Vec<Strin
     segments
 }
 
+/// One COMPOSITION-MODE session (the TSF/IBus-preedit model) typing every
+/// word plainly. Collection happens in the `ConfirmComposition` arm — a
+/// different code path from multiword's scroll-out — so it needs its own
+/// stability guard: the virtual screen only receives confirmed words
+/// (`apply` ignores `UpdateComposition`), which is exactly what the host
+/// application's document receives.
+fn plain_composition_session(store: &Arc<Mutex<LearningStore>>, words: &[&str]) -> Vec<String> {
+    let (tx, _rx) = mpsc::channel();
+    let mut kb = KeyboardBuilder::telex_with_composition(true).unwrap();
+    kb.set_learning(store.clone(), tx);
+    let mut screen = String::new();
+    let mut segments = Vec::with_capacity(words.len());
+    for word in words {
+        let base = screen.len();
+        for ch in word.chars() {
+            press(&mut kb, &mut screen, ch);
+        }
+        press(&mut kb, &mut screen, ' ');
+        segments.push(screen[base..].to_string());
+    }
+    segments
+}
+
 fn assert_sessions_identical(
     label: &str,
     words: &[&str],
@@ -163,4 +186,21 @@ fn vietnamese_plain_typing_is_stable_across_learning_sessions() {
         .collect();
     assert!(words.len() > 2000, "corpus unexpectedly small");
     assert_sessions_identical("vietnamese-plain", &words, plain_session);
+}
+
+#[test]
+fn vietnamese_composition_typing_is_stable_across_learning_sessions() {
+    // Same corpus as the plain guard, driven through the composition
+    // (preedit) model — what TSF and IBus actually run. Guards the
+    // ConfirmComposition collection point added for those backends.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../buttre-test/data/telex.txt");
+    let raw = std::fs::read_to_string(path).unwrap();
+    let words: Vec<&str> = raw
+        .lines()
+        .filter_map(|l| l.split(',').next())
+        .map(str::trim)
+        .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric()))
+        .collect();
+    assert!(words.len() > 2000, "corpus unexpectedly small");
+    assert_sessions_identical("vietnamese-composition", &words, plain_composition_session);
 }

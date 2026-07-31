@@ -40,6 +40,7 @@ mod dispatch;
 mod v1;
 
 use super::engine_bridge::EngineBridge;
+use super::learning_sync::{self, LearningWiring};
 use super::macro_sync;
 use super::method_sync::{self, MethodState};
 use anyhow::{anyhow, Result};
@@ -111,6 +112,9 @@ pub(crate) struct ImeState {
     /// toggle written to `settings.toml` (tray left-click, config window,
     /// hand-edit) silences or revives this engine directly.
     enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Personal-learning handles (`learning_sync`) — consulted per key
+    /// (`sync_learning`) so the "Học thông minh" toggle applies live.
+    learning: LearningWiring,
 }
 
 impl ImeState {
@@ -119,6 +123,7 @@ impl ImeState {
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
         enabled: Arc<std::sync::atomic::AtomicBool>,
+        learning: LearningWiring,
     ) -> Self {
         let method = method_state.method();
         let seen_generation = method_state.generation();
@@ -127,6 +132,9 @@ impl ImeState {
         // Start on the persisted on/off state, not always-on.
         if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
             bridge.set_enabled(false);
+        }
+        if learning.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            bridge.set_learning(learning.store.clone(), learning.save_tx.clone());
         }
         Self {
             seat: None,
@@ -149,7 +157,28 @@ impl ImeState {
             method_state,
             seen_generation,
             enabled,
+            learning,
         }
+    }
+
+    /// Apply a pending "Học thông minh" toggle — same lazy per-key check as
+    /// [`Self::sync_enabled`]; no ops to commit (learning has no visual
+    /// state).
+    fn sync_learning(&mut self) {
+        let want = self
+            .learning
+            .enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if self.bridge.has_learning() == want {
+            return;
+        }
+        if want {
+            self.bridge
+                .set_learning(self.learning.store.clone(), self.learning.save_tx.clone());
+        } else {
+            self.bridge.clear_learning();
+        }
+        tracing::info!("Wayland engine learning_enabled={want}");
     }
 
     /// Apply a pending on/off change from `settings.toml` — same lazy
@@ -258,12 +287,16 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     // be wired to this backend later without touching macro_sync again.
     let use_preedit = macro_sync::load_initial_use_preedit();
     let enabled = macro_sync::load_initial_enabled();
+    // Pure loads only — the writer thread and watcher are deferred with the
+    // other watchers below (same Unavailable-leak contract).
+    let (learning, learning_rx) = learning_sync::load_initial();
 
     let mut state = ImeState::new(
         method_state.clone(),
         macros.clone(),
         strict.clone(),
         enabled.clone(),
+        learning.clone(),
     );
     let mut queue = conn.new_event_queue::<ImeState>();
     let qh: QueueHandle<ImeState> = queue.handle();
@@ -296,6 +329,8 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     // run in this process, so neither would be orphaned by an early return).
     method_sync::spawn_watcher(method_state);
     macro_sync::spawn_watcher(macros, strict, use_preedit, enabled);
+    learning_sync::spawn_writer(learning_rx);
+    learning_sync::spawn_watcher(&learning);
 
     tracing::info!("Wayland input method registered; waiting for text-input activation");
     loop {

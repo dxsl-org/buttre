@@ -836,6 +836,58 @@ fn direct_typed_unattested_syllable_promotes_overlay_after_three_commits() {
 }
 
 #[test]
+fn composition_mode_collects_direct_typed_on_separator_confirm() {
+    // Composition-mode counterpart of
+    // `direct_typed_unattested_syllable_promotes_overlay_after_three_commits`:
+    // TSF/IBus-preedit keyboards commit through `ConfirmComposition` (the
+    // separator closes the word), not through the multiword window's
+    // scroll-out — collection must fire at that moment or these backends
+    // apply learned words without ever learning new ones.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    kb.set_learning(store.clone(), tx);
+
+    type_str(&mut kb, "daat daat daat ");
+    assert_eq!(
+        store.lock().unwrap().overlay_snapshot().len(),
+        1,
+        "3 separator-committed direct-typed words must promote exactly one overlay entry"
+    );
+
+    // The refreshed snapshot must also CONSULT within the same session: the
+    // non-adjacent "data" now composes in the live preedit instead of
+    // demoting to literal.
+    type_str(&mut kb, "data");
+    assert_eq!(
+        kb.buffer(),
+        "dât",
+        "overlay-promoted syllable must survive the non-adjacent gate in the preedit"
+    );
+}
+
+#[test]
+fn composition_mode_flush_collects_before_reset() {
+    // Out-of-band commits (break keys/shortcuts → the bridge's
+    // `boundary_repair` + `reset` flush) have no `ConfirmComposition` —
+    // `collect_pending_learning` is the hook, and it must run BEFORE the
+    // reset that discards the raw.
+    let (store, tx) = fresh_learning();
+    let mut kb = KeyboardBuilder::telex_with_composition(true).expect("telex composition keyboard");
+    kb.set_learning(store.clone(), tx);
+
+    for _ in 0..3 {
+        type_str(&mut kb, "daat");
+        kb.collect_pending_learning();
+        kb.reset();
+    }
+    assert_eq!(
+        store.lock().unwrap().overlay_snapshot().len(),
+        1,
+        "3 flush-committed direct-typed words must promote exactly one overlay entry"
+    );
+}
+
+#[test]
 fn automatic_demote_records_nothing_even_after_many_repeats() {
     // critical row (anti-feedback rule (i)): an AUTOMATIC demote — the gate
     // stripping an inferred non-adjacent mark — is never a deliberate act,

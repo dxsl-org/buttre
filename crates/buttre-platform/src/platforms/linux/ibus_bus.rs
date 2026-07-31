@@ -22,6 +22,7 @@ use tokio::sync::Notify;
 use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer, SignalContext};
 
 use super::ibus::ButtreEngine;
+use super::learning_sync::{self, LearningWiring};
 use super::macro_sync;
 use super::method_sync::{self, MethodState};
 use buttre_core::state::macros::MacroStore;
@@ -146,6 +147,10 @@ struct ButtreFactory {
     /// it per keystroke (`sync_enabled`) so an on/off toggle written to
     /// `settings.toml` applies without a tray process relaying it.
     enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Personal-learning handles (`learning_sync`) — shared store, save
+    /// channel, and the `learning_enabled` mirror each engine consults per
+    /// keystroke (`sync_learning`).
+    learning: LearningWiring,
     /// Currently focused engine path, shared with every engine and the async
     /// property-refresh task (`run_engine`). An engine claims it on `focus_in`
     /// and releases it on `focus_out`; the task emits `RegisterProperties` here
@@ -178,6 +183,7 @@ impl ButtreFactory {
             self.strict.clone(),
             self.use_preedit.clone(),
             self.enabled.clone(),
+            self.learning.clone(),
             path.clone(),
             self.focused.clone(),
         );
@@ -257,6 +263,13 @@ pub async fn run_engine() -> Result<()> {
         enabled.clone(),
     );
 
+    // Personal learning: shared store + dedicated save-writer thread + its
+    // own reload watcher. The daemon owns this process, so all three live
+    // for the process lifetime (same contract as the watchers above).
+    let (learning, learning_rx) = learning_sync::load_initial();
+    learning_sync::spawn_writer(learning_rx);
+    learning_sync::spawn_watcher(&learning);
+
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
     let connection = ConnectionBuilder::address(addr.as_str())?
@@ -269,6 +282,7 @@ pub async fn run_engine() -> Result<()> {
                 strict,
                 use_preedit,
                 enabled: enabled.clone(),
+                learning,
                 focused: focused.clone(),
             },
         )?

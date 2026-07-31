@@ -14,9 +14,11 @@
 //! `handled` is false the backend forwards the ORIGINAL key event to the
 //! app (after any queued commit, so the committed word always lands first).
 
+use buttre_core::state::learning::{LearningFile, LearningStore};
 use buttre_core::state::macros::MacroStore;
 use buttre_core::{Action, Keyboard, KeyboardBuilder};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::shared::candidates::CandidateState;
@@ -129,6 +131,13 @@ pub struct EngineBridge {
     /// the `Arc`, never loads or watches `macros.toml` itself (that is the
     /// Linux host's `platforms::linux::macro_sync` job).
     macros: Option<Arc<Mutex<MacroStore>>>,
+    /// Personal-learning wiring, re-applied to every fresh `Keyboard` by
+    /// [`Self::install_keyboard`] — same lifecycle as `macros`. `None` =
+    /// learning off (the `Keyboard::new` default): no collection, no
+    /// consultation, byte-identical to pre-learning behavior. The bridge
+    /// stays pure — the host loads the store, owns the save channel's
+    /// receiving end, and does every disk write.
+    learning: Option<(Arc<Mutex<LearningStore>>, Sender<LearningFile>)>,
     /// `Settings::strict_spelling` mirror injected by the host via
     /// [`Self::set_strict_flag`] (same purity rule as `macros`: the bridge
     /// never reads `settings.toml` itself). Written by the host's
@@ -182,6 +191,7 @@ impl EngineBridge {
             keyboard,
             preedit: String::new(),
             macros: None,
+            learning: None,
             strict_spelling: None,
             strict_applied: false,
             candidates: CandidateState::default(),
@@ -203,6 +213,7 @@ impl EngineBridge {
             keyboard,
             preedit: String::new(),
             macros: Some(macros),
+            learning: None,
             strict_spelling: None,
             strict_applied: false,
             candidates: CandidateState::default(),
@@ -219,6 +230,7 @@ impl EngineBridge {
             keyboard: build_keyboard(method, true)?,
             preedit: String::new(),
             macros: None,
+            learning: None,
             strict_spelling: None,
             strict_applied: false,
             candidates: CandidateState::default(),
@@ -239,6 +251,7 @@ impl EngineBridge {
             keyboard,
             preedit: String::new(),
             macros: Some(macros),
+            learning: None,
             strict_spelling: None,
             strict_applied: false,
             candidates: CandidateState::default(),
@@ -285,6 +298,36 @@ impl EngineBridge {
         self.sync_strict_spelling();
     }
 
+    /// Wire personal learning into the live keyboard and remember it for
+    /// every later rebuild — the composition-backend counterpart of
+    /// `KeyboardManager::set_learning`. Hosts gate calling this on
+    /// `Settings::learning_enabled`. An external `learning.toml` reload is
+    /// a content swap of the SAME shared store; the live snapshot picks it
+    /// up at the next word commit (`collect_and_refresh_learning`
+    /// re-snapshots every time), no re-call needed.
+    pub fn set_learning(
+        &mut self,
+        store: Arc<Mutex<LearningStore>>,
+        save_tx: Sender<LearningFile>,
+    ) {
+        self.keyboard.set_learning(store.clone(), save_tx.clone());
+        self.learning = Some((store, save_tx));
+    }
+
+    /// Detach learning from the live keyboard AND from future rebuilds —
+    /// the runtime "Học thông minh off" toggle. After this the bridge is
+    /// byte-identical to one that never had learning wired.
+    pub fn clear_learning(&mut self) {
+        self.keyboard.clear_learning();
+        self.learning = None;
+    }
+
+    /// Is learning currently wired? The hosts' per-keystroke `sync_learning`
+    /// compares this against the `Settings::learning_enabled` mirror.
+    pub fn has_learning(&self) -> bool {
+        self.learning.is_some()
+    }
+
     /// Push a changed strict-spelling value into the live `Keyboard`. Cheap
     /// when nothing changed: one relaxed atomic load + bool compare.
     fn sync_strict_spelling(&mut self) {
@@ -322,6 +365,9 @@ impl EngineBridge {
     fn install_keyboard(&mut self, mut keyboard: Keyboard) {
         if let Some(store) = &self.macros {
             keyboard.set_macros(store.clone());
+        }
+        if let Some((store, save_tx)) = &self.learning {
+            keyboard.set_learning(store.clone(), save_tx.clone());
         }
         self.keyboard = keyboard;
         self.strict_applied = false;
@@ -660,6 +706,9 @@ impl EngineBridge {
             .keyboard
             .boundary_repair()
             .unwrap_or_else(|| self.preedit.clone());
+        // Out-of-band commit = an accepted word too: collect learning
+        // BEFORE the reset discards the raw (no-op unless a store is wired).
+        self.keyboard.collect_pending_learning();
         self.keyboard.reset();
         self.preedit.clear();
         let mut ops = vec![ImeOp::Preedit(String::new()), ImeOp::Commit(text)];

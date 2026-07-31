@@ -38,6 +38,9 @@ pub fn delete_word(word: &str) -> anyhow::Result<()> {
     let mut store = LearningStore::load();
     let mut file = store.snapshot_for_save();
     file.user_attested.remove(word);
+    // Deliberately the PLAIN write, never `write_atomic_merged`: a merge
+    // folds the on-disk state back in — which still contains exactly the
+    // entry being deleted.
     LearningStore::write_atomic(&file)
 }
 

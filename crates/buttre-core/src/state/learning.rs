@@ -45,14 +45,25 @@
 //! ## Save threading (red-team C3)
 //!
 //! This module NEVER writes to disk on its own initiative — [`LearningStore`]
-//! only mutates in-memory maps. The actual file write ([`LearningStore::
-//! write_atomic`]) must be called by the caller OFF any keystroke-handling
-//! lock (never from the Windows LL-hook callback, never while holding the
-//! shared `Keyboard` lock — a slow write there risks Windows unhooking the
-//! callback and killing input). See `buttre_core::keyboard::Keyboard::
-//! drain_pending_learning_save` and `buttre-platform/src/main.rs`'s event
-//! loop, which is the sole place this is actually called from. The Hook
-//! process is the single writer; other processes (TSF) only ever [`load`](LearningStore::load).
+//! only mutates in-memory maps. The actual file write must be called by the
+//! caller OFF any keystroke-handling lock (never from the Windows LL-hook
+//! callback, never while holding the shared `Keyboard` lock — a slow write
+//! there risks Windows unhooking the callback and killing input).
+//!
+//! ## Many writers, one file
+//!
+//! `learning.toml` is written by SEVERAL independent processes: the Windows
+//! tray, every TSF host app (Word, Chrome — one instance each), and the
+//! Linux engine processes. Each writes through
+//! [`LearningStore::write_atomic_merged`], which folds the file's current
+//! on-disk state into the snapshot before the atomic rename — learning is
+//! additive-only (ADR-0001), so the merge is a plain union (see
+//! [`merge_files`]). Two writers interleaving inside the read→rename window
+//! can still cost the loser its few-milliseconds delta (see
+//! `write_atomic_merged`'s doc for why that is accepted). The bare
+//! [`LearningStore::write_atomic`] remains for callers that must NOT merge:
+//! the config window's delete/clear flows, where resurrecting the removed
+//! entry is exactly the bug.
 //!
 //! ## Privacy
 //!
@@ -318,6 +329,61 @@ impl LearningStore {
         Ok(())
     }
 
+    /// [`Self::write_atomic`] for the many-writer world (module doc): fold
+    /// the file's CURRENT on-disk state into `file` first, so a snapshot
+    /// from one process never clobbers what another process learned since
+    /// this one loaded. The merged result goes through the same load-time
+    /// hardening ([`Self::from_file`]) before the write, so a union that
+    /// crosses a table cap is re-capped instead of growing unbounded.
+    ///
+    /// A file that EXISTS but cannot be read/parsed refuses the write
+    /// entirely — merging with the empty default that `load()` would hand
+    /// back is a silent full clobber of every other writer's entries, the
+    /// exact loss this function exists to prevent. A genuinely absent file
+    /// merges with empty (first write on a fresh machine).
+    ///
+    /// Not fully race-free: two writers interleaving between the read and
+    /// the rename can still drop the loser's few-milliseconds delta for
+    /// good (the loser's store is then content-swapped to the winner's
+    /// state by its reload watcher). Accepted: learning data is statistical
+    /// — a lost single count re-earns itself — and no ADR-0001 invariant
+    /// depends on counts never dipping.
+    ///
+    /// # Errors
+    /// Path resolution, serialization, disk I/O — plus the refusal above
+    /// (`learning.toml` present but unreadable).
+    pub fn write_atomic_merged(file: &LearningFile) -> Result<()> {
+        // Absent file merges with empty (first write on a fresh machine);
+        // present-but-unreadable propagates the refusal via `?`.
+        let disk = Self::read_file_strict()?.unwrap_or_default();
+        let merged = Self::from_file(merge_files(file.clone(), disk)).file;
+        Self::write_atomic(&merged)
+    }
+
+    /// Read `learning.toml` distinguishing the cases [`Self::load`]
+    /// deliberately flattens: `Ok(None)` = file absent (a fresh machine),
+    /// `Ok(Some)` = parsed, `Err` = file PRESENT but unreadable/oversized/
+    /// unparseable — the caller must not treat that as empty.
+    fn read_file_strict() -> Result<Option<LearningFile>> {
+        let path = Self::get_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let meta = fs::metadata(&path)?;
+        anyhow::ensure!(
+            meta.len() <= MAX_FILE_BYTES,
+            "learning.toml exceeds the byte ceiling ({} > {MAX_FILE_BYTES}) — refusing to overwrite it",
+            meta.len()
+        );
+        let content = fs::read_to_string(&path)?;
+        let file = toml::from_str::<LearningFile>(&content).map_err(|e| {
+            anyhow::anyhow!(
+                "learning.toml exists but does not parse ({e}) — refusing to overwrite it"
+            )
+        })?;
+        Ok(Some(file))
+    }
+
     // ── Requirement (a): user-attested overlay ─────────────────────────────
 
     /// A syllable was typed DIRECTLY (adjacent, no inferred marks),
@@ -454,6 +520,28 @@ impl LearningStore {
             raw_prefs: if prefs.is_empty() { None } else { Some(prefs) },
         }
     }
+}
+
+/// Additive union of two learning snapshots (`ours` = the writing process's
+/// state, `theirs` = what is on disk right now):
+///
+/// - `user_attested`: union of keys; on conflict the LARGER count wins.
+///   Counts only ever grow (additive-only, ADR-0001), so `max` keeps the
+///   promotion counter monotone — `sum` would double-count the shared base
+///   both processes loaded from.
+/// - `prefs`: union of keys; on conflict OURS wins — the process performing
+///   this write holds its user's latest deliberate action, and `last_used`
+///   is day-granular so date comparison cannot break same-day ties anyway.
+///   Keys only the disk knows are kept (another process's learning).
+fn merge_files(mut ours: LearningFile, theirs: LearningFile) -> LearningFile {
+    for (key, their_count) in theirs.user_attested {
+        let count = ours.user_attested.entry(key).or_insert(0);
+        *count = (*count).max(their_count);
+    }
+    for (key, record) in theirs.prefs {
+        ours.prefs.entry(key).or_insert(record);
+    }
+    ours
 }
 
 /// Build a sanitized `"method:raw"` pref key, or `None` if either half is
@@ -879,6 +967,69 @@ mod tests {
         let snapshot = store.snapshot_for_method("telex");
         assert!(snapshot.user_attested.is_none());
         assert!(snapshot.raw_prefs.is_none());
+    }
+
+    // ── Many-writer merge ───────────────────────────────────────────────────
+
+    fn file_with(attested: &[(&str, u32)], prefs: &[(&str, PreferKind)]) -> LearningFile {
+        LearningFile {
+            user_attested: attested.iter().map(|(k, c)| (k.to_string(), *c)).collect(),
+            prefs: prefs
+                .iter()
+                .map(|(k, p)| {
+                    (
+                        k.to_string(),
+                        PrefRecord {
+                            prefer: *p,
+                            last_used: format_date(today_days()),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn merge_unions_and_takes_max_attested_count() {
+        let ours = file_with(&[("dak", 3), ("pó", 1)], &[]);
+        let theirs = file_with(&[("dak", 1), ("brô", 2)], &[]);
+        let merged = merge_files(ours, theirs);
+        // Union: both sides' unique keys survive.
+        assert_eq!(merged.user_attested.get("pó"), Some(&1));
+        assert_eq!(merged.user_attested.get("brô"), Some(&2));
+        // Conflict: max wins (monotone promotion counter, never sum).
+        assert_eq!(merged.user_attested.get("dak"), Some(&3));
+    }
+
+    #[test]
+    fn merge_prefers_ours_on_pref_conflict_and_keeps_their_keys() {
+        let ours = file_with(&[], &[("telex:reset", PreferKind::Composed)]);
+        let theirs = file_with(
+            &[],
+            &[
+                ("telex:reset", PreferKind::Literal),
+                ("vni:duong", PreferKind::Literal),
+            ],
+        );
+        let merged = merge_files(ours, theirs);
+        // The writer's latest deliberate action wins its own key...
+        assert_eq!(
+            merged.prefs.get("telex:reset").map(|r| r.prefer),
+            Some(PreferKind::Composed)
+        );
+        // ...but another process's learning is never dropped.
+        assert_eq!(
+            merged.prefs.get("vni:duong").map(|r| r.prefer),
+            Some(PreferKind::Literal)
+        );
+    }
+
+    #[test]
+    fn merge_is_idempotent_against_identical_snapshots() {
+        let a = file_with(&[("dak", 3)], &[("telex:reset", PreferKind::Literal)]);
+        let merged = merge_files(a.clone(), a.clone());
+        assert_eq!(merged.user_attested, a.user_attested);
+        assert_eq!(merged.prefs.len(), a.prefs.len());
     }
 
     #[test]

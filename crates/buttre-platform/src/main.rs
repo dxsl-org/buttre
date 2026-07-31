@@ -1049,7 +1049,12 @@ fn main() -> Result<()> {
                 // the hook callback or under the KEYBOARD lock. Nothing is
                 // ever queued while learning is unwired.
                 if let Some(file) = drain_latest_learning_save(&learning_save_rx) {
-                    if let Err(e) = LearningStore::write_atomic(&file) {
+                    // MERGED write: the tray is no longer the sole writer —
+                    // every TSF host app and the Linux engine processes
+                    // write this file too, and a plain snapshot write here
+                    // would clobber whatever they learned since this
+                    // process loaded its store.
+                    if let Err(e) = LearningStore::write_atomic_merged(&file) {
                         error!("Failed to save learning.toml: {:?}", e);
                     }
                     last_own_save = std::time::Instant::now();

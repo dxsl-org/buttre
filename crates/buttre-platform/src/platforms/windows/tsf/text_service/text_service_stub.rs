@@ -789,7 +789,15 @@ impl ITfTextEditSink_Impl for TextService_Impl {
             if let Err(e) = self.this.end_composition(&context) {
                 debug!("Failed to end composition after caret move: {:?}", e);
             }
-            self.this.vietnamese_engine.borrow_mut().reset();
+            {
+                // The word stays in the document (end_composition finalizes,
+                // never deletes) — a caret move away is acceptance, the same
+                // standard the buffer-reset keys apply. Collect before reset
+                // discards the raw.
+                let mut engine = self.this.vietnamese_engine.borrow_mut();
+                engine.collect_pending_learning();
+                engine.reset();
+            }
             self.this.hide_candidates();
         }
         Ok(())
@@ -869,7 +877,14 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
                     }
                 }
             }
-            self.this.vietnamese_engine.borrow_mut().reset();
+            {
+                // Focus loss finalizes the composed text into the document
+                // too — acceptance by the same standard as every other
+                // end_composition path here. Collect before reset.
+                let mut engine = self.this.vietnamese_engine.borrow_mut();
+                engine.collect_pending_learning();
+                engine.reset();
+            }
             self.this.hide_candidates();
         }
         Ok(())
@@ -1309,6 +1324,18 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                     }
                     let _ = self.this.end_composition(&context);
                 }
+                // COMMIT flush: every buffer-reset key on this branch —
+                // Escape included — ends the composition with the text
+                // STAYING in the document (end_composition finalizes, never
+                // deletes), so the word was accepted and learning collects
+                // BEFORE the reset below discards the raw. Inside the
+                // is_started guard on purpose: with no composition, the
+                // executor's leftover raw never reached the document (e.g.
+                // a failed write_text) and must not teach.
+                self.this
+                    .vietnamese_engine
+                    .borrow_mut()
+                    .collect_pending_learning();
             }
             self.this.vietnamese_engine.borrow_mut().reset();
             self.this.hide_candidates();
@@ -1479,7 +1506,14 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                     if let Err(e) = self.this.end_composition(&context) {
                         debug!("Failed to end composition: {:?}", e);
                     }
-                    self.this.vietnamese_engine.borrow_mut().reset();
+                    {
+                        // COMMIT flush (Enter): the composed word stays in
+                        // the document — collect learning BEFORE the reset
+                        // discards the raw.
+                        let mut engine = self.this.vietnamese_engine.borrow_mut();
+                        engine.collect_pending_learning();
+                        engine.reset();
+                    }
                     self.this.hide_candidates();
                 }
                 Ok(BOOL(0))

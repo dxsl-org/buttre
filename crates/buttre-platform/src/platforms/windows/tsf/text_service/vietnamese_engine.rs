@@ -5,6 +5,7 @@
 
 use super::macro_reload::spawn_reload_watcher;
 use crate::shared::candidates::{CandidateState, CandidateView};
+use buttre_core::state::learning::{LearningFile, LearningStore};
 use buttre_core::state::macros::MacroStore;
 use buttre_core::Action;
 use buttre_core::InputBuffer;
@@ -14,7 +15,7 @@ use buttre_core::Settings;
 use notify::RecommendedWatcher;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 
 /// Vietnamese input mode
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +87,22 @@ pub struct VietnameseEngine {
     /// `false`, [`Self::is_active`] reports inactive and the key sink claims
     /// nothing, so every key reaches the host application untouched.
     enabled: Arc<AtomicBool>,
+    /// Personal-learning store, shared with every `Keyboard` this engine
+    /// wires (`sync_learning`) and content-swapped by `_macros_watcher` on
+    /// external `learning.toml` changes — the same lifecycle as `macros`.
+    learning: Arc<Mutex<LearningStore>>,
+    /// Sending half of the save channel; the keyboard enqueues full-state
+    /// snapshots here and the `learning_writer` thread (spawned by
+    /// [`Self::new`]) does the merged disk writes — this process is one of
+    /// MANY `learning.toml` writers (every TSF host app is its own).
+    learning_tx: mpsc::Sender<LearningFile>,
+    /// `Settings::learning_enabled` mirror, same transport and lazy
+    /// per-keystroke consumption as `strict_spelling`.
+    learning_enabled: Arc<AtomicBool>,
+    /// Whether learning is currently wired into the live `Keyboard` —
+    /// mirrors `strict_applied`'s cheap-compare pattern; forced back to
+    /// `false` by `set_mode` so a rebuilt keyboard gets re-wired.
+    learning_applied: bool,
     /// Nôm candidates offered for the open composition, plus the highlight.
     /// Absorbed from `Action::ShowCandidates` by [`Self::process_key`] — see
     /// that method's contract for why the caller renders from HERE and not
@@ -128,11 +145,28 @@ impl VietnameseEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = settings.input_method;
         engine.enabled.store(settings.enabled, Ordering::Relaxed);
+        // Personal learning: load the store only when the feature is on
+        // (disk untouched otherwise), spawn the merged-write thread, and
+        // let `sync_learning` wire the keyboard on the first keystroke.
+        engine
+            .learning_enabled
+            .store(settings.learning_enabled, Ordering::Relaxed);
+        if settings.learning_enabled {
+            *engine
+                .learning
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = LearningStore::load();
+        }
+        let (learning_tx, learning_rx) = mpsc::channel::<LearningFile>();
+        engine.learning_tx = learning_tx;
+        crate::shared::learning_writer::spawn(learning_rx);
         engine._macros_watcher = spawn_reload_watcher(
             macros,
             engine.strict_spelling.clone(),
             engine.input_method.clone(),
             engine.enabled.clone(),
+            engine.learning.clone(),
+            engine.learning_enabled.clone(),
         );
         engine
     }
@@ -144,6 +178,11 @@ impl VietnameseEngine {
     /// `%APPDATA%` file — production code calls [`Self::new`] instead.
     pub fn new_with_macros(mode: VietnameseMode, macros: Arc<Mutex<MacroStore>>) -> Self {
         let keyboard = Self::load_keyboard(&mode, &macros);
+        // Test-path learning defaults: empty store, OFF, and a channel whose
+        // receiver is dropped right here — no writer thread, no disk, and an
+        // enqueue into a disconnected channel is already a documented no-op
+        // on the collection path. `new()` replaces all three.
+        let (learning_tx, _discarded_rx) = mpsc::channel::<LearningFile>();
         Self {
             mode,
             keyboard,
@@ -159,6 +198,10 @@ impl VietnameseEngine {
             // Tests construct through here and expect typing to work; `new()`
             // overwrites this with the real `Settings::enabled` right after.
             enabled: Arc::new(AtomicBool::new(true)),
+            learning: Arc::new(Mutex::new(LearningStore::default())),
+            learning_tx,
+            learning_enabled: Arc::new(AtomicBool::new(false)),
+            learning_applied: false,
             candidates: CandidateState::default(),
             _macros_watcher: None,
         }
@@ -226,6 +269,7 @@ impl VietnameseEngine {
     pub fn process_key(&mut self, ch: char) -> Vec<Action> {
         self.sync_method();
         self.sync_strict_spelling();
+        self.sync_learning();
         // Belt to `is_active`'s braces: the key sink already refuses to claim
         // keys while disabled, so this is only reached by paths that bypass it
         // (candidate routing, tests). Off means UNTOUCHED keys, always.
@@ -426,9 +470,10 @@ impl VietnameseEngine {
     pub fn set_mode(&mut self, mode: VietnameseMode) {
         if self.mode != mode {
             self.keyboard = Self::load_keyboard(&mode, &self.macros);
-            // A fresh `Keyboard` always starts lenient — force the next
-            // `process_key` to re-push the user's strict-spelling choice.
+            // A fresh `Keyboard` always starts lenient and learning-less —
+            // force the next `process_key` to re-push both.
             self.strict_applied = false;
+            self.learning_applied = false;
             self.mode = mode;
             self.reset();
         }
@@ -466,6 +511,41 @@ impl VietnameseEngine {
                 kb.set_strict_spelling(strict);
             }
             self.strict_applied = strict;
+        }
+    }
+
+    /// Wire or detach personal learning on the live `Keyboard`, exactly once
+    /// per change of the `learning_enabled` mirror — same cheap-compare
+    /// pattern as [`Self::sync_strict_spelling`]. `learning_applied` is only
+    /// advanced when a keyboard actually exists, so a mode whose keyboard
+    /// failed to load retries once one is back.
+    fn sync_learning(&mut self) {
+        let want = self.learning_enabled.load(Ordering::Relaxed);
+        if want == self.learning_applied {
+            return;
+        }
+        let Some(kb) = self.keyboard.as_mut() else {
+            return;
+        };
+        if want {
+            kb.set_learning(self.learning.clone(), self.learning_tx.clone());
+        } else {
+            kb.clear_learning();
+        }
+        self.learning_applied = want;
+    }
+
+    /// Learning collection for words committed OUT OF BAND (Enter, the
+    /// stub's buffer-reset keys, caret-move and focus-loss closes — every
+    /// path that ends the composition without a `ConfirmComposition` ever
+    /// reaching the keyboard). Callers invoke this right BEFORE
+    /// [`Self::reset`] on paths where `end_composition` leaves the composed
+    /// text IN the document — that is acceptance. The one no-collect close
+    /// is `OnCompositionTerminated`: the APPLICATION tore the composition
+    /// down, and whether the text survived is unknowable from here.
+    pub fn collect_pending_learning(&mut self) {
+        if let Some(kb) = self.keyboard.as_mut() {
+            kb.collect_pending_learning();
         }
     }
 }
