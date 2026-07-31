@@ -209,7 +209,16 @@ impl ButtreEngine {
         }
         let mut settings = buttre_core::state::Settings::load();
         let method_changed = method.is_some_and(|m| settings.input_method != m);
-        if settings.enabled == on && !method_changed {
+        // A missing settings.toml must always be MATERIALIZED: on a fresh
+        // install the engine treats "no file" as enabled (the user picked
+        // buttre as an OS input source — see `macro_sync::effective_enabled`),
+        // so an English-radio click whose value happens to equal the unsaved
+        // default would otherwise return here without writing, and the
+        // fresh-install rule would immediately overrule the user's click.
+        let file_exists = buttre_core::state::Settings::get_path()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        if file_exists && settings.enabled == on && !method_changed {
             return;
         }
         settings.enabled = on;
