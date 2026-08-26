@@ -8,12 +8,26 @@
     <string>buttre</string>
     <key>CFBundleIdentifier</key>
     <string>org.dxsl.buttre.inputmethod</string>
+    <key>TISInputSourceID</key>
+    <string>org.dxsl.buttre.inputmethod</string>
+    <key>TISIntendedLanguage</key>
+    <string>vi</string>
+    <key>tsInputMethodCharacterRepertoireKey</key>
+    <array>
+        <string>Latn</string>
+    </array>
     <key>CFBundleName</key>
     <string>buttre</string>
     <key>CFBundleDisplayName</key>
     <string>buttre Vietnamese</string>
+    <key>CFBundleIconFile</key>
+    <string>vietnamese.png</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>tsInputMethodIconFileKey</key>
+    <string>vietnamese.png</string>
     <key>CFBundleShortVersionString</key>
     <string>0.7.7</string>
     <key>CFBundleVersion</key>
@@ -22,10 +36,13 @@
     <string>6.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
 
-    <!-- An input method is a background agent, not a normal windowed app. -->
+    <!-- UIElement hides Dock/menu-bar UI while preserving normal application
+         activation semantics required by Text Input Sources. -->
     <key>LSBackgroundOnly</key>
-    <true/>
+    <false/>
     <key>LSUIElement</key>
     <true/>
 
@@ -36,6 +53,8 @@
     <string>org.dxsl.buttre_Connection</string>
     <key>InputMethodServerControllerClass</key>
     <string>ButtreInputController</string>
+    <key>InputMethodServerDelegateClass</key>
+    <string>ButtreInputController</string>
 
     <!-- Input mode(s). One Vietnamese mode; the engine's Telex/VNI/Nôm switch
          is internal (tray/config), not separate TIS modes. -->
@@ -43,25 +62,35 @@
     <dict>
         <key>tsInputModeListKey</key>
         <dict>
-            <key>org.dxsl.buttre.inputmode.vietnamese</key>
+            <key>org.dxsl.buttre.inputmethod.vietnamese</key>
             <dict>
                 <key>TISIntendedLanguage</key>
                 <string>vi</string>
-                <key>tsInputModeAlternateMenuTitleStringsKey</key>
-                <string>buttre Vietnamese</string>
+                <key>TISInputSourceID</key>
+                <string>org.dxsl.buttre.inputmethod.vietnamese</string>
+                <key>tsInputModeCharacterRepertoireKey</key>
+                <array>
+                    <string>Latn</string>
+                </array>
+                <key>tsInputModeAlternateMenuIconFileKey</key>
+                <string>vietnamese.png</string>
+                <key>tsInputModeMenuIconFileKey</key>
+                <string>vietnamese.png</string>
+                <key>tsInputModePaletteIconFileKey</key>
+                <string>vietnamese.png</string>
+                <key>tsInputModeDefaultStateKey</key>
+                <true/>
                 <key>tsInputModePrimaryInScriptKey</key>
                 <true/>
                 <key>tsInputModeIsVisibleKey</key>
                 <true/>
-                <key>tsInputModeKeyEquivalentModifiersKey</key>
-                <integer>0</integer>
-                <key>tsInputModeKeyEquivalentKey</key>
-                <string></string>
+                <key>tsInputModeScriptKey</key>
+                <string>smUnicodeScript</string>
             </dict>
         </dict>
         <key>tsVisibleInputModeOrderedArrayKey</key>
         <array>
-            <string>org.dxsl.buttre.inputmode.vietnamese</string>
+            <string>org.dxsl.buttre.inputmethod.vietnamese</string>
         </array>
     </dict>
 </dict>

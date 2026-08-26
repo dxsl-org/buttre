@@ -49,6 +49,8 @@ clang -ObjC -fobjc-arc -O2 \
 
 echo "==> Bundling keyboards + Nôm DB..."
 mkdir -p "$APP/Contents/Resources/keyboards"
+cp -R "$HOST_DIR/resources/." "$APP/Contents/Resources/"
+cp crates/buttre-platform/icons/vietnamese.png "$APP/Contents/Resources/"
 cp keyboards/*.toml "$APP/Contents/Resources/keyboards/" 2>/dev/null || true
 for NOM_SRC in "buttre_nom.db" "crates/buttre-core/resources/nom/buttre_nom.db"; do
     if [ -f "$NOM_SRC" ]; then cp "$NOM_SRC" "$APP/Contents/Resources/"; break; fi
