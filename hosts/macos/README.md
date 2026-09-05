@@ -18,7 +18,7 @@ method (Apple TN2150) — buttre simply won't compose there, by design.
 ```
 hosts/macos/
 ├── Info.plist                 # IMKit bundle keys (connection name, controller class, input mode)
-├── build_app.sh               # universal build → Buttre.app → ad-hoc sign → zip
+├── build_app.sh               # universal build → sign/notarize → Buttre.app → zip
 └── src/
     ├── main.m                 # IMKServer bootstrap
     ├── ButtreInputController.h
@@ -37,17 +37,31 @@ bash hosts/macos/build_app.sh 0.7.6
 # → target/macos-app/Buttre.app  (+ buttre-0.7.6-macos.zip)
 ```
 
+The script automatically selects a Developer ID Application identity. For a
+distributable Input Source, configure a `notarytool` keychain profile and set
+`MACOS_NOTARY_PROFILE`; ad-hoc and unnotarized bundles may be omitted by macOS:
+
+```bash
+xcrun notarytool store-credentials buttre-notary
+MACOS_NOTARY_PROFILE=buttre-notary bash hosts/macos/build_app.sh 0.7.6
+```
+
 Requires Xcode command-line tools and the Rust aarch64/x86_64 Apple targets
 (the script adds them).
 
 ## Install
 
+`Buttre.app` is an input-method bundle, not a normal application. Install it
+under an `Input Methods` directory; launching it in Finder or copying it to
+`/Applications` does not register an input source.
+
 ```bash
-cp -R target/macos-app/Buttre.app ~/Library/Input\ Methods/
-xattr -dr com.apple.quarantine ~/Library/Input\ Methods/Buttre.app   # if downloaded
-# Then log out/in (or: killall the input-method system) and add buttre in
-# System Settings → Keyboard → Input Sources → (+) → Vietnamese → buttre.
+sudo rm -rf "/Library/Input Methods/Buttre.app"
+sudo ditto target/macos-app/Buttre.app "/Library/Input Methods/Buttre.app"
 ```
+
+Log out and back in, then open **System Settings → Keyboard → Text Input →
+Edit → (+) → Vietnamese → buttre**.
 
 Select buttre, then type `vieejt` → `việt` (marked/underlined preedit while
 composing, committed on space). No Accessibility prompt should appear.
@@ -104,8 +118,8 @@ kiểm chứng runtime:
 8. **`buttre` binary không tham số** trên macOS → mở cửa sổ Cấu hình
    (nhánh Os của `method_owner`); checkbox autostart phải ẨN.
 
-Sau v1: entitlement `com.apple.security.inputmethod`, ký Developer ID +
-notarization (bỏ bước `xattr`).
+Developer ID signing and notarization are supported by `build_app.sh`; release
+automation still needs the notarization credentials provisioned in CI.
 
 > Lưu ý hạ tầng: plan chi tiết nằm trong `.agents/` (gitignored — KHÔNG đi
 > theo clone) nên checklist này là nguồn chính khi làm việc trên máy khác.

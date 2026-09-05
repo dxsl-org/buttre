@@ -7,9 +7,9 @@
     <key>CFBundleExecutable</key>
     <string>buttre</string>
     <key>CFBundleIdentifier</key>
-    <string>org.dxsl.buttre.inputmethod</string>
+    <string>org.dxsl.inputmethod.buttre</string>
     <key>TISInputSourceID</key>
-    <string>org.dxsl.buttre.inputmethod</string>
+    <string>org.dxsl.inputmethod.buttre</string>
     <key>TISIntendedLanguage</key>
     <string>vi</string>
     <key>tsInputMethodCharacterRepertoireKey</key>
@@ -39,10 +39,10 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 
-    <!-- UIElement hides Dock/menu-bar UI while preserving normal application
-         activation semantics required by Text Input Sources. -->
+    <!-- Input methods are background-only applications. Launch Services uses
+         this classification when populating Text Input Sources. -->
     <key>LSBackgroundOnly</key>
-    <false/>
+    <true/>
     <key>LSUIElement</key>
     <true/>
 
@@ -50,7 +50,7 @@
          IMKServer in main.m; InputMethodServerControllerClass names the
          IMKInputController subclass IMKit instantiates per input session. -->
     <key>InputMethodConnectionName</key>
-    <string>org.dxsl.buttre_Connection</string>
+    <string>org.dxsl.inputmethod.buttre_Connection</string>
     <key>InputMethodServerControllerClass</key>
     <string>ButtreInputController</string>
     <key>InputMethodServerDelegateClass</key>
@@ -62,12 +62,12 @@
     <dict>
         <key>tsInputModeListKey</key>
         <dict>
-            <key>org.dxsl.buttre.inputmethod.vietnamese</key>
+            <key>org.dxsl.inputmethod.buttre.vietnamese</key>
             <dict>
                 <key>TISIntendedLanguage</key>
                 <string>vi</string>
                 <key>TISInputSourceID</key>
-                <string>org.dxsl.buttre.inputmethod.vietnamese</string>
+                <string>org.dxsl.inputmethod.buttre.vietnamese</string>
                 <key>tsInputModeCharacterRepertoireKey</key>
                 <array>
                     <string>Latn</string>
@@ -90,7 +90,7 @@
         </dict>
         <key>tsVisibleInputModeOrderedArrayKey</key>
         <array>
-            <string>org.dxsl.buttre.inputmethod.vietnamese</string>
+            <string>org.dxsl.inputmethod.buttre.vietnamese</string>
         </array>
     </dict>
 </dict>

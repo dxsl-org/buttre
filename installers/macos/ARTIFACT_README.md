@@ -44,7 +44,9 @@ The dylib exports C-compatible functions defined in `crates/buttre-platform/src/
 
 ## End-user installation
 
-There is no end-user installer for macOS yet. A Swift IMK (Input Method Kit) shell that wraps this dylib is **planned** but not yet built. Until then, this artifact is for developers building their own host app.
+This ZIP is still a developer library, not an installable input source. Build
+or download the separate `buttre-<version>-macos.zip` artifact containing
+`Buttre.app`, then follow [`../../MACOS_README.md`](../../MACOS_README.md).
 
 ## Source
 
