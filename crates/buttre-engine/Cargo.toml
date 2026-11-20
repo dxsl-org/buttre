@@ -23,8 +23,9 @@ vseqlist-tone = []  # Use Unikey's VSeqList for 100% accurate tone positioning
 unicode-normalization = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
-rusqlite = { version = "0.30", features = ["bundled"] }
+# 0.43 bundles SQLite ≥ 3.54 (RUSTSEC-2026-0459: older bundled SQLite can
+# return uninitialized page-cache memory with a mismatched `-wal` file).
+rusqlite = { version = "0.43", features = ["bundled"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 

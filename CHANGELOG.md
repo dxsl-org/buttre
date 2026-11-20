@@ -4,6 +4,10 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- build: Rust 1.100 không còn biên dịch `objc2 0.4` (kéo vào bởi winit 0.29) trên macOS — code tray tách sang `tray_app.rs`, chỉ biên dịch ngoài macOS, và `winit` thành dependency không-macOS (trên macOS binary `buttre` chỉ là helper cửa sổ Cấu hình; ADR-0003)
+- deps: `rusqlite` 0.30 → 0.43 (SQLite đóng gói ≥ 3.54, vá RUSTSEC-2026-0459); bỏ `chrono` (không dùng) khỏi `buttre-platform` và `thiserror` (không dùng) khỏi `buttre-engine`; `deny.toml` bỏ qua RUSTSEC-2026-0543 (chrono qua Slint, chưa có bản thay)
+- ci: sửa lint clippy mới (`chunks_exact_mut` → `as_chunks_mut`, FFI `buttre_engine_select_method` thành `unsafe extern "C"` kèm `# Safety`)
+
 ## [0.8.0-beta] — 2026-11-20
 
 - ci: release có job `build-macos-app` build `Buttre.app` ký Developer ID + notarize trên keychain tạm, đính kèm `buttre-<version>-macos-app.zip` vào release; thiếu secret Apple thì job fail thay vì phát hành bản chưa ký. `build_app.sh` nhận thêm `MACOS_NOTARY_KEYCHAIN`. Job CI `macos-imkit` build với version `dev` (SHA commit không phải bundle version hợp lệ nên script từ chối)

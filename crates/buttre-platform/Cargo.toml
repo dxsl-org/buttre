@@ -40,15 +40,18 @@ toml = { workspace = true }
 dirs = { workspace = true }
 tray-icon = "0.19"
 muda = "0.15"
-winit = "0.29"
 image = { version = "0.24", default-features = false, features = ["png"] }
 single-instance = "0.3"
 bincode = "1.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "std"] }
-chrono = "0.4"
 crossbeam = "0.8"
 notify = "6.1"
+
+# The tray's event loop (`src/tray_app.rs`). Not on macOS: no tray there
+# (ADR-0003), and winit 0.29's objc2 0.4 does not build on Rust ≥ 1.100.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+winit = "0.29"
 
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]

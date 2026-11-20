@@ -65,7 +65,8 @@ fn type_str(id: u64, text: &str) -> ButtreKeyResult {
 /// Report input mode `method` the way the IMKit controller does.
 fn select(id: u64, method: &str) -> ButtreKeyResult {
     let method = CString::new(method).unwrap();
-    buttre_engine_select_method(id, method.as_ptr())
+    // SAFETY: `method` is a live NUL-terminated CString for the whole call.
+    unsafe { buttre_engine_select_method(id, method.as_ptr()) }
 }
 
 #[test]
@@ -262,7 +263,8 @@ fn input_mode_selects_and_persists_method() {
             assert!(!select(id, bogus).handled, "{bogus} rejected");
             assert_eq!(buttre_platform::shared::method_sync::read_method(), "vni");
         }
-        assert!(!buttre_engine_select_method(id, std::ptr::null()).handled);
+        // SAFETY: null is explicitly allowed (rejected, nothing read).
+        assert!(!unsafe { buttre_engine_select_method(id, std::ptr::null()) }.handled);
         buttre_engine_free(id);
         buttre_engine_free(other);
     });

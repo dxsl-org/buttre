@@ -43,6 +43,9 @@ ignore = [
     "RUSTSEC-2024-0436",
     # rustybuzz (via Slint text shaping, config window): unmaintained.
     "RUSTSEC-2026-0206",
+    # chrono (via Slint's i-slint-core, config window): unmaintained, no
+    # safe upgrade. buttre itself no longer depends on it.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]

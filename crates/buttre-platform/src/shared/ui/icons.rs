@@ -69,7 +69,7 @@ impl IconSet {
 /// This is the only place that knows how the OFF variant is produced.
 fn greyscale_rgba(rgba: &[u8]) -> Vec<u8> {
     let mut out = rgba.to_vec();
-    for px in out.chunks_exact_mut(4) {
+    for px in out.as_chunks_mut::<4>().0 {
         let y = (299 * px[0] as u32 + 587 * px[1] as u32 + 114 * px[2] as u32) / 1000;
         let y = y as u8;
         px[0] = y;

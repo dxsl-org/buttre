@@ -529,18 +529,21 @@ pub extern "C" fn buttre_engine_select_candidate(engine_id: u64, index: u32) -> 
 /// `"english"` id and null are rejected (`handled == false`, nothing
 /// changes): the method file must only ever name a buildable method.
 ///
-/// `method` must be NUL-terminated UTF-8, valid for the duration of the call.
+/// # Safety
+///
+/// `method` must be null or a NUL-terminated string valid for reads for the
+/// duration of the call (UTF-8; invalid bytes are replaced, never trusted).
 #[no_mangle]
-pub extern "C" fn buttre_engine_select_method(
+pub unsafe extern "C" fn buttre_engine_select_method(
     engine_id: u64,
     method: *const c_char,
 ) -> ButtreKeyResult {
     if method.is_null() {
         return ButtreKeyResult::pass();
     }
-    // SAFETY: non-null (checked above), and the header contract requires a
-    // NUL-terminated string that stays valid for this call; it is copied
-    // into an owned String before anything else runs.
+    // SAFETY: non-null (checked above); the caller guarantees a
+    // NUL-terminated string valid for this call (see `# Safety`). It is
+    // copied into an owned String before anything else runs.
     let method = unsafe { CStr::from_ptr(method) }
         .to_string_lossy()
         .into_owned();
