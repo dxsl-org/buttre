@@ -29,8 +29,8 @@ pub enum MethodOwner {
 pub enum SurfacePath {
     /// Windows: hai đường truyền (TSF + hook), chỉ buttre phân xử được.
     Windows,
-    /// macOS IMKit: menu input-source của OS (giả định ADR-0003, chỉnh khi
-    /// kiểm trên môi trường thật — đổi một dòng trong [`owner_of`]).
+    /// macOS IMKit: menu input-source của OS — mỗi kiểu gõ (Telex, VNI, Nôm,
+    /// từng keyboard đóng gói) là một input mode riêng trong Info.plist.
     MacosImkit,
     /// fcitx5 đang chạy VÀ addon fcitx5-buttre đã cài — addon dựng menu
     /// kiểu gõ trên panel (PR #17). Chỉ khi addon có mặt thì "OS có menu"

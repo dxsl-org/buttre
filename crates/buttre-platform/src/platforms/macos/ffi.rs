@@ -1,25 +1,39 @@
-//! buttre macOS — C ABI for the IMKit host (FFI v2).
+//! buttre macOS — C ABI for the IMKit host (FFI v3).
 //!
 //! **Tests**: `crates/buttre-platform/tests/platform_macos_tests.rs` (ABI
 //! surface) and `tests/shared_engine_bridge_tests.rs` (composition
 //! semantics — the same [`EngineBridge`] drives the Linux backends).
 //! **Header**: `include/buttre_platform.h` — hand-maintained, keep in sync.
 //!
-//! Handle-based (opaque `u64` ids) so memory management needs zero unsafe
-//! on the Rust side. The host maps [`ButtreKeyResult`] onto IMKit directly:
+//! Handle-based (opaque `u64` ids); the only unsafe is reading the C string
+//! [`buttre_engine_select_method`] receives. The host maps [`ButtreKeyResult`]
+//! onto IMKit directly:
 //!
-//! - `commit` non-null → `insertText(commit)` (before updating the preedit)
-//! - `preedit`         → `setMarkedText(preedit)`; empty string → `unmarkText`
-//! - `handled == false`→ return `false` from `handle(event)` so the system
+//! - `commit` non-null  → `insertText(commit)` (before updating the preedit)
+//! - `preedit` non-null → `setMarkedText(preedit)`; empty string clears it.
+//!   NULL means "marked text unchanged — do not touch the client": with no
+//!   marked text, `setMarkedText("")` REPLACES the client's selection, so an
+//!   unconditional empty update deleted selected text on Cmd+C / Shift+arrow.
+//! - `candidates_changed` → re-read the list ([`buttre_engine_candidate_count`]
+//!   / [`buttre_engine_candidate_at`]) and show or hide the candidate panel
+//! - `handled == false` → return `false` from `handle(event)` so the system
 //!   delivers the ORIGINAL key to the client (after the commit above —
 //!   that ordering is how separators work: word first, then the separator)
 //!
-//! v1 → v2 (breaking, no consumers existed — ARTIFACT_README confirmed):
-//! the old API returned a bare string for both "replace" and "commit"
-//! (indistinguishable) and dropped everything past the first engine action,
-//! which broke composition the same way it did on Linux (debug report B0).
-//! `backspace_count` is gone — IMKit replaces the whole marked range, so a
-//! delete count has no meaning in the preedit model.
+//! v2 → v3 (breaking, the in-repo IMKit host is the only consumer): keys are
+//! fed as the layout-translated character (`event.characters`), not a US-ANSI
+//! keycode, so Dvorak/AZERTY/Colemak users type what their keyboard says;
+//! `preedit` became nullable (above); Nôm candidates are exposed;
+//! `set_method`/`set_enabled` are replaced by
+//! [`buttre_engine_select_method`].
+//!
+//! Method = input mode: every method (Telex, VNI, Chữ Nôm, each bundled
+//! keyboard) is its own macOS input source (`ComponentInputModeDict`), so
+//! the OS menu IS the method switcher and "off" is simply picking another
+//! input source (ABC). The host reports the selected mode through
+//! [`buttre_engine_select_method`]; `Settings::enabled` has no macOS surface
+//! and is ignored here — honoring it would let a stale `false` written by
+//! another platform's tray silence an input source the user just picked.
 //!
 //! Panic policy: the release profile is `panic = "abort"` — a panic here
 //! kills the host app, and `catch_unwind` cannot help (nothing unwinds).
@@ -31,11 +45,12 @@
 use crate::shared::engine_bridge::{EngineBridge, ImeOp, KeyOutcome};
 use crate::shared::learning_sync::{self, LearningWiring};
 use crate::shared::method_sync::{self, MethodState};
-use crate::shared::{macro_sync, method_owner};
+use crate::shared::{macro_sync, method_menu, method_owner};
 use buttre_core::state::macros::MacroStore;
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, OnceLock, PoisonError,
@@ -57,24 +72,44 @@ struct HostSync {
     method_state: Arc<MethodState>,
     macros: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
-    enabled: Arc<AtomicBool>,
     learning: LearningWiring,
 }
 
 static HOST_SYNC: OnceLock<HostSync> = OnceLock::new();
 
+/// `Buttre.app/Contents/Resources` for an executable at
+/// `Buttre.app/Contents/MacOS/<exe>` — where `build_app.sh` bundles the Nôm
+/// dictionary and keyboard TOMLs. `None` outside a bundle (tests, dev runs),
+/// which leaves the default exe-dir/cwd/data-dir search in charge.
+fn bundle_resource_dir(exe: &Path) -> Option<PathBuf> {
+    let resources = exe.parent()?.parent()?.join("Resources");
+    resources.is_dir().then_some(resources)
+}
+
 fn host_sync() -> &'static HostSync {
     HOST_SYNC.get_or_init(|| {
+        super::logging::init();
+        // Must precede every keyboard build: the default resolver searches next
+        // to the executable (`Contents/MacOS`), never `Contents/Resources`, so
+        // without this Nôm ran dictionary-less and bundled keyboards vanished.
+        match std::env::current_exe()
+            .ok()
+            .and_then(|exe| bundle_resource_dir(&exe))
+        {
+            Some(dir) => buttre_core::vietnamese::set_resource_dir(dir),
+            None => tracing::warn!("macOS host: not running from an app bundle"),
+        }
+
         let method_state = MethodState::load();
         method_sync::spawn_watcher(method_state.clone());
 
         let macros = macro_sync::load_initial();
         let strict = macro_sync::load_initial_strict();
-        // Loaded for the shared watcher signature only — IMKit is a preedit
-        // (marked-text) host, the no-preedit model does not apply.
+        // Loaded for the shared watcher signature only: IMKit is a preedit
+        // (marked-text) host, and on/off is the OS input-source choice.
         let use_preedit = macro_sync::load_initial_use_preedit();
         let enabled = macro_sync::load_initial_enabled();
-        macro_sync::spawn_watcher(macros.clone(), strict.clone(), use_preedit, enabled.clone());
+        macro_sync::spawn_watcher(macros.clone(), strict.clone(), use_preedit, enabled);
 
         let (learning, learning_rx) = learning_sync::load_initial();
         learning_sync::spawn_writer(learning_rx);
@@ -89,7 +124,6 @@ fn host_sync() -> &'static HostSync {
             method_state,
             macros,
             strict,
-            enabled,
             learning,
         }
     })
@@ -99,7 +133,7 @@ fn host_sync() -> &'static HostSync {
 // Result type (mirror of include/buttre_platform.h)
 // ============================================================================
 
-/// Result of one key event. Pointers are UTF-8, owned by the engine, and
+/// Result of one engine call. Pointers are UTF-8, owned by the engine, and
 /// valid until the NEXT call on the SAME engine (per-engine storage — two
 /// engines never clobber each other's strings).
 #[repr(C)]
@@ -108,18 +142,21 @@ pub struct ButtreKeyResult {
     pub handled: bool,
     /// Text to insert into the client, or null when nothing commits.
     pub commit: *const c_char,
-    /// The full current composition (marked text). Empty string = clear
-    /// the marked range. Never null on a live engine.
+    /// The full current composition (marked text) when it changed; empty
+    /// string = clear the marked range; null = leave the client untouched.
     pub preedit: *const c_char,
+    /// The candidate list changed (shown, replaced or hidden) — re-read it.
+    pub candidates_changed: bool,
 }
 
 impl ButtreKeyResult {
-    /// For dead/invalid handles: nothing happened, host handles the key.
+    /// Nothing happened: the host handles the key, the client is untouched.
     const fn pass() -> Self {
         Self {
             handled: false,
             commit: std::ptr::null(),
             preedit: std::ptr::null(),
+            candidates_changed: false,
         }
     }
 }
@@ -130,25 +167,20 @@ impl ButtreKeyResult {
 
 struct EngineState {
     bridge: EngineBridge,
-    /// Host-driven switch ([`buttre_engine_set_enabled`]) — the IMKit
-    /// controller's own gate (deactivate, secure input). Independent of the
-    /// `Settings::enabled` mirror, which drives the bridge's passthrough via
-    /// [`sync_shared`]: either one off means keys pass untouched.
-    enabled: bool,
     /// Last [`MethodState::generation`] applied — one atomic compare per
     /// keystroke, same lazy rebuild the IBus engine uses.
     seen_generation: u64,
     /// Backing storage for the pointers handed across the FFI — replaced
     /// on every call, hence the "valid until next call" contract.
     commit_c: Option<CString>,
-    preedit_c: CString,
+    preedit_c: Option<CString>,
+    /// Display strings of the live candidate list (empty = none showing).
+    candidates_c: Vec<CString>,
 }
 
 /// Apply pending tri-surface changes before a key is processed — method
-/// switch, `Settings::enabled`, and the "Học thông minh" toggle, each a
-/// cheap compare against the shared mirrors. The ORDER mirrors the IBus
-/// engine and is load-bearing: a successful rebuild re-enables the bridge,
-/// and the settings store must win that disagreement.
+/// switch and the "Học thông minh" toggle, each a cheap compare against the
+/// shared mirrors (same lazy model as the IBus engine).
 fn sync_shared(state: &mut EngineState) {
     let sync = host_sync();
 
@@ -162,11 +194,6 @@ fn sync_shared(state: &mut EngineState) {
         if state.bridge.rebuild(&method).is_none() {
             tracing::warn!("macOS engine: method switch to {method} failed; keeping current");
         }
-    }
-
-    let want = sync.enabled.load(Ordering::Relaxed);
-    if state.bridge.is_enabled() != want {
-        state.bridge.set_enabled(want);
     }
 
     let want_learning = sync.learning.enabled.load(Ordering::Relaxed);
@@ -192,27 +219,61 @@ fn with_engine<R>(engine_id: u64, f: impl FnOnce(&mut EngineState) -> R) -> Opti
     engines.as_mut()?.get_mut(&engine_id).map(f)
 }
 
+/// Run `f` on a live engine and marshal its outcome; dead handles pass.
+fn engine_call(engine_id: u64, f: impl FnOnce(&mut EngineState) -> KeyOutcome) -> ButtreKeyResult {
+    with_engine(engine_id, |state| {
+        let outcome = f(state);
+        marshal(state, outcome)
+    })
+    .unwrap_or(ButtreKeyResult::pass())
+}
+
 /// Marshal a bridge outcome into the engine's C storage.
 fn marshal(state: &mut EngineState, outcome: KeyOutcome) -> ButtreKeyResult {
     let mut commit_text: Option<String> = None;
+    let mut preedit_changed = false;
+    let mut candidates_changed = false;
     for op in outcome.ops {
-        if let ImeOp::Commit(text) = op {
-            // The bridge emits at most one commit per key; be safe anyway.
-            match &mut commit_text {
+        match op {
+            ImeOp::Commit(text) => match &mut commit_text {
+                // The bridge emits at most one commit per key; be safe anyway.
                 Some(existing) => existing.push_str(&text),
                 None => commit_text = Some(text),
+            },
+            ImeOp::Preedit(_) => preedit_changed = true,
+            ImeOp::Candidates { items, .. } => {
+                state.candidates_c = items
+                    .into_iter()
+                    .map(|c| CString::new(c.display).unwrap_or_default())
+                    .collect();
+                candidates_changed = true;
             }
+            ImeOp::HideCandidates => {
+                state.candidates_c.clear();
+                candidates_changed = true;
+            }
+            // Only emitted with composition off, which this host never selects.
+            ImeOp::DeleteSurrounding(_) => {}
         }
     }
+    // `insertText` replaces the client's marked range, so after any commit the
+    // composition is re-sent: a live word survives, and an empty one is
+    // harmless there (the insert already collapsed the selection).
+    let preedit_changed = preedit_changed || commit_text.is_some();
     state.commit_c = commit_text.and_then(|t| CString::new(t).ok());
-    state.preedit_c = CString::new(state.bridge.preedit()).unwrap_or_else(|_| CString::default());
+    state.preedit_c =
+        preedit_changed.then(|| CString::new(state.bridge.preedit()).unwrap_or_default());
     ButtreKeyResult {
         handled: outcome.handled,
         commit: state
             .commit_c
             .as_ref()
             .map_or(std::ptr::null(), |c| c.as_ptr()),
-        preedit: state.preedit_c.as_ptr(),
+        preedit: state
+            .preedit_c
+            .as_ref()
+            .map_or(std::ptr::null(), |c| c.as_ptr()),
+        candidates_changed,
     }
 }
 
@@ -236,11 +297,8 @@ pub extern "C" fn buttre_engine_new() -> u64 {
         return 0;
     };
     bridge.set_strict_flag(sync.strict.clone());
-    // Start on the persisted states — a keystroke must not have to arrive
-    // before a saved "off" (or an already-earned learning store) applies.
-    if !sync.enabled.load(Ordering::Relaxed) {
-        bridge.set_enabled(false);
-    }
+    // Start on the persisted learning state — a keystroke must not have to
+    // arrive before an already-earned learning store applies.
     if sync.learning.enabled.load(Ordering::Relaxed) {
         bridge.set_learning(sync.learning.store.clone(), sync.learning.save_tx.clone());
     }
@@ -250,10 +308,10 @@ pub extern "C" fn buttre_engine_new() -> u64 {
         id,
         EngineState {
             bridge,
-            enabled: true,
             seen_generation: sync.method_state.generation(),
             commit_c: None,
-            preedit_c: CString::default(),
+            preedit_c: None,
+            candidates_c: Vec::new(),
         },
     );
     id
@@ -271,221 +329,194 @@ pub extern "C" fn buttre_engine_free(engine_id: u64) {
     }
 }
 
+/// Map a host character to what the engine composes, `None` for keys that
+/// compose nothing (arrows, F-keys, Escape, Tab, forward delete…).
+///
+/// AppKit reports Return as `\r` and keypad Enter as U+0003; both are the
+/// engine's line separator. Other C0/C1 controls and AppKit's function-key
+/// range (`NSUpArrowFunctionKey` U+F700 … U+F8FF) are not text.
+fn host_char(codepoint: u32) -> Option<char> {
+    match char::from_u32(codepoint)? {
+        '\r' | '\u{3}' => Some('\n'),
+        '\u{F700}'..='\u{F8FF}' => None,
+        ch if ch.is_control() => None,
+        ch => Some(ch),
+    }
+}
+
 /// Process a key press.
 ///
-/// - `keycode`: macOS virtual keycode (US ANSI table below). Space and
-///   Return ARE mapped — the engine classifies separators itself and the
-///   result carries the committed word with `handled == false`, so the
-///   original key still reaches the client after the commit.
-/// - `shift` / `capslock`: letter case = `capslock XOR shift`.
+/// - `codepoint`: the layout-translated character AppKit reports for the
+///   event (`event.characters`, one Unicode scalar; 0 when it is not exactly
+///   one). Space and Return ARE composed — the engine classifies separators
+///   itself and the result carries the committed word with `handled ==
+///   false`, so the original key still reaches the client after the commit.
 ///
-/// Unmapped keycodes (arrows, Tab, Escape, …) return `handled == false`
-/// with no state change — call [`buttre_engine_flush`] first for keys that
-/// should end the composition.
+/// Keys that compose nothing (navigation, function keys, Escape, Tab, dead
+/// keys, multi-character events) END the word: the pending composition is
+/// committed and the result is `handled == false` so the app still gets the
+/// key. Passing such a key through with the marked text still live would let
+/// the app's own insert replace it — the word would vanish from the screen
+/// while the engine kept composing it.
 #[no_mangle]
-pub extern "C" fn buttre_engine_process_key(
-    engine_id: u64,
-    keycode: u16,
-    shift: bool,
-    capslock: bool,
-) -> ButtreKeyResult {
-    with_engine(engine_id, |state| {
+pub extern "C" fn buttre_engine_process_char(engine_id: u64, codepoint: u32) -> ButtreKeyResult {
+    engine_call(engine_id, |state| {
         sync_shared(state);
-        if !state.enabled {
-            return ButtreKeyResult::pass();
+        match host_char(codepoint) {
+            Some(ch) => state.bridge.process_char(ch),
+            None => {
+                let mut outcome = state.bridge.flush_pending();
+                outcome.handled = false;
+                outcome
+            }
         }
-        let Some(ch) = keycode_to_char(keycode, shift, capslock) else {
-            return ButtreKeyResult::pass();
-        };
-        let outcome = state.bridge.process_char(ch);
-        marshal(state, outcome)
     })
-    .unwrap_or(ButtreKeyResult::pass())
 }
 
 /// Process backspace. `handled == false` when nothing is composing (the
 /// host lets the key delete normally).
 #[no_mangle]
 pub extern "C" fn buttre_engine_process_backspace(engine_id: u64) -> ButtreKeyResult {
-    with_engine(engine_id, |state| {
+    engine_call(engine_id, |state| {
         sync_shared(state);
-        if !state.enabled {
-            return ButtreKeyResult::pass();
-        }
-        let outcome = state.bridge.backspace();
-        marshal(state, outcome)
+        state.bridge.backspace()
     })
-    .unwrap_or(ButtreKeyResult::pass())
 }
 
 /// Commit the pending word out-of-band, with word-boundary repair — call on
-/// focus loss (`deactivateServer`), navigation keys, or shortcuts, then act
-/// on `commit`/`preedit` as usual. No-op result when nothing is composing.
+/// focus loss (`deactivateServer`), shortcuts, or `commitComposition:`, then
+/// act on `commit`/`preedit` as usual. No-op result when nothing is composing.
 #[no_mangle]
 pub extern "C" fn buttre_engine_flush(engine_id: u64) -> ButtreKeyResult {
-    with_engine(engine_id, |state| {
-        let outcome = state.bridge.flush_pending();
-        marshal(state, outcome)
-    })
-    .unwrap_or(ButtreKeyResult::pass())
+    engine_call(engine_id, |state| state.bridge.flush_pending())
 }
 
-/// Discard the composition WITHOUT committing (Escape semantics).
+/// Discard the composition WITHOUT committing (Escape while candidates show).
 #[no_mangle]
-pub extern "C" fn buttre_engine_reset(engine_id: u64) {
-    with_engine(engine_id, |state| {
-        let outcome = state.bridge.discard();
-        marshal(state, outcome);
-    });
+pub extern "C" fn buttre_engine_reset(engine_id: u64) -> ButtreKeyResult {
+    engine_call(engine_id, |state| state.bridge.discard())
 }
 
-/// Switch the input method: 0 = telex, 1 = vni, 2 = nom. Discards any live
-/// composition (a mode switch is a reset). Returns true on success.
+/// Number of Nôm candidates currently offered (0 = hide the panel).
+#[no_mangle]
+pub extern "C" fn buttre_engine_candidate_count(engine_id: u64) -> u32 {
+    with_engine(engine_id, |state| {
+        u32::try_from(state.candidates_c.len()).unwrap_or(u32::MAX)
+    })
+    .unwrap_or(0)
+}
+
+/// Display string of candidate `index` (character plus gloss), or null when
+/// out of range. Valid until the next call on the same engine.
+#[no_mangle]
+pub extern "C" fn buttre_engine_candidate_at(engine_id: u64, index: u32) -> *const c_char {
+    with_engine(engine_id, |state| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| state.candidates_c.get(i))
+            .map_or(std::ptr::null(), |c| c.as_ptr())
+    })
+    .unwrap_or(std::ptr::null())
+}
+
+/// Commit candidate `index` (global, 0-based) and end the composition.
+/// Out of range → `handled == false`, nothing changes.
+#[no_mangle]
+pub extern "C" fn buttre_engine_select_candidate(engine_id: u64, index: u32) -> ButtreKeyResult {
+    engine_call(engine_id, |state| match usize::try_from(index) {
+        Ok(i) => state.bridge.select_candidate(i),
+        Err(_) => KeyOutcome::default(),
+    })
+}
+
+/// The OS selected input mode `method` (`"telex"`, `"vni"`, `"nom"` or a
+/// bundled keyboard stem — the host strips the bundle-id prefix from the
+/// mode id). Called on every mode switch AND on activation, so the engine
+/// always types what the menu bar shows.
 ///
-/// Also PERSISTS the choice to the shared method file (best-effort), so it
-/// survives a restart and every other engine instance/process converges —
-/// picking a method is a command, the same rule every other surface follows.
-/// The primary method channel is that file (config window / another
-/// session's write applies with no host involvement); this export remains
-/// for a host-side menu.
+/// A change commits the pending word (carried in the result), rebuilds this
+/// engine, and persists like every other surface (method file +
+/// `settings.toml`, which also records "on": picking an input source is
+/// intent to type), so the other engines in this process and later sessions
+/// follow. The current method is a no-op. Unknown ids, the legacy
+/// `"english"` id and null are rejected (`handled == false`, nothing
+/// changes): the method file must only ever name a buildable method.
+///
+/// `method` must be NUL-terminated UTF-8, valid for the duration of the call.
 #[no_mangle]
-pub extern "C" fn buttre_engine_set_method(engine_id: u64, method: u8) -> bool {
-    let name = match method {
-        0 => "telex",
-        1 => "vni",
-        2 => "nom",
-        _ => return false,
-    };
-    with_engine(engine_id, |state| match state.bridge.rebuild(name) {
-        Some(outcome) => {
-            marshal(state, outcome);
-            if let Err(e) = method_sync::write_method(name) {
-                tracing::warn!("buttre_engine_set_method: persist failed: {e}");
+pub extern "C" fn buttre_engine_select_method(
+    engine_id: u64,
+    method: *const c_char,
+) -> ButtreKeyResult {
+    if method.is_null() {
+        return ButtreKeyResult::pass();
+    }
+    // SAFETY: non-null (checked above), and the header contract requires a
+    // NUL-terminated string that stays valid for this call; it is copied
+    // into an owned String before anything else runs.
+    let method = unsafe { CStr::from_ptr(method) }
+        .to_string_lossy()
+        .into_owned();
+    engine_call(engine_id, |state| {
+        if method == "english" || !method_sync::is_engine_method(&method) {
+            tracing::warn!("select_method: {method:?} is not an engine method; ignored");
+            return KeyOutcome::default();
+        }
+        let sync = host_sync();
+        if sync.method_state.method() == method {
+            // Already current process-wide; just make sure THIS engine has
+            // caught up (e.g. created before another engine's switch).
+            sync_shared(state);
+            return KeyOutcome::default();
+        }
+        let flushed = state.bridge.flush_pending();
+        let written = match method_sync::write_method(&method) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("select_method: write_method({method}) failed: {e}");
+                false
             }
-            // The file write above re-fires the watcher and bumps the
-            // generation; adopt it now so sync_shared doesn't rebuild the
-            // same method again on the next key.
-            state.seen_generation = host_sync().method_state.generation();
-            true
+        };
+        method_menu::persist_command(true, written.then_some(method.as_str()));
+        if state.bridge.rebuild(&method).is_none() {
+            tracing::warn!("select_method: building {method} failed; keeping current");
         }
-        None => false, // builder failed — keyboard unchanged, report failure
-    })
-    .unwrap_or(false)
-}
-
-/// Enable/disable. Disabling discards the composition — flush first if the
-/// pending word should be committed. Disabled engines pass everything.
-#[no_mangle]
-pub extern "C" fn buttre_engine_set_enabled(engine_id: u64, enabled: bool) {
-    with_engine(engine_id, |state| {
-        if state.enabled && !enabled {
-            let outcome = state.bridge.discard();
-            marshal(state, outcome);
-        }
-        state.enabled = enabled;
-    });
-}
-
-// ============================================================================
-// macOS virtual keycode → char (US ANSI layout)
-// ============================================================================
-
-/// Letter case uses `capslock XOR shift`, matching system behavior.
-fn keycode_to_char(keycode: u16, shift: bool, capslock: bool) -> Option<char> {
-    let letter = match keycode {
-        0 => 'a',
-        1 => 's',
-        2 => 'd',
-        3 => 'f',
-        4 => 'h',
-        5 => 'g',
-        6 => 'z',
-        7 => 'x',
-        8 => 'c',
-        9 => 'v',
-        11 => 'b',
-        12 => 'q',
-        13 => 'w',
-        14 => 'e',
-        15 => 'r',
-        16 => 'y',
-        17 => 't',
-        31 => 'o',
-        32 => 'u',
-        34 => 'i',
-        35 => 'p',
-        37 => 'l',
-        38 => 'j',
-        40 => 'k',
-        45 => 'n',
-        46 => 'm',
-        // Separators the engine must see (it classifies them itself).
-        49 => return Some(' '),
-        36 => return Some('\n'),
-        _ => return keycode_to_char_non_letter(keycode, shift),
-    };
-    let uppercase = capslock != shift;
-    Some(if uppercase {
-        letter.to_ascii_uppercase()
-    } else {
-        letter
+        // Adopt our own write now: other engines rebuild on the generation
+        // bump, this one already has, and the watcher's later read of the same
+        // file is a no-op instead of a rebuild that would wipe a fresh word.
+        sync.method_state.set(method);
+        state.seen_generation = sync.method_state.generation();
+        flushed
     })
 }
 
-fn keycode_to_char_non_letter(keycode: u16, shift: bool) -> Option<char> {
-    Some(if shift {
-        match keycode {
-            // Shifted digits
-            18 => '!',
-            19 => '@',
-            20 => '#',
-            21 => '$',
-            23 => '%',
-            22 => '^',
-            26 => '&',
-            28 => '*',
-            25 => '(',
-            29 => ')',
-            // Shifted punctuation
-            27 => '_',
-            24 => '+',
-            33 => '{',
-            30 => '}',
-            42 => '|',
-            41 => ':',
-            39 => '"',
-            43 => '<',
-            47 => '>',
-            44 => '?',
-            50 => '~',
-            _ => return None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_char_maps_appkit_characters() {
+        assert_eq!(host_char('a' as u32), Some('a'));
+        assert_eq!(host_char('Đ' as u32), Some('Đ'));
+        assert_eq!(host_char(' ' as u32), Some(' '));
+        // Return and keypad Enter are the engine's line separator.
+        assert_eq!(host_char('\r' as u32), Some('\n'));
+        assert_eq!(host_char(0x03), Some('\n'));
+        // Escape, Tab, backspace/delete, arrows, F-keys compose nothing.
+        for cp in [0x1B, 0x09, 0x7F, 0xF700, 0xF704, 0xF728, 0x00, 0xD800] {
+            assert_eq!(host_char(cp), None, "U+{cp:04X}");
         }
-    } else {
-        match keycode {
-            // Unshifted digits
-            18 => '1',
-            19 => '2',
-            20 => '3',
-            21 => '4',
-            23 => '5',
-            22 => '6',
-            26 => '7',
-            28 => '8',
-            25 => '9',
-            29 => '0',
-            // Unshifted punctuation
-            27 => '-',
-            24 => '=',
-            33 => '[',
-            30 => ']',
-            42 => '\\',
-            41 => ';',
-            39 => '\'',
-            43 => ',',
-            47 => '.',
-            44 => '/',
-            50 => '`',
-            _ => return None,
-        }
-    })
+    }
+
+    #[test]
+    fn bundle_resource_dir_requires_bundle_layout() {
+        let root = std::env::temp_dir().join(format!("buttre-bundle-{}", std::process::id()));
+        let contents = root.join("Buttre.app/Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        let exe = contents.join("MacOS/buttre");
+        assert_eq!(bundle_resource_dir(&exe), None, "no Resources dir yet");
+        std::fs::create_dir_all(contents.join("Resources")).unwrap();
+        assert_eq!(bundle_resource_dir(&exe), Some(contents.join("Resources")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -10,6 +10,7 @@ pub mod input;
 pub mod learning_sync;
 pub mod learning_writer;
 pub mod macro_sync;
+pub mod method_menu;
 pub mod method_owner;
 pub mod method_sync;
 pub mod observers;

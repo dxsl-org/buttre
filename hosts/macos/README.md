@@ -22,12 +22,17 @@ hosts/macos/
 └── src/
     ├── main.m                 # IMKServer bootstrap
     ├── ButtreInputController.h
-    └── ButtreInputController.m # NSEvent → engine → setMarkedText/insertText
+    └── ButtreInputController.m # NSEvent → engine → setMarkedText/insertText; input-menu items
 ```
 
-The controller is thin: the Rust engine (FFI v2) does keycode mapping and all
-composition; the controller only forwards events and applies the returned
-`ButtreKeyResult { handled, commit, preedit }`.
+`build_app.sh` also bundles the Rust `buttre` binary as
+`Contents/Helpers/buttre-config` — the settings window (`--config`).
+
+The controller is thin: the Rust engine (FFI v3) does all composition; the
+controller feeds it the layout-translated character (`event.characters`, so
+Dvorak/AZERTY/Colemak work), applies the returned
+`ButtreKeyResult { handled, commit, preedit, candidates_changed }`, drives the
+shared `IMKCandidates` panel for Nôm, and reports the selected input mode.
 
 ## Build (macOS only)
 
@@ -61,7 +66,8 @@ sudo ditto target/macos-app/Buttre.app "/Library/Input Methods/Buttre.app"
 ```
 
 Log out and back in, then open **System Settings → Keyboard → Text Input →
-Edit → (+) → Vietnamese → buttre**.
+Edit → (+) → Vietnamese** and add the buttre modes you want (buttre Telex,
+buttre VNI, buttre Chữ Nôm, one per bundled keyboard).
 
 Select buttre, then type `vieejt` → `việt` (marked/underlined preedit while
 composing, committed on space). No Accessibility prompt should appear.
@@ -73,16 +79,28 @@ Linux engine processes run (`shared/method_sync`, `macro_sync`,
 `learning_sync` — see `platforms/macos/ffi.rs::host_sync`). Per keystroke
 the engine lazily applies:
 
-- **method** from `~/Library/Application Support/buttre/`'s shared method
-  file — engines start in the SAVED method, and the config window /
-  hand-edits switch it live; `buttre_engine_set_method` persists to the
-  same file (a host menu is optional, not required)
-- **`Settings::enabled`** — fresh install (no `settings.toml`) counts as ON
-  (picking buttre as an input source IS intent to type); an explicit
-  `enabled = false` sticks
+- **method** = the selected input mode: the controller reports it on every
+  mode switch and activation (`buttre_engine_select_method`), which persists
+  it to `~/Library/Application Support/buttre/`'s shared method file so
+  every engine in the process follows
+- **`Settings::enabled`** is ignored on macOS: "off" is picking another input
+  source (ABC), so a stale `false` from another platform cannot silence it
 - **shorthand/gõ tắt** (`macros.toml`) + **strict spelling** + **học thông
   minh** (learning collects at word commits, saves via the merged-write
   thread — many-writer safe against the tray/other sessions)
+- **resources**: `Contents/Resources` (Nôm dictionary, keyboard TOMLs) is
+  derived from the executable path — the default exe-dir search never sees it
+- **logs**: `~/Library/Logs/buttre/imk.log` (WARN; create
+  `~/Library/Logs/buttre/debug` for DEBUG, which includes typed text)
+
+## Input modes
+
+Every method is its own input source (`ComponentInputModeDict` in
+`Info.plist`): Telex, VNI and Chữ Nôm are declared statically; `build_app.sh`
+appends one mode per bundled `keyboards/*.toml` (copy of the telex entry,
+named from `metadata.name`). Mode id `org.dxsl.inputmethod.buttre.<method>`
+maps to engine method `<method>`. Adding or removing a mode changes bundle
+metadata — log out and back in after installing.
 
 ## Status
 
@@ -101,11 +119,11 @@ kiểm chứng runtime:
 2. **Gõ cơ bản**: `vieejt` → `việt` (preedit gạch chân, space chốt);
    `hoaf` → `hoà`; backspace giữa từ giữ composition; Enter/điều hướng
    chốt từ (flush).
-3. **Giả định ADR-0003**: menu Input Sources của macOS có cho đổi kiểu gõ
-   của buttre không? KHÔNG → đổi MỘT dòng trong
-   `crates/buttre-platform/src/shared/method_owner.rs` (`MacosImkit` sang
-   nhóm `Buttre`) — thiết kế sẵn cho việc này; radio bảng quyết định trong
-   test cùng file phải sửa theo, có chủ đích.
+3. **Input modes**: menu bàn phím ở thanh menu liệt kê buttre Telex / VNI /
+   Chữ Nôm / từng keyboard dân tộc ngang hàng ABC; đổi bằng click hoặc
+   Ctrl+Space, gõ đúng kiểu vừa chọn.
+   **Nôm**: gõ `trowif` → bảng ứng viên hiện dưới con trỏ; ↑/↓ di chuyển,
+   Space/Enter/1–9/click chọn, Esc huỷ.
 4. **Tri-surface sync**: sửa method file / `settings.toml` (strict,
    shorthand, learning, enabled) từ ngoài trong lúc gõ → áp dụng ở phím kế
    tiếp, không cần restart host.
@@ -115,8 +133,9 @@ kiểm chứng runtime:
    TN2150).
 7. **Smoke từng app**: TextEdit, Notes, Safari (cả address bar), Terminal,
    Chrome. Ghi lại quirk (tương đương vụ Chromium omnibox trên Windows).
-8. **`buttre` binary không tham số** trên macOS → mở cửa sổ Cấu hình
-   (nhánh Os của `method_owner`); checkbox autostart phải ẨN.
+8. **Cấu hình**: menu input source ở thanh menu (khi đang chọn buttre) có
+   mục **Cấu hình buttre…** → mở cửa sổ Cấu hình lên trước (bấm lần hai
+   không mở cửa sổ thứ hai); checkbox autostart phải ẨN.
 
 Developer ID signing and notarization are supported by `build_app.sh`; release
 automation still needs the notarization credentials provisioned in CI.

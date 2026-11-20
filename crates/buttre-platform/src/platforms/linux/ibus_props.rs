@@ -55,87 +55,20 @@ const PROP_TYPE_SEPARATOR: u32 = 4;
 const PROP_STATE_UNCHECKED: u32 = 0;
 pub(crate) const PROP_STATE_CHECKED: u32 = 1;
 
+#[cfg(test)]
+use crate::shared::method_menu::BUILTIN_METHOD_ITEMS;
 /// Property key of the "Cấu hình" (settings) item, echoed back in
 /// `PropertyActivate`. Distinct from any method id so the engine opens the
 /// config window instead of switching method.
-pub(crate) const CONFIG_KEY: &str = "config";
+pub(crate) use crate::shared::method_menu::CONFIG_KEY;
 
-/// Built-in methods surfaced as radios, in display order. `key` doubles as
-/// the engine method id (see `method_sync::KNOWN_METHODS`) and the property
-/// name libibus echoes back in `PropertyActivate`, so a click maps straight
-/// to a method without a lookup table. "English" is the passthrough method
-/// (engine goes silent, OS input source untouched — the tray's "English"
-/// item and this radio are the same Store-B state); it sits FIRST to mirror
-/// the tray menu's order, so the two surfaces read identically.
-const BUILTIN_METHOD_ITEMS: [(&str, &str); 4] = [
-    ("english", "English"),
-    ("telex", "Telex"),
-    ("vni", "VNI"),
-    ("nom", "Chữ Nôm"),
-];
-
-/// The full `(key, label)` radio list: built-ins first, then every custom
-/// keyboard TOML in the custom dir, in directory scan order — the same order
-/// the tray's registry scan produces, so the two surfaces read identically.
-///
-/// The key is the TOML's FILENAME STEM, not `metadata.id`: the engine loads
-/// `keyboards/{key}.toml` by stem (`KeyboardManager::set_method`), so a stem
-/// key is the only one guaranteed to round-trip. Labels come from
-/// `metadata.name` (a TOML that fails to parse is excluded — its radio could
-/// only ever fall back to English).
-///
-/// Rebuilt on every publish, but note the GNOME first-register freeze
-/// (module docs): the panel renders the radio SET it saw on the engine's
-/// first `RegisterProperties`, so a custom TOML added mid-session appears
-/// only after an engine restart (`ibus restart`). Matches Windows, which has
-/// no keyboard hot-reload either.
+/// The radio list (`shared::method_menu`). Rebuilt on every
+/// publish, but note the GNOME first-register freeze (module docs): the panel
+/// renders the radio SET it saw on the engine's first `RegisterProperties`,
+/// so a custom TOML added mid-session appears only after an engine restart
+/// (`ibus restart`).
 fn method_items() -> Vec<(String, String)> {
-    method_items_in(&buttre_core::vietnamese::get_custom_dir())
-}
-
-/// [`method_items`] against an explicit custom dir (testable core —
-/// `get_custom_dir()` is ambient: exe dir / cwd / XDG data dir).
-fn method_items_in(custom_dir: &std::path::Path) -> Vec<(String, String)> {
-    let mut items: Vec<(String, String)> = BUILTIN_METHOD_ITEMS
-        .iter()
-        .map(|(key, label)| (key.to_string(), label.to_string()))
-        .collect();
-    let Ok(entries) = std::fs::read_dir(custom_dir) else {
-        return items; // no custom dir — built-ins only
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if BUILTIN_METHOD_ITEMS.iter().any(|(key, _)| *key == stem) {
-            continue; // built-in override TOMLs are not separate methods
-        }
-        if stem == CONFIG_KEY || stem == "-" {
-            // A radio named "config" would be swallowed by the settings
-            // launcher's PropertyActivate branch; "-" is the separator key.
-            tracing::warn!(
-                "ibus_props: keyboard filename {stem:?} collides with a menu key, skipping"
-            );
-            continue;
-        }
-        if stem != stem.to_lowercase() {
-            // method_sync lowercases on read — an uppercase stem could be
-            // rendered but never round-trip. Same rule as is_valid_custom_id.
-            tracing::warn!("ibus_props: keyboard filename {stem:?} must be lowercase, skipping");
-            continue;
-        }
-        match buttre_core::Config::load(path.to_str().unwrap_or_default()) {
-            Ok(config) => items.push((stem.to_string(), config.metadata.name.clone())),
-            Err(e) => {
-                tracing::debug!("ibus_props: skipping unloadable keyboard {path:?}: {e}");
-            }
-        }
-    }
-    items
+    crate::shared::method_menu::method_items()
 }
 
 /// One `IBusProperty`. Wire: `(sa{sv} s u v s v b b u v v)` = name, attachments,
@@ -420,43 +353,6 @@ language = \"cja\"
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    /// Customs append after the built-ins with the stem as key and
-    /// `metadata.name` as label; unparseable TOMLs and built-in-stem
-    /// overrides are excluded.
-    #[test]
-    fn method_items_appends_valid_customs_after_builtins() {
-        let dir = tmp_custom_dir("scan");
-        std::fs::write(dir.join("cham.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
-        std::fs::write(dir.join("broken.toml"), "not = valid = toml").unwrap();
-        std::fs::write(dir.join("telex.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
-        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
-        // Colliding / non-lowercase stems are excluded (see method_items_in).
-        std::fs::write(dir.join("config.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
-        std::fs::write(dir.join("Upper.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
-
-        let items = method_items_in(&dir);
-        let builtin_count = BUILTIN_METHOD_ITEMS.len();
-        assert_eq!(
-            items.len(),
-            builtin_count + 1,
-            "exactly one custom admitted"
-        );
-        for (i, (key, _)) in BUILTIN_METHOD_ITEMS.iter().enumerate() {
-            assert_eq!(items[i].0, *key, "built-ins keep their order");
-        }
-        assert_eq!(
-            items[builtin_count],
-            ("cham".to_string(), "Cham Keyboard".to_string())
-        );
-    }
-
-    /// Missing custom dir degrades to built-ins only — never an error.
-    #[test]
-    fn method_items_without_custom_dir_is_builtins_only() {
-        let items = method_items_in(std::path::Path::new("/nonexistent/keyboards"));
-        assert_eq!(items.len(), BUILTIN_METHOD_ITEMS.len());
     }
 
     /// A checked activation for a custom key switches only when its TOML

@@ -1,3 +1,5 @@
 "CFBundleName" = "buttre";
 "org.dxsl.inputmethod.buttre" = "buttre Tiếng Việt";
-"org.dxsl.inputmethod.buttre.vietnamese" = "buttre Tiếng Việt";
+"org.dxsl.inputmethod.buttre.telex" = "buttre Telex";
+"org.dxsl.inputmethod.buttre.vni" = "buttre VNI";
+"org.dxsl.inputmethod.buttre.nom" = "buttre Chữ Nôm";

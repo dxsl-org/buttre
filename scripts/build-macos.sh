@@ -11,7 +11,7 @@ echo "🍎 Building buttre macOS dylib..."
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-cargo build -p buttre-platform --release
+cargo build -p buttre-platform --lib --release
 
 DYLIB="$PROJECT_ROOT/target/release/libbuttre_platform.dylib"
 if [ ! -f "$DYLIB" ]; then

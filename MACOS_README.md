@@ -46,10 +46,13 @@ ditto target/macos-app/Buttre.app "$HOME/Library/Input Methods/Buttre.app"
 
 Đăng xuất rồi đăng nhập lại. Sau đó mở:
 
-`System Settings → Keyboard → Text Input → Edit → (+) → Vietnamese → buttre`
+`System Settings → Keyboard → Text Input → Edit → (+) → Vietnamese`
 
-Không cần cấp quyền Accessibility. Chọn buttre ở menu Input Sources rồi thử
-`vieejt` → `việt`.
+rồi thêm các mode muốn dùng: **buttre Telex**, **buttre VNI**,
+**buttre Chữ Nôm**, và từng keyboard dân tộc (buttre Chăm, buttre Khmer, …).
+Mỗi mode là một input source riêng trong menu bàn phím, đổi bằng click hoặc
+Ctrl+Space; muốn gõ không dấu thì chọn ABC. Không cần cấp quyền
+Accessibility. Thử `vieejt` → `việt`.
 
 ## Không thấy buttre trong Input Sources
 

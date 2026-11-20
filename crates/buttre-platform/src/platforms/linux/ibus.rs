@@ -206,47 +206,15 @@ impl ButtreEngine {
             .unwrap_or_else(|| "telex".to_string())
     }
 
-    /// Write the panel's COMMAND into the settings store — `Settings::enabled`,
-    /// plus the picked `input_method` when given — and the shared mirror, so
-    /// every engine instance AND every later session converge (with no tray
-    /// on this platform, nothing else mirrors a panel switch into
-    /// settings.toml, and a later Wayland/Windows session boots from it).
-    /// ADR-0003: many writers, one store, no reflection; `method` is never
-    /// `"english"` here (invariant 1 — the English radio is intercepted
-    /// before this). The settings watcher re-reads our own write — a no-op
-    /// by value. Blocking file I/O, but click-frequency only: the same cost
-    /// class as the `write_method` this handler already performs.
+    /// Apply the panel's COMMAND: update the in-process mirror, then record it
+    /// in the settings store (`method_menu::persist_command`). ADR-0003: many
+    /// writers, one store, no reflection; `method` is never `"english"` here
+    /// (invariant 1 — the English radio is intercepted before this).
     fn command_state(&self, on: bool, method: Option<&str>) {
         if let Some(flag) = &self.enabled {
             flag.store(on, std::sync::atomic::Ordering::Relaxed);
         }
-        // Strict read: a settings.toml that exists but does not parse must
-        // refuse this write — load-modify-save over the defaults `load()`
-        // degrades to would rewrite the user's whole file over one typo.
-        // (`Ok(None)` = fresh install, no file yet: proceed and MATERIALIZE
-        // it — the engine treats "no file" as enabled, see
-        // `macro_sync::effective_enabled`, so an English-radio click whose
-        // value equals the unsaved default must still write or the
-        // fresh-install rule would immediately overrule the user's click.)
-        let (mut settings, file_exists) = match buttre_core::state::Settings::read_strict() {
-            Ok(Some(s)) => (s, true),
-            Ok(None) => (buttre_core::state::Settings::default(), false),
-            Err(e) => {
-                tracing::warn!("command_state(on={on}, {method:?}): {e:?} — không ghi");
-                return;
-            }
-        };
-        let method_changed = method.is_some_and(|m| settings.input_method != m);
-        if file_exists && settings.enabled == on && !method_changed {
-            return;
-        }
-        settings.enabled = on;
-        if let Some(m) = method {
-            settings.input_method = m.to_string();
-        }
-        if let Err(e) = settings.save() {
-            tracing::warn!("command_state(on={on}, {method:?}): settings.toml save failed: {e:?}");
-        }
+        crate::shared::method_menu::persist_command(on, method);
     }
 
     /// Push the current method's radio states to the panel: a full

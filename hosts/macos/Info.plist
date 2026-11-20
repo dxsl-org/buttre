@@ -27,7 +27,7 @@
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>tsInputMethodIconFileKey</key>
-    <string>vietnamese.png</string>
+    <string>vietnamese.tiff</string>
     <key>CFBundleShortVersionString</key>
     <string>0.7.7</string>
     <key>CFBundleVersion</key>
@@ -56,28 +56,31 @@
     <key>InputMethodServerDelegateClass</key>
     <string>ButtreInputController</string>
 
-    <!-- Input mode(s). One Vietnamese mode; the engine's Telex/VNI/Nôm switch
-         is internal (tray/config), not separate TIS modes. -->
+    <!-- Input modes = methods: each is its own input source in the OS input
+         menu (switch with the menu / Ctrl+Space; "off" = pick ABC). The
+         controller maps "<bundle id>.<method>" to the engine method.
+         build_app.sh appends one mode per bundled keyboards/*.toml by copying
+         the telex entry, so keep telex the template. -->
     <key>ComponentInputModeDict</key>
     <dict>
         <key>tsInputModeListKey</key>
         <dict>
-            <key>org.dxsl.inputmethod.buttre.vietnamese</key>
+            <key>org.dxsl.inputmethod.buttre.telex</key>
             <dict>
                 <key>TISIntendedLanguage</key>
                 <string>vi</string>
                 <key>TISInputSourceID</key>
-                <string>org.dxsl.inputmethod.buttre.vietnamese</string>
+                <string>org.dxsl.inputmethod.buttre.telex</string>
                 <key>tsInputModeCharacterRepertoireKey</key>
                 <array>
                     <string>Latn</string>
                 </array>
                 <key>tsInputModeAlternateMenuIconFileKey</key>
-                <string>vietnamese.png</string>
+                <string>telex.tiff</string>
                 <key>tsInputModeMenuIconFileKey</key>
-                <string>vietnamese.png</string>
+                <string>telex.tiff</string>
                 <key>tsInputModePaletteIconFileKey</key>
-                <string>vietnamese.png</string>
+                <string>telex.tiff</string>
                 <key>tsInputModeDefaultStateKey</key>
                 <true/>
                 <key>tsInputModePrimaryInScriptKey</key>
@@ -87,10 +90,62 @@
                 <key>tsInputModeScriptKey</key>
                 <string>smUnicodeScript</string>
             </dict>
+            <key>org.dxsl.inputmethod.buttre.vni</key>
+            <dict>
+                <key>TISIntendedLanguage</key>
+                <string>vi</string>
+                <key>TISInputSourceID</key>
+                <string>org.dxsl.inputmethod.buttre.vni</string>
+                <key>tsInputModeCharacterRepertoireKey</key>
+                <array>
+                    <string>Latn</string>
+                </array>
+                <key>tsInputModeAlternateMenuIconFileKey</key>
+                <string>vni.tiff</string>
+                <key>tsInputModeMenuIconFileKey</key>
+                <string>vni.tiff</string>
+                <key>tsInputModePaletteIconFileKey</key>
+                <string>vni.tiff</string>
+                <key>tsInputModeDefaultStateKey</key>
+                <false/>
+                <key>tsInputModePrimaryInScriptKey</key>
+                <false/>
+                <key>tsInputModeIsVisibleKey</key>
+                <true/>
+                <key>tsInputModeScriptKey</key>
+                <string>smUnicodeScript</string>
+            </dict>
+            <key>org.dxsl.inputmethod.buttre.nom</key>
+            <dict>
+                <key>TISIntendedLanguage</key>
+                <string>vi</string>
+                <key>TISInputSourceID</key>
+                <string>org.dxsl.inputmethod.buttre.nom</string>
+                <key>tsInputModeCharacterRepertoireKey</key>
+                <array>
+                    <string>Latn</string>
+                </array>
+                <key>tsInputModeAlternateMenuIconFileKey</key>
+                <string>nom.tiff</string>
+                <key>tsInputModeMenuIconFileKey</key>
+                <string>nom.tiff</string>
+                <key>tsInputModePaletteIconFileKey</key>
+                <string>nom.tiff</string>
+                <key>tsInputModeDefaultStateKey</key>
+                <false/>
+                <key>tsInputModePrimaryInScriptKey</key>
+                <false/>
+                <key>tsInputModeIsVisibleKey</key>
+                <true/>
+                <key>tsInputModeScriptKey</key>
+                <string>smUnicodeScript</string>
+            </dict>
         </dict>
         <key>tsVisibleInputModeOrderedArrayKey</key>
         <array>
-            <string>org.dxsl.inputmethod.buttre.vietnamese</string>
+            <string>org.dxsl.inputmethod.buttre.telex</string>
+            <string>org.dxsl.inputmethod.buttre.vni</string>
+            <string>org.dxsl.inputmethod.buttre.nom</string>
         </array>
     </dict>
 </dict>

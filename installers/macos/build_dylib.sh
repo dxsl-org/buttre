@@ -16,10 +16,10 @@ rustup target add aarch64-apple-darwin
 rustup target add x86_64-apple-darwin
 
 echo "==> Building arm64 dylib..."
-cargo build -p buttre-platform --release --target aarch64-apple-darwin
+cargo build -p buttre-platform --lib --release --target aarch64-apple-darwin
 
 echo "==> Building x86_64 dylib..."
-cargo build -p buttre-platform --release --target x86_64-apple-darwin
+cargo build -p buttre-platform --lib --release --target x86_64-apple-darwin
 
 STAGING="target/macos/buttre-${VERSION}-macos-universal"
 rm -rf "$STAGING"

@@ -222,7 +222,12 @@ impl MethodState {
         *self.change_notify.lock().unwrap() = Some(Box::new(notify));
     }
 
-    fn set(&self, method: String) {
+    /// Adopt `method` (no-op when unchanged). The watcher calls this on file
+    /// changes; a host that just wrote the method file itself calls it too, so
+    /// the watcher's later read of that same write is a no-op instead of a
+    /// second generation bump (which would rebuild — and wipe — a word typed
+    /// in between).
+    pub(crate) fn set(&self, method: String) {
         let mut current = self.method.lock().unwrap();
         if *current != method {
             tracing::info!("method_sync: method changed {} -> {}", *current, method);

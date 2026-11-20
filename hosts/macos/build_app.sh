@@ -38,14 +38,17 @@ if [ -z "$SIGNING_IDENTITY" ]; then
 fi
 SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 
-echo "==> Building universal engine dylib..."
+echo "==> Building universal engine dylib + settings helper..."
 rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
-cargo build -p buttre-platform --release --target aarch64-apple-darwin
-cargo build -p buttre-platform --release --target x86_64-apple-darwin
+# `--bin buttre` is the settings helper (`buttre --config`, the Slint window)
+# that the input menu's "Cấu hình buttre…" item spawns.
+cargo build -p buttre-platform --lib --bin buttre --release --target aarch64-apple-darwin
+cargo build -p buttre-platform --lib --bin buttre --release --target x86_64-apple-darwin
 
 echo "==> Assembling bundle skeleton..."
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" \
+    "$APP/Contents/Helpers"
 cp "$HOST_DIR/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BUNDLE_VERSION" \
     "$APP/Contents/Info.plist"
@@ -82,12 +85,21 @@ lipo -create \
 install_name_tool -id "@rpath/libbuttre_platform.dylib" \
     "$APP/Contents/Frameworks/libbuttre_platform.dylib"
 
+echo "==> Universal settings helper via lipo..."
+# Contents/Helpers, NOT Contents/MacOS: an executable in MacOS/ takes the
+# bundle's Info.plist (LSBackgroundOnly) as its own, and a background-only
+# process cannot bring the settings window to the front.
+lipo -create \
+    "target/aarch64-apple-darwin/release/buttre" \
+    "target/x86_64-apple-darwin/release/buttre" \
+    -output "$APP/Contents/Helpers/buttre-config"
+
 echo "==> Compiling the Objective-C host (universal)..."
 clang -ObjC -fobjc-arc -O2 \
     -arch arm64 -arch x86_64 \
     -mmacosx-version-min=11.0 \
     -I include \
-    -framework Cocoa -framework InputMethodKit \
+    -framework Cocoa -framework InputMethodKit -framework Carbon \
     -rpath @executable_path/../Frameworks \
     -L "$APP/Contents/Frameworks" -lbuttre_platform \
     "$HOST_DIR/src/main.m" "$HOST_DIR/src/ButtreInputController.m" \
@@ -102,17 +114,86 @@ for NOM_SRC in "buttre_nom.db" "crates/buttre-core/resources/nom/buttre_nom.db";
     if [ -f "$NOM_SRC" ]; then cp "$NOM_SRC" "$APP/Contents/Resources/"; break; fi
 done
 
+echo "==> Rendering input-menu icons..."
+# The icon PNGs are 128px tagged at ~23 dpi (≈390pt), so the menu bar scaled
+# them up and squashed them. The input menu wants a 16pt image: build a TIFF
+# with a 16px (1x) and a 32px @144dpi (2x) rep. `tiffutil -cat` keeps each
+# rep's dpi (`-cathidpicheck` resets the 2x rep to 72dpi = 32pt).
+ICON_TMP="$(mktemp -d)"
+trap 'rm -rf "$ICON_TMP"' EXIT
+make_menu_icon() {  # <source png> <output name without extension>
+    sips -s format tiff -z 16 16 "$1" --out "$ICON_TMP/1x.tiff" >/dev/null
+    sips -s dpiWidth 72 -s dpiHeight 72 "$ICON_TMP/1x.tiff" >/dev/null
+    sips -s format tiff -z 32 32 "$1" --out "$ICON_TMP/2x.tiff" >/dev/null
+    sips -s dpiWidth 144 -s dpiHeight 144 "$ICON_TMP/2x.tiff" >/dev/null
+    tiffutil -cat "$ICON_TMP/1x.tiff" "$ICON_TMP/2x.tiff" \
+        -out "$APP/Contents/Resources/$2.tiff" >/dev/null
+}
+# Same icon per method as the Windows/Linux tray (shared/ui/tray.rs).
+for ICON in vietnamese telex vni nom custom; do
+    make_menu_icon "crates/buttre-platform/icons/$ICON.png" "$ICON"
+done
+
+echo "==> Declaring one input mode per bundled keyboard..."
+# Every method is its own input source (see Info.plist): copy the telex mode
+# as the template, retarget its ids, and name it from the TOML's
+# metadata.name. Stems follow the engine's method-id rules (lowercase, not a
+# built-in) — anything else could be shown but never selected.
+PLIST="$APP/Contents/Info.plist"
+MODES=":ComponentInputModeDict:tsInputModeListKey"
+TEMPLATE="$MODES:$BUNDLE_IDENTIFIER.telex"
+for TOML in "$APP/Contents/Resources/keyboards/"*.toml; do
+    [ -f "$TOML" ] || continue
+    STEM="$(basename "$TOML" .toml)"
+    case "$STEM" in
+        telex|vni|nom|english|config|-) continue ;;
+    esac
+    if [ "$STEM" != "$(printf '%s' "$STEM" | tr '[:upper:]' '[:lower:]')" ]; then
+        echo "  skipping $STEM.toml: keyboard filenames must be lowercase" >&2
+        continue
+    fi
+    NAME="$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$TOML" | head -n 1)"
+    [ -n "$NAME" ] || NAME="$STEM"
+    MODE="$BUNDLE_IDENTIFIER.$STEM"
+    # Like the tray: the keyboard's own metadata.icon (a file next to its
+    # TOML) when it ships one, else the generic custom-method icon.
+    ICON_FILE="$(sed -n 's/^icon[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$TOML" | head -n 1)"
+    ICON="custom.tiff"
+    if [ -n "$ICON_FILE" ] && [ -f "keyboards/$ICON_FILE" ]; then
+        make_menu_icon "keyboards/$ICON_FILE" "keyboard-$STEM"
+        ICON="keyboard-$STEM.tiff"
+    fi
+    /usr/libexec/PlistBuddy -c "Copy $TEMPLATE $MODES:$MODE" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set $MODES:$MODE:TISInputSourceID $MODE" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set $MODES:$MODE:tsInputModeDefaultStateKey false" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set $MODES:$MODE:tsInputModePrimaryInScriptKey false" "$PLIST"
+    for KEY in tsInputModeMenuIconFileKey tsInputModeAlternateMenuIconFileKey \
+        tsInputModePaletteIconFileKey; do
+        /usr/libexec/PlistBuddy -c "Set $MODES:$MODE:$KEY $ICON" "$PLIST"
+    done
+    /usr/libexec/PlistBuddy -c \
+        "Add :ComponentInputModeDict:tsVisibleInputModeOrderedArrayKey: string $MODE" "$PLIST"
+    for STRINGS in "$APP/Contents/Resources/"*.lproj/InfoPlist.strings; do
+        printf '"%s" = "buttre %s";\n' "$MODE" "${NAME//\"/\\\"}" >> "$STRINGS"
+    done
+    echo "  $MODE = buttre $NAME"
+done
+plutil -lint "$PLIST" "$APP/Contents/Resources/"*.lproj/InfoPlist.strings
+
 if [ "$SIGNING_IDENTITY" = "-" ]; then
     echo "==> Ad-hoc signing (local development only)..."
     echo "WARNING: macOS may omit ad-hoc builds from Input Sources." >&2
     echo "Set MACOS_SIGNING_IDENTITY to a Developer ID Application identity." >&2
     codesign --force --sign - \
         "$APP/Contents/Frameworks/libbuttre_platform.dylib"
+    codesign --force --sign - --options runtime "$APP/Contents/Helpers/buttre-config"
     codesign --force --sign - --options runtime "$APP"
 else
     echo "==> Signing with $SIGNING_IDENTITY..."
     codesign --force --timestamp --sign "$SIGNING_IDENTITY" \
         "$APP/Contents/Frameworks/libbuttre_platform.dylib"
+    codesign --force --timestamp --sign "$SIGNING_IDENTITY" \
+        --options runtime "$APP/Contents/Helpers/buttre-config"
     codesign --force --timestamp --sign "$SIGNING_IDENTITY" \
         --options runtime "$APP"
     if [ -z "$NOTARY_PROFILE" ]; then
@@ -123,6 +204,7 @@ fi
 
 echo "==> Verifying..."
 lipo -info "$APP/Contents/MacOS/buttre"
+lipo -info "$APP/Contents/Helpers/buttre-config"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 ARCHIVE="$BUILD_DIR/buttre-${VERSION}-macos.zip"

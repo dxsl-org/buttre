@@ -5,6 +5,7 @@
 #![cfg(target_os = "macos")]
 
 pub mod ffi;
+mod logging;
 
 use crate::PlatformBackend;
 use anyhow::Result;
@@ -48,7 +49,8 @@ impl StateObserver for MacOSBackend {
 
 // Re-export FFI functions for C
 pub use ffi::{
-    buttre_engine_flush, buttre_engine_free, buttre_engine_new, buttre_engine_process_backspace,
-    buttre_engine_process_key, buttre_engine_reset, buttre_engine_set_enabled,
-    buttre_engine_set_method, ButtreKeyResult,
+    buttre_engine_candidate_at, buttre_engine_candidate_count, buttre_engine_flush,
+    buttre_engine_free, buttre_engine_new, buttre_engine_process_backspace,
+    buttre_engine_process_char, buttre_engine_reset, buttre_engine_select_candidate,
+    buttre_engine_select_method, ButtreKeyResult,
 };
