@@ -28,18 +28,22 @@ hosts/macos/
 `build_app.sh` also bundles the Rust `buttre` binary as
 `Contents/Helpers/buttre-config` — the settings window (`--config`).
 
-The controller is thin: the Rust engine (FFI v3) does all composition; the
+The controller is thin: the Rust engine (FFI v4) does all composition; the
 controller feeds it the layout-translated character (`event.characters`, so
 Dvorak/AZERTY/Colemak work), applies the returned
-`ButtreKeyResult { handled, commit, preedit, candidates_changed }`, drives the
-shared `IMKCandidates` panel for Nôm, and reports the selected input mode.
+`ButtreKeyResult { handled, commit, preedit, candidates_changed, replaced }`,
+drives the shared `IMKCandidates` panel for Nôm, and reports the selected
+input mode. Before every key it reports whether the client can edit its own
+text (`buttre_engine_sync_client`): with "Gõ thẳng không gạch chân" on, such
+clients get commit-as-you-go edits (`replaced` → verified
+`insertText:replacementRange:`) instead of marked text.
 
 ## Build (macOS only)
 
 ```bash
 # From the repo root, on a Mac (or the macos-latest CI runner):
-bash hosts/macos/build_app.sh 0.7.6
-# → target/macos-app/Buttre.app  (+ buttre-0.7.6-macos.zip)
+bash hosts/macos/build_app.sh 0.8.0-beta
+# → target/macos-app/Buttre.app  (+ buttre-0.8.0-beta-macos.zip)
 ```
 
 The script automatically selects a Developer ID Application identity. For a
@@ -48,7 +52,7 @@ distributable Input Source, configure a `notarytool` keychain profile and set
 
 ```bash
 xcrun notarytool store-credentials buttre-notary
-MACOS_NOTARY_PROFILE=buttre-notary bash hosts/macos/build_app.sh 0.7.6
+MACOS_NOTARY_PROFILE=buttre-notary bash hosts/macos/build_app.sh 0.8.0-beta
 ```
 
 Requires Xcode command-line tools and the Rust aarch64/x86_64 Apple targets
@@ -88,6 +92,8 @@ the engine lazily applies:
 - **shorthand/gõ tắt** (`macros.toml`) + **strict spelling** + **học thông
   minh** (learning collects at word commits, saves via the merged-write
   thread — many-writer safe against the tray/other sessions)
+- **gõ thẳng không gạch chân** (`use_preedit = false`) and **xóa lùi theo
+  phím thô** (`backspace_mode = "raw"`)
 - **resources**: `Contents/Resources` (Nôm dictionary, keyboard TOMLs) is
   derived from the executable path — the default exe-dir search never sees it
 - **logs**: `~/Library/Logs/buttre/imk.log` (WARN; create
@@ -104,15 +110,16 @@ metadata — log out and back in after installing.
 
 ## Status
 
-🚧 **Awaiting real-Mac verification.** Compiles + bundles on CI
-(`macos-imkit` job); the Rust wiring above is exercised by the shared
-bridge/sync tests on Linux/Windows. IMKit runtime behavior has no headless
-harness — verify by hand below.
+Built, installed and used on a real Mac (Intel, macOS 13) during 0.8.0-beta.
+Verified by hand there: checklist items 1, 8, 9 and basic Telex typing.
+Not yet re-verified on a real Mac: items 2–7 (Nôm panel, tri-surface sync,
+learning, password fields, per-app smoke beyond TextEdit/Safari/Chrome/
+Terminal), raw-backspace in a real client, Apple Silicon. CI builds the
+bundle (`macos-imkit` job); IMKit runtime has no headless harness.
 
 ## Verification checklist (real Mac)
 
-Cầm checklist này khi sang máy Mac — mọi thứ compile sẵn, việc còn lại là
-kiểm chứng runtime:
+Mọi thứ build sẵn bằng `build_app.sh`; việc còn lại là kiểm chứng runtime:
 
 1. **Cài & đăng ký**: build + install như trên; buttre xuất hiện trong
    Input Sources sau logout/login; KHÔNG có prompt Accessibility.

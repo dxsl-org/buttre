@@ -27,7 +27,7 @@ xattr -dr com.apple.quarantine keyboards/
 
 ## FFI surface
 
-The dylib exports the C functions declared in `buttre_platform.h` (FFI v3,
+The dylib exports the C functions declared in `buttre_platform.h` (FFI v4,
 implemented in `crates/buttre-platform/src/platforms/macos/ffi.rs`):
 
 | Function | Description |
@@ -37,7 +37,8 @@ implemented in `crates/buttre-platform/src/platforms/macos/ffi.rs`):
 | `buttre_engine_process_backspace(id)` | Backspace |
 | `buttre_engine_flush(id)` / `buttre_engine_reset(id)` | Commit / discard the pending word |
 | `buttre_engine_candidate_count/_at/select_candidate` | Nôm candidate list |
-| `buttre_engine_select_method(id, method)` | Report the selected input mode (`telex`/`vni`/`nom`/keyboard stem), persisted |
+| `buttre_engine_select_method(id, method)` | Report the selected input mode (`telex`/`vni`/`nom`/keyboard stem), persisted. `unsafe`: `method` must be a NUL-terminated string |
+| `buttre_engine_sync_client(id, can_replace)` | Call before every key: picks preedit vs commit-as-you-go ("Gõ thẳng"); results then carry `replaced` |
 
 ## End-user installation
 

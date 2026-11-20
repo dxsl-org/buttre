@@ -85,8 +85,10 @@ Nếu ZIP có tên `macos-universal` và chỉ chứa
 
 IMKit định tuyến phím tới `ButtreInputController`; controller chuyển sự kiện
 qua C FFI tới `buttre-engine`, rồi áp dụng preedit/commit bằng
-`setMarkedText` và `insertText`. Không dùng `CGEventTap`, vì vậy buttre không
-theo dõi phím toàn cục và không cần Accessibility.
+`setMarkedText` và `insertText` (chế độ "Gõ thẳng không gạch chân": sửa chữ
+đã chèn bằng `insertText:replacementRange:` sau khi đọc lại đúng đoạn chữ
+trước con trỏ). Không dùng `CGEventTap`, vì vậy buttre không theo dõi phím
+toàn cục và không cần Accessibility.
 
 Mã liên quan:
 
