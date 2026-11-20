@@ -151,6 +151,7 @@ impl ButtreEngine {
         state: Arc<MethodState>,
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
+        raw_backspace: Arc<std::sync::atomic::AtomicBool>,
         use_preedit: Arc<std::sync::atomic::AtomicBool>,
         enabled: Arc<std::sync::atomic::AtomicBool>,
         learning: LearningWiring,
@@ -159,6 +160,7 @@ impl ButtreEngine {
     ) -> Self {
         let mut bridge = EngineBridge::new_with_macros(&state.method(), macros);
         bridge.set_strict_flag(strict);
+        bridge.set_raw_backspace_flag(raw_backspace);
         // Start on the persisted on/off state — without this a keystroke
         // would have to arrive before a saved "off" took effect.
         if !enabled.load(std::sync::atomic::Ordering::Relaxed) {

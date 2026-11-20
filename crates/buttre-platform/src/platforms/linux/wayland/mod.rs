@@ -122,6 +122,7 @@ impl ImeState {
         method_state: Arc<MethodState>,
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
+        raw_backspace: Arc<std::sync::atomic::AtomicBool>,
         enabled: Arc<std::sync::atomic::AtomicBool>,
         learning: LearningWiring,
     ) -> Self {
@@ -129,6 +130,7 @@ impl ImeState {
         let seen_generation = method_state.generation();
         let mut bridge = EngineBridge::new_with_macros(&method, macros);
         bridge.set_strict_flag(strict);
+        bridge.set_raw_backspace_flag(raw_backspace);
         // Start on the persisted on/off state, not always-on.
         if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
             bridge.set_enabled(false);
@@ -282,6 +284,7 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     // this function later returns `Unavailable`, only the watcher does.
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
+    let raw_backspace = macro_sync::load_initial_raw_backspace();
     // Wayland stays on the preedit model for now; it loads the flag only so the
     // shared settings watcher keeps its signature, and the no-preedit model can
     // be wired to this backend later without touching macro_sync again.
@@ -295,6 +298,7 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
         method_state.clone(),
         macros.clone(),
         strict.clone(),
+        raw_backspace.clone(),
         enabled.clone(),
         learning.clone(),
     );
@@ -328,7 +332,7 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     // method watcher and the shorthand/gõ tắt watcher (no IBus fallback will
     // run in this process, so neither would be orphaned by an early return).
     method_sync::spawn_watcher(method_state);
-    macro_sync::spawn_watcher(macros, strict, use_preedit, enabled);
+    macro_sync::spawn_watcher(macros, strict, use_preedit, enabled, raw_backspace);
     learning_sync::spawn_writer(learning_rx);
     learning_sync::spawn_watcher(&learning);
 

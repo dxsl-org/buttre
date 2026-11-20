@@ -1,4 +1,4 @@
-//! buttre macOS — C ABI for the IMKit host (FFI v3).
+//! buttre macOS — C ABI for the IMKit host (FFI v4).
 //!
 //! **Tests**: `crates/buttre-platform/tests/platform_macos_tests.rs` (ABI
 //! surface) and `tests/shared_engine_bridge_tests.rs` (composition
@@ -9,6 +9,9 @@
 //! [`buttre_engine_select_method`] receives. The host maps [`ButtreKeyResult`]
 //! onto IMKit directly:
 //!
+//! - `replaced` non-null → commit-as-you-go ("Gõ thẳng không gạch chân"):
+//!   `insertText(commit ?? "", replacementRange: <replaced, just before the
+//!   caret>)`, after checking the client really holds `replaced` there.
 //! - `commit` non-null  → `insertText(commit)` (before updating the preedit)
 //! - `preedit` non-null → `setMarkedText(preedit)`; empty string clears it.
 //!   NULL means "marked text unchanged — do not touch the client": with no
@@ -26,6 +29,9 @@
 //! `preedit` became nullable (above); Nôm candidates are exposed;
 //! `set_method`/`set_enabled` are replaced by
 //! [`buttre_engine_select_method`].
+//!
+//! v3 → v4 (breaking, same sole consumer): `ButtreKeyResult.replaced` and
+//! [`buttre_engine_sync_client`] add the commit-as-you-go model.
 //!
 //! Method = input mode: every method (Telex, VNI, Chữ Nôm, each bundled
 //! keyboard) is its own macOS input source (`ComponentInputModeDict`), so
@@ -72,6 +78,11 @@ struct HostSync {
     method_state: Arc<MethodState>,
     macros: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
+    /// `Settings::use_preedit` — consulted per key by
+    /// [`buttre_engine_sync_client`].
+    use_preedit: Arc<AtomicBool>,
+    /// `Settings::backspace_mode == "raw"` (`EngineBridge::set_raw_backspace_flag`).
+    raw_backspace: Arc<AtomicBool>,
     learning: LearningWiring,
 }
 
@@ -105,11 +116,18 @@ fn host_sync() -> &'static HostSync {
 
         let macros = macro_sync::load_initial();
         let strict = macro_sync::load_initial_strict();
-        // Loaded for the shared watcher signature only: IMKit is a preedit
-        // (marked-text) host, and on/off is the OS input-source choice.
         let use_preedit = macro_sync::load_initial_use_preedit();
+        let raw_backspace = macro_sync::load_initial_raw_backspace();
+        // Loaded for the shared watcher signature only: on/off is the OS
+        // input-source choice here (see the module doc).
         let enabled = macro_sync::load_initial_enabled();
-        macro_sync::spawn_watcher(macros.clone(), strict.clone(), use_preedit, enabled);
+        macro_sync::spawn_watcher(
+            macros.clone(),
+            strict.clone(),
+            use_preedit.clone(),
+            enabled,
+            raw_backspace.clone(),
+        );
 
         let (learning, learning_rx) = learning_sync::load_initial();
         learning_sync::spawn_writer(learning_rx);
@@ -124,6 +142,8 @@ fn host_sync() -> &'static HostSync {
             method_state,
             macros,
             strict,
+            use_preedit,
+            raw_backspace,
             learning,
         }
     })
@@ -147,6 +167,11 @@ pub struct ButtreKeyResult {
     pub preedit: *const c_char,
     /// The candidate list changed (shown, replaced or hidden) — re-read it.
     pub candidates_changed: bool,
+    /// Commit-as-you-go only: text immediately before the caret that
+    /// `commit` (null = nothing) REPLACES; null = plain insert at the caret.
+    /// The host must check the client still holds exactly this text there
+    /// before replacing — see the header.
+    pub replaced: *const c_char,
 }
 
 impl ButtreKeyResult {
@@ -157,6 +182,7 @@ impl ButtreKeyResult {
             commit: std::ptr::null(),
             preedit: std::ptr::null(),
             candidates_changed: false,
+            replaced: std::ptr::null(),
         }
     }
 }
@@ -174,6 +200,7 @@ struct EngineState {
     /// on every call, hence the "valid until next call" contract.
     commit_c: Option<CString>,
     preedit_c: Option<CString>,
+    replaced_c: Option<CString>,
     /// Display strings of the live candidate list (empty = none showing).
     candidates_c: Vec<CString>,
 }
@@ -222,24 +249,57 @@ fn with_engine<R>(engine_id: u64, f: impl FnOnce(&mut EngineState) -> R) -> Opti
 /// Run `f` on a live engine and marshal its outcome; dead handles pass.
 fn engine_call(engine_id: u64, f: impl FnOnce(&mut EngineState) -> KeyOutcome) -> ButtreKeyResult {
     with_engine(engine_id, |state| {
+        // Commit-as-you-go: snapshot what the engine believes is on screen,
+        // so the outcome's deletion can be handed to IMKit by content (a
+        // replacement range the host verifies) instead of a blind count.
+        let before = (!state.bridge.composes()).then(|| state.bridge.display().to_owned());
         let outcome = f(state);
-        marshal(state, outcome)
+        marshal(state, outcome, before.as_deref())
     })
     .unwrap_or(ButtreKeyResult::pass())
 }
 
-/// Marshal a bridge outcome into the engine's C storage.
-fn marshal(state: &mut EngineState, outcome: KeyOutcome) -> ButtreKeyResult {
+/// Drop the last `n` chars of `s` (fewer if it is shorter).
+fn pop_chars(s: &mut String, n: usize) {
+    for _ in 0..n {
+        if s.pop().is_none() {
+            break;
+        }
+    }
+}
+
+/// Byte length of the longest common prefix of `a` and `b` — a char
+/// boundary in both.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.char_indices()
+        .zip(b.chars())
+        .find(|((_, x), y)| x != y)
+        .map_or(a.len().min(b.len()), |((i, _), _)| i)
+}
+
+/// Marshal a bridge outcome into the engine's C storage. `before` is the
+/// commit-as-you-go screen snapshot ([`engine_call`]); `None` = preedit model.
+fn marshal(state: &mut EngineState, outcome: KeyOutcome, before: Option<&str>) -> ButtreKeyResult {
     let mut commit_text: Option<String> = None;
+    // Commit-as-you-go: replay the delete/insert ops onto the snapshot, then
+    // hand IMKit the net edit as ONE replacement of the differing tail.
+    let mut screen = before.map(str::to_owned);
     let mut preedit_changed = false;
     let mut candidates_changed = false;
     for op in outcome.ops {
         match op {
-            ImeOp::Commit(text) => match &mut commit_text {
+            ImeOp::Commit(text) => match (&mut screen, &mut commit_text) {
+                (Some(screen), _) => screen.push_str(&text),
                 // The bridge emits at most one commit per key; be safe anyway.
-                Some(existing) => existing.push_str(&text),
-                None => commit_text = Some(text),
+                (None, Some(existing)) => existing.push_str(&text),
+                (None, None) => commit_text = Some(text),
             },
+            ImeOp::DeleteSurrounding(n) => {
+                // Only emitted with composition off, i.e. `screen` is set.
+                if let Some(screen) = &mut screen {
+                    pop_chars(screen, n);
+                }
+            }
             ImeOp::Preedit(_) => preedit_changed = true,
             ImeOp::Candidates { items, .. } => {
                 state.candidates_c = items
@@ -252,14 +312,21 @@ fn marshal(state: &mut EngineState, outcome: KeyOutcome) -> ButtreKeyResult {
                 state.candidates_c.clear();
                 candidates_changed = true;
             }
-            // Only emitted with composition off, which this host never selects.
-            ImeOp::DeleteSurrounding(_) => {}
         }
     }
-    // `insertText` replaces the client's marked range, so after any commit the
-    // composition is re-sent: a live word survives, and an empty one is
-    // harmless there (the insert already collapsed the selection).
-    let preedit_changed = preedit_changed || commit_text.is_some();
+    let mut replaced_text: Option<&str> = None;
+    if let (Some(before), Some(after)) = (before, &screen) {
+        let p = common_prefix_len(before, after);
+        replaced_text = Some(&before[p..]).filter(|s| !s.is_empty());
+        commit_text = Some(after[p..].to_owned()).filter(|s| !s.is_empty());
+    } else if commit_text.is_some() {
+        // Preedit model: `insertText` replaces the client's marked range, so
+        // after any commit the composition is re-sent: a live word survives,
+        // and an empty one is harmless there (the insert already collapsed
+        // the selection).
+        preedit_changed = true;
+    }
+    state.replaced_c = replaced_text.and_then(|t| CString::new(t).ok());
     state.commit_c = commit_text.and_then(|t| CString::new(t).ok());
     state.preedit_c =
         preedit_changed.then(|| CString::new(state.bridge.preedit()).unwrap_or_default());
@@ -274,6 +341,10 @@ fn marshal(state: &mut EngineState, outcome: KeyOutcome) -> ButtreKeyResult {
             .as_ref()
             .map_or(std::ptr::null(), |c| c.as_ptr()),
         candidates_changed,
+        replaced: state
+            .replaced_c
+            .as_ref()
+            .map_or(std::ptr::null(), |c| c.as_ptr()),
     }
 }
 
@@ -297,6 +368,7 @@ pub extern "C" fn buttre_engine_new() -> u64 {
         return 0;
     };
     bridge.set_strict_flag(sync.strict.clone());
+    bridge.set_raw_backspace_flag(sync.raw_backspace.clone());
     // Start on the persisted learning state — a keystroke must not have to
     // arrive before an already-earned learning store applies.
     if sync.learning.enabled.load(Ordering::Relaxed) {
@@ -311,6 +383,7 @@ pub extern "C" fn buttre_engine_new() -> u64 {
             seen_generation: sync.method_state.generation(),
             commit_c: None,
             preedit_c: None,
+            replaced_c: None,
             candidates_c: Vec::new(),
         },
     );
@@ -395,6 +468,20 @@ pub extern "C" fn buttre_engine_flush(engine_id: u64) -> ButtreKeyResult {
 #[no_mangle]
 pub extern "C" fn buttre_engine_reset(engine_id: u64) -> ButtreKeyResult {
     engine_call(engine_id, |state| state.bridge.discard())
+}
+
+/// Negotiate the typing model for the focused client — call before EVERY
+/// key. Commit-as-you-go ("Gõ thẳng không gạch chân", `use_preedit = false`)
+/// engages only when the client can edit text it already holds
+/// (`can_replace`: `selectedRange` is known); otherwise — and always for
+/// Nôm, whose candidate panel needs marked text — the preedit model stays.
+/// A model change commits the pending word (carried in the result).
+#[no_mangle]
+pub extern "C" fn buttre_engine_sync_client(engine_id: u64, can_replace: bool) -> ButtreKeyResult {
+    engine_call(engine_id, |state| {
+        let want_direct = can_replace && !host_sync().use_preedit.load(Ordering::Relaxed);
+        state.bridge.set_use_composition(!want_direct)
+    })
 }
 
 /// Number of Nôm candidates currently offered (0 = hide the panel).

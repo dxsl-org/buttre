@@ -139,6 +139,9 @@ struct ButtreFactory {
     /// `macro_sync` watcher — every engine's bridge consults it lazily per
     /// keystroke (`EngineBridge::set_strict_flag`).
     strict: Arc<std::sync::atomic::AtomicBool>,
+    /// `Settings::backspace_mode` (raw?) mirror on the same watcher
+    /// (`EngineBridge::set_raw_backspace_flag`).
+    raw_backspace: Arc<std::sync::atomic::AtomicBool>,
     /// `Settings::use_preedit` mirror on the same watcher — each engine reads
     /// it per keystroke to choose the preedit vs commit-as-you-go model
     /// (gated on the client's surrounding-text capability).
@@ -181,6 +184,7 @@ impl ButtreFactory {
             self.method_state.clone(),
             self.macros.clone(),
             self.strict.clone(),
+            self.raw_backspace.clone(),
             self.use_preedit.clone(),
             self.enabled.clone(),
             self.learning.clone(),
@@ -259,6 +263,7 @@ pub async fn run_engine() -> Result<()> {
     // fresh — with no tray on IBus, the engine owns its own on/off.
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
+    let raw_backspace = macro_sync::load_initial_raw_backspace();
     let use_preedit = macro_sync::load_initial_use_preedit();
     let enabled = macro_sync::load_initial_enabled();
     macro_sync::spawn_watcher(
@@ -266,6 +271,7 @@ pub async fn run_engine() -> Result<()> {
         strict.clone(),
         use_preedit.clone(),
         enabled.clone(),
+        raw_backspace.clone(),
     );
 
     // Personal learning: shared store + dedicated save-writer thread + its
@@ -285,6 +291,7 @@ pub async fn run_engine() -> Result<()> {
                 method_state: method_state.clone(),
                 macros,
                 strict,
+                raw_backspace,
                 use_preedit,
                 enabled: enabled.clone(),
                 learning,

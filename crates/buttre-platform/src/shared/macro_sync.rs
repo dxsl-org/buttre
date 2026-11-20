@@ -18,6 +18,7 @@
 //! coincide — but they are looked up and deduplicated independently here so
 //! this keeps working if that ever diverges.
 
+use buttre_core::keyboard::BackspaceMode;
 use buttre_core::state::macros::MacroStore;
 use buttre_core::state::Settings;
 use std::path::PathBuf;
@@ -53,6 +54,22 @@ pub fn load_initial_use_preedit() -> Arc<AtomicBool> {
     let use_preedit = Settings::load().use_preedit;
     tracing::info!("macro_sync: initial use_preedit = {use_preedit}");
     Arc::new(AtomicBool::new(use_preedit))
+}
+
+/// `Settings::backspace_mode` as the bool the engines consume (`"raw"` →
+/// `true`; every other value is the grapheme default, same parse as
+/// `BackspaceMode::from_settings_str`).
+fn raw_backspace(settings: &Settings) -> bool {
+    BackspaceMode::from_settings_str(&settings.backspace_mode) == BackspaceMode::Raw
+}
+
+/// Build the initial raw-backspace mirror for engine-process startup —
+/// injected into every `EngineBridge` (`set_raw_backspace_flag`) and kept
+/// current by the same `settings.toml` watcher.
+pub fn load_initial_raw_backspace() -> Arc<AtomicBool> {
+    let raw = raw_backspace(&Settings::load());
+    tracing::info!("macro_sync: initial raw_backspace = {raw}");
+    Arc::new(AtomicBool::new(raw))
 }
 
 /// `Settings::enabled` as the ENGINE processes must read it, with the
@@ -98,21 +115,24 @@ fn reload(
     strict: &Arc<AtomicBool>,
     use_preedit: &Arc<AtomicBool>,
     enabled: &Arc<AtomicBool>,
+    raw_backspace_flag: &Arc<AtomicBool>,
 ) {
     let settings = Settings::load();
     *store.lock().unwrap_or_else(|e| e.into_inner()) = MacroStore::load_gated(settings.shorthand);
     strict.store(settings.strict_spelling, Ordering::Relaxed);
     use_preedit.store(settings.use_preedit, Ordering::Relaxed);
+    raw_backspace_flag.store(raw_backspace(&settings), Ordering::Relaxed);
     // Same fresh-install rule as startup: this reload also fires for
     // neighbor writes (macros.toml) while settings.toml may still not
     // exist, and that must not silence a fresh engine.
     let enabled_now = effective_enabled();
     enabled.store(enabled_now, Ordering::Relaxed);
     tracing::info!(
-        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={}, enabled={enabled_now})",
+        "macro_sync: reloaded (shorthand={}, strict_spelling={}, use_preedit={}, backspace_mode={}, enabled={enabled_now})",
         settings.shorthand,
         settings.strict_spelling,
         settings.use_preedit,
+        settings.backspace_mode,
     );
 }
 
@@ -152,6 +172,7 @@ pub fn spawn_watcher(
     strict: Arc<AtomicBool>,
     use_preedit: Arc<AtomicBool>,
     enabled: Arc<AtomicBool>,
+    raw_backspace_flag: Arc<AtomicBool>,
 ) {
     let dirs = watch_dirs();
     if dirs.is_empty() {
@@ -164,6 +185,7 @@ pub fn spawn_watcher(
         let strict = strict.clone();
         let use_preedit = use_preedit.clone();
         let enabled = enabled.clone();
+        let raw_backspace_flag = raw_backspace_flag.clone();
         crate::fs_watch::spawn_dir_watch("macro_sync", dir, move |cue| {
             // The watched dirs also hold unrelated state (method file,
             // learning.toml), so filter to the two files that feed the
@@ -181,7 +203,7 @@ pub fn spawn_watcher(
                 }),
             };
             if relevant {
-                reload(&store, &strict, &use_preedit, &enabled);
+                reload(&store, &strict, &use_preedit, &enabled, &raw_backspace_flag);
             }
         });
     }

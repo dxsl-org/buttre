@@ -106,8 +106,26 @@ static NSString *string_or_empty(const char *utf8) {
 // Apply one ButtreKeyResult to the client. Commit (if any) is inserted
 // BEFORE the preedit is updated, so a separator's word lands ahead of the
 // forwarded key and the marked region never momentarily doubles the text.
-- (void)apply:(ButtreKeyResult)r toClient:(id)client {
-    if (r.commit != NULL) {
+//
+// Returns NO — touching nothing — when a commit-as-you-go replacement can't
+// be applied safely: the text right before the caret is not what the engine
+// typed (the caret moved, or the client can't read its text back). The
+// caller then restarts the run.
+- (BOOL)apply:(ButtreKeyResult)r toClient:(id)client {
+    if (r.replaced != NULL) {
+        NSString *replaced = string_or_empty(r.replaced);
+        NSRange selection = [client selectedRange];
+        if (selection.location == NSNotFound || selection.length != 0 ||
+            selection.location < replaced.length) {
+            return NO;
+        }
+        NSRange range = NSMakeRange(selection.location - replaced.length, replaced.length);
+        NSString *actual = [[client attributedSubstringFromRange:range] string];
+        if (![actual isEqualToString:replaced]) {
+            return NO;
+        }
+        [client insertText:string_or_empty(r.commit) replacementRange:range];
+    } else if (r.commit != NULL) {
         NSString *commit = [NSString stringWithUTF8String:r.commit];
         if (commit != nil) {
             [client insertText:commit
@@ -123,6 +141,25 @@ static NSString *string_or_empty(const char *utf8) {
     if (r.candidates_changed) {
         [self refreshCandidates];
     }
+    return YES;
+}
+
+// Feed one key (Backspace or a character) to the engine and apply it. A
+// refused replacement (see apply:toClient:) means the engine's idea of the
+// text before the caret is stale: drop the run and feed the key again — a
+// fresh run has nothing to replace, so the retry always applies.
+- (BOOL)feedKey:(NSEvent *)event client:(id)sender {
+    BOOL backspace = event.keyCode == kVKDelete;
+    uint32_t ch = single_codepoint(event.characters);
+    ButtreKeyResult result = backspace ? buttre_engine_process_backspace(_engine)
+                                       : buttre_engine_process_char(_engine, ch);
+    if (![self apply:result toClient:sender]) {
+        [self apply:buttre_engine_reset(_engine) toClient:sender];
+        result = backspace ? buttre_engine_process_backspace(_engine)
+                           : buttre_engine_process_char(_engine, ch);
+        [self apply:result toClient:sender];
+    }
+    return result.handled ? YES : NO;
 }
 
 // Pull the engine's candidate list into the shared panel, or hide it.
@@ -202,7 +239,17 @@ static NSString *string_or_empty(const char *utf8) {
     return NO;
 }
 
+// Key presses, plus left clicks: a click moves the caret, so the word being
+// typed ends there (flushed, never left open to be edited at the new spot).
+- (NSUInteger)recognizedEvents:(id)sender {
+    return NSEventMaskKeyDown | NSEventMaskFlagsChanged | NSEventMaskLeftMouseDown;
+}
+
 - (BOOL)handleEvent:(NSEvent *)event client:(id)sender {
+    if (event.type == NSEventTypeLeftMouseDown) {
+        [self apply:buttre_engine_flush(_engine) toClient:sender];
+        return NO;
+    }
     if (event.type != NSEventTypeKeyDown) {
         return NO;
     }
@@ -215,6 +262,12 @@ static NSString *string_or_empty(const char *utf8) {
         return NO;
     }
 
+    // Typing model for this client: commit-as-you-go ("Gõ thẳng không gạch
+    // chân") needs a client that can report — and so edit — its own text.
+    NSRange selection = [sender selectedRange];
+    [self apply:buttre_engine_sync_client(_engine, selection.location != NSNotFound)
+       toClient:sender];
+
     if (_candidates.count > 0 && [self handleCandidateKey:event client:sender]) {
         return YES;
     }
@@ -222,11 +275,7 @@ static NSString *string_or_empty(const char *utf8) {
     // Everything else goes to the engine as the character the user's layout
     // produced; navigation/function keys come through as non-text and end
     // the word there.
-    ButtreKeyResult result = event.keyCode == kVKDelete
-        ? buttre_engine_process_backspace(_engine)
-        : buttre_engine_process_char(_engine, single_codepoint(event.characters));
-    [self apply:result toClient:sender];
-    return result.handled ? YES : NO;
+    return [self feedKey:event client:sender];
 }
 
 // The client is committing (focus change / app request): flush the pending

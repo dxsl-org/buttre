@@ -1,4 +1,4 @@
-//! ABI-surface tests for the macOS FFI (v3). Composition semantics are
+//! ABI-surface tests for the macOS FFI (v4). Composition semantics are
 //! covered cross-platform in `shared_engine_bridge_tests.rs` — these tests
 //! pin the C contract: handle lifecycle, string lifetime/ownership, and the
 //! IMKit mapping (commit / preedit / handled / candidates / input mode).
@@ -318,6 +318,95 @@ fn nom_candidates_round_trip() {
             "commit {committed:?} is the bare value of {display:?}"
         );
         assert_eq!(cstr(pick.preedit).as_deref(), Some(""));
+        buttre_engine_free(id);
+    });
+}
+
+/// Write `settings.toml` into the isolated HOME before the first engine is
+/// created (the host loads its settings mirrors once, on that call).
+fn write_settings(toml: &str) {
+    let dir = dirs::data_dir().expect("data dir").join("buttre");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("settings.toml"), toml).unwrap();
+}
+
+/// A minimal IMKit client: applies results to `doc` the way the controller
+/// does (replacement checked against the text before the caret, unhandled
+/// keys inserted by the "app").
+fn feed(id: u64, doc: &mut String, ch: char) -> ButtreKeyResult {
+    let r = buttre_engine_process_char(id, ch as u32);
+    assert!(r.preedit.is_null(), "commit-as-you-go never marks text");
+    let commit = cstr(r.commit).unwrap_or_default();
+    match cstr(r.replaced) {
+        Some(replaced) => {
+            assert!(
+                doc.ends_with(&replaced),
+                "{doc:?} must end with {replaced:?}"
+            );
+            doc.truncate(doc.len() - replaced.len());
+            doc.push_str(&commit);
+        }
+        None => doc.push_str(&commit),
+    }
+    if !r.handled {
+        doc.push(ch);
+    }
+    r
+}
+
+/// "Gõ thẳng không gạch chân": with `use_preedit = false` and a client that
+/// can edit its text, Telex commits as you go — every result edits the
+/// client's text directly and never marks it.
+#[test]
+fn no_preedit_commits_as_you_go() {
+    isolated_test("no_preedit_commits_as_you_go", || {
+        write_settings("input_method = \"telex\"\nenabled = true\nauto_correct = false\nshorthand = false\nstartup = false\nuse_preedit = false\n");
+        let id = buttre_engine_new();
+        assert!(buttre_engine_sync_client(id, true).preedit.is_null());
+        let mut doc = String::new();
+        for ch in "vieejt nam".chars() {
+            feed(id, &mut doc, ch);
+        }
+        assert_eq!(doc, "việt nam");
+        // An arrow key ends the run: the next tone key must not reach back
+        // over "nam".
+        buttre_engine_process_char(id, 0xF702);
+        let r = feed(id, &mut doc, 's');
+        assert!(r.replaced.is_null());
+        buttre_engine_free(id);
+    });
+}
+
+/// A client that can't report its selection keeps the preedit model even
+/// with the setting on, and switching models mid-word commits the word.
+#[test]
+fn no_preedit_falls_back_without_client_support() {
+    isolated_test("no_preedit_falls_back_without_client_support", || {
+        write_settings("input_method = \"telex\"\nenabled = true\nauto_correct = false\nshorthand = false\nstartup = false\nuse_preedit = false\n");
+        let id = buttre_engine_new();
+        buttre_engine_sync_client(id, false);
+        let r = type_str(id, "vieejt");
+        assert_eq!(cstr(r.preedit).as_deref(), Some("việt"));
+        let switched = buttre_engine_sync_client(id, true);
+        assert_eq!(cstr(switched.commit).as_deref(), Some("việt"));
+        assert_eq!(cstr(switched.preedit).as_deref(), Some(""));
+        buttre_engine_free(id);
+    });
+}
+
+/// "Xóa lùi theo phím thô": Backspace drops the last raw key (here the tone
+/// key) instead of the last displayed character.
+#[test]
+fn raw_backspace_drops_last_keystroke() {
+    isolated_test("raw_backspace_drops_last_keystroke", || {
+        write_settings("input_method = \"telex\"\nenabled = true\nauto_correct = false\nshorthand = false\nstartup = false\nbackspace_mode = \"raw\"\n");
+        let id = buttre_engine_new();
+        assert_eq!(
+            cstr(type_str(id, "vieetj").preedit).as_deref(),
+            Some("việt")
+        );
+        let bs = buttre_engine_process_backspace(id);
+        assert_eq!(cstr(bs.preedit).as_deref(), Some("viêt"));
         buttre_engine_free(id);
     });
 }

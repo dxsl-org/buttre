@@ -14,6 +14,7 @@
 //! `handled` is false the backend forwards the ORIGINAL key event to the
 //! app (after any queued commit, so the committed word always lands first).
 
+use buttre_core::keyboard::BackspaceMode;
 use buttre_core::state::learning::{LearningFile, LearningStore};
 use buttre_core::state::macros::MacroStore;
 use buttre_core::{Action, Keyboard, KeyboardBuilder};
@@ -148,6 +149,13 @@ pub struct EngineBridge {
     /// Last value pushed into the live `Keyboard` (see
     /// `VietnameseEngine::strict_applied` — same cheap-compare pattern).
     strict_applied: bool,
+    /// `Settings::backspace_mode == "raw"` mirror injected by the host via
+    /// [`Self::set_raw_backspace_flag`] — same purity rule and lazy
+    /// cheap-compare sync as `strict_spelling`, consumed at the top of
+    /// [`Self::backspace`]. `None` = grapheme backspace (the engine default).
+    raw_backspace: Option<Arc<AtomicBool>>,
+    /// Last value pushed into the live `Keyboard`.
+    raw_backspace_applied: bool,
     /// Candidates for the current composition (Nôm) plus the highlight.
     /// Mirrors what the engine last emitted via `Action::ShowCandidates`, so a
     /// backend can select one by index ([`Self::select_candidate`]) without
@@ -158,9 +166,10 @@ pub struct EngineBridge {
     /// to keep Nôm on composition regardless of that toggle.
     method: String,
     /// Whether the active keyboard uses the preedit (underline) model. Always
-    /// `true` at construction (macOS/Wayland/Windows and the IBus default);
-    /// only the IBus engine flips it off via [`Self::set_use_composition`] once
-    /// the client is confirmed to support in-place deletion. Nôm ignores it.
+    /// `true` at construction; the host flips it off via
+    /// [`Self::set_use_composition`] once the client is confirmed to support
+    /// in-place deletion (IBus surrounding text, Wayland v1, IMKit replacement
+    /// ranges). Nôm ignores it — see [`Self::composes`].
     use_composition: bool,
     /// Passthrough mode — the IME is OFF: the bridge stops composing entirely,
     /// every key returns unhandled with no ops, so the raw keystroke reaches
@@ -194,6 +203,8 @@ impl EngineBridge {
             learning: None,
             strict_spelling: None,
             strict_applied: false,
+            raw_backspace: None,
+            raw_backspace_applied: false,
             candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
@@ -216,6 +227,8 @@ impl EngineBridge {
             learning: None,
             strict_spelling: None,
             strict_applied: false,
+            raw_backspace: None,
+            raw_backspace_applied: false,
             candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
@@ -233,6 +246,8 @@ impl EngineBridge {
             learning: None,
             strict_spelling: None,
             strict_applied: false,
+            raw_backspace: None,
+            raw_backspace_applied: false,
             candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
@@ -254,6 +269,8 @@ impl EngineBridge {
             learning: None,
             strict_spelling: None,
             strict_applied: false,
+            raw_backspace: None,
+            raw_backspace_applied: false,
             candidates: CandidateState::default(),
             method: method.to_string(),
             use_composition: true,
@@ -296,6 +313,32 @@ impl EngineBridge {
     pub fn set_strict_flag(&mut self, flag: Arc<AtomicBool>) {
         self.strict_spelling = Some(flag);
         self.sync_strict_spelling();
+    }
+
+    /// Inject the host's `Settings::backspace_mode == "raw"` mirror (see the
+    /// `raw_backspace` field doc) and apply it immediately — same contract as
+    /// [`Self::set_strict_flag`]; later changes are picked up by
+    /// [`Self::backspace`].
+    pub fn set_raw_backspace_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.raw_backspace = Some(flag);
+        self.sync_raw_backspace();
+    }
+
+    /// Is the active keyboard on the preedit (underline) model? Nôm always
+    /// is, whatever [`Self::set_use_composition`] last asked for — a switch
+    /// INTO Nôm while commit-as-you-go is on must not map its composition
+    /// actions as direct ones.
+    pub fn composes(&self) -> bool {
+        self.use_composition || self.method == "nom"
+    }
+
+    /// What the keyboard believes is on screen for the current editable run.
+    /// In commit-as-you-go mode this is the already-committed text the next
+    /// [`ImeOp::DeleteSurrounding`] counts back over — a host that must
+    /// address the deletion by content (IMKit's replacement range) snapshots
+    /// it before feeding a key.
+    pub fn display(&self) -> &str {
+        self.keyboard.buffer()
     }
 
     /// Wire personal learning into the live keyboard and remember it for
@@ -341,6 +384,23 @@ impl EngineBridge {
         }
     }
 
+    /// Push a changed raw-backspace value into the live `Keyboard` — same
+    /// cheap compare as [`Self::sync_strict_spelling`].
+    fn sync_raw_backspace(&mut self) {
+        let Some(flag) = &self.raw_backspace else {
+            return;
+        };
+        let raw = flag.load(Ordering::Relaxed);
+        if raw != self.raw_backspace_applied {
+            self.keyboard.set_backspace_mode(if raw {
+                BackspaceMode::Raw
+            } else {
+                BackspaceMode::Grapheme
+            });
+            self.raw_backspace_applied = raw;
+        }
+    }
+
     /// Drop any showing candidate list, yielding a `HideCandidates` op only
     /// when one was actually showing — callers append it to their outcome so a
     /// reset/commit/method-switch never leaves a stale popup on screen.
@@ -372,6 +432,8 @@ impl EngineBridge {
         self.keyboard = keyboard;
         self.strict_applied = false;
         self.sync_strict_spelling();
+        self.raw_backspace_applied = false;
+        self.sync_raw_backspace();
     }
 
     /// Build the outcome that clears any live preedit + candidate popup after a
@@ -460,7 +522,7 @@ impl EngineBridge {
                 };
             }
         };
-        if self.use_composition {
+        if self.composes() {
             self.map_composition_actions(ch, actions)
         } else {
             self.map_direct_actions(ch, actions)
@@ -618,7 +680,8 @@ impl EngineBridge {
         if self.passthrough {
             return KeyOutcome::default();
         }
-        if self.use_composition {
+        self.sync_raw_backspace();
+        if self.composes() {
             self.composition_backspace()
         } else {
             self.direct_backspace()
@@ -691,7 +754,18 @@ impl EngineBridge {
     /// Commit the pending word out-of-band (shortcuts, navigation keys),
     /// applying the word-boundary final repair — these commit points bypass
     /// the pipeline's own PassThrough repair. No-op when nothing composes.
+    ///
+    /// Commit-as-you-go: the text is already on screen, so there is nothing
+    /// to commit — but the editable run MUST end here. The caret may move
+    /// with the key that triggered the flush (arrow, click, shortcut), and a
+    /// run left open would let the next key's `DeleteSurrounding` count back
+    /// over unrelated text.
     pub fn flush_pending(&mut self) -> KeyOutcome {
+        if !self.composes() {
+            self.keyboard.collect_pending_learning();
+            self.keyboard.reset();
+            return KeyOutcome::default();
+        }
         if self.preedit.is_empty() {
             // No composition, but a stray candidate list must not linger.
             return match self.clear_candidates_op() {

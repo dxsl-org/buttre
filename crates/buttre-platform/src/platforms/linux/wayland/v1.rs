@@ -120,6 +120,7 @@ impl ImeV1State {
         method_state: Arc<MethodState>,
         macros: Arc<Mutex<buttre_core::state::macros::MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
+        raw_backspace: Arc<std::sync::atomic::AtomicBool>,
         use_preedit: Arc<std::sync::atomic::AtomicBool>,
         enabled: Arc<std::sync::atomic::AtomicBool>,
         learning: LearningWiring,
@@ -128,6 +129,7 @@ impl ImeV1State {
         let seen_generation = method_state.generation();
         let mut bridge = EngineBridge::new_with_macros(&method, macros);
         bridge.set_strict_flag(strict);
+        bridge.set_raw_backspace_flag(raw_backspace);
         // Start on the persisted on/off state, not always-on.
         if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
             bridge.set_enabled(false);
@@ -586,6 +588,7 @@ pub(super) fn run_engine(conn: Connection) -> Result<()> {
     let method_state = MethodState::load();
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
+    let raw_backspace = macro_sync::load_initial_raw_backspace();
     // Loaded for the shared watcher signature only — v1 stays on the preedit
     // model, exactly like v2 (see mod.rs on `use_preedit`).
     let use_preedit = macro_sync::load_initial_use_preedit();
@@ -598,6 +601,7 @@ pub(super) fn run_engine(conn: Connection) -> Result<()> {
         method_state.clone(),
         macros.clone(),
         strict.clone(),
+        raw_backspace.clone(),
         use_preedit.clone(),
         enabled.clone(),
         learning.clone(),
@@ -614,7 +618,7 @@ pub(super) fn run_engine(conn: Connection) -> Result<()> {
     }
 
     method_sync::spawn_watcher(method_state);
-    macro_sync::spawn_watcher(macros, strict, use_preedit, enabled);
+    macro_sync::spawn_watcher(macros, strict, use_preedit, enabled, raw_backspace);
     learning_sync::spawn_writer(learning_rx);
     learning_sync::spawn_watcher(&learning);
 

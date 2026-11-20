@@ -746,12 +746,18 @@ impl Keyboard {
             return Ok(Action::DoNothing);
         }
 
-        // Target display = current display with its last grapheme removed.
-        let mut target_chars: Vec<char> = old_display.chars().collect();
-        target_chars.pop();
-        let target: String = target_chars.into_iter().collect();
-
-        let new_raw = self.find_backspace_raw(&raw, &target);
+        let new_raw = match self.backspace_mode {
+            // Same inverse as `backspace_multiword_raw`: drop the last raw
+            // keystroke and recompute, no search.
+            BackspaceMode::Raw => raw[..raw.len() - 1].to_vec(),
+            BackspaceMode::Grapheme => {
+                // Target display = current display with its last grapheme removed.
+                let mut target_chars: Vec<char> = old_display.chars().collect();
+                target_chars.pop();
+                let target: String = target_chars.into_iter().collect();
+                self.find_backspace_raw(&raw, &target)
+            }
+        };
 
         // Replay the chosen raw keys so the engine state matches the new display.
         self.executor.reset();

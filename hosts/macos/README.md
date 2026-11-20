@@ -136,6 +136,10 @@ kiểm chứng runtime:
 8. **Cấu hình**: menu input source ở thanh menu (khi đang chọn buttre) có
    mục **Cấu hình buttre…** → mở cửa sổ Cấu hình lên trước (bấm lần hai
    không mở cửa sổ thứ hai); checkbox autostart phải ẨN.
+9. **Gõ thẳng không gạch chân**: bật trong Cấu hình → TextEdit, Safari/Chrome,
+   Terminal gõ `vieejt nam` ra `việt nam` không gạch chân (đã xác nhận cả ba),
+   sửa dấu tại chỗ; click sang chỗ khác rồi gõ phím dấu không được sửa lên
+   chữ cũ; app không báo `selectedRange` vẫn gạch chân; Nôm luôn gạch chân.
 
 Developer ID signing and notarization are supported by `build_app.sh`; release
 automation still needs the notarization credentials provisioned in CI.

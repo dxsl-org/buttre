@@ -110,7 +110,10 @@ fn instance_lock_name() -> anyhow::Result<String> {
         let dir = settings
             .parent()
             .ok_or_else(|| anyhow::anyhow!("settings path has no parent"))?;
-        Ok(dir.join("buttre-config.lock").to_string_lossy().into_owned())
+        Ok(dir
+            .join("buttre-config.lock")
+            .to_string_lossy()
+            .into_owned())
     } else {
         Ok("buttre-config".to_owned())
     }
