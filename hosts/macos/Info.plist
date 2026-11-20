@@ -60,7 +60,10 @@
          menu (switch with the menu / Ctrl+Space; "off" = pick ABC). The
          controller maps "<bundle id>.<method>" to the engine method.
          build_app.sh appends one mode per bundled keyboards/*.toml by copying
-         the telex entry, so keep telex the template. -->
+         the telex entry (and turning its default state OFF), so keep telex the
+         template. Telex/VNI/Nôm are default-on: the install flag of the
+         buttre executable enables them (see main.m); the bundled keyboards
+         are left for the user to add. -->
     <key>ComponentInputModeDict</key>
     <dict>
         <key>tsInputModeListKey</key>
@@ -107,7 +110,7 @@
                 <key>tsInputModePaletteIconFileKey</key>
                 <string>vni.tiff</string>
                 <key>tsInputModeDefaultStateKey</key>
-                <false/>
+                <true/>
                 <key>tsInputModePrimaryInScriptKey</key>
                 <false/>
                 <key>tsInputModeIsVisibleKey</key>
@@ -132,7 +135,7 @@
                 <key>tsInputModePaletteIconFileKey</key>
                 <string>nom.tiff</string>
                 <key>tsInputModeDefaultStateKey</key>
-                <false/>
+                <true/>
                 <key>tsInputModePrimaryInScriptKey</key>
                 <false/>
                 <key>tsInputModeIsVisibleKey</key>

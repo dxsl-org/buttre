@@ -211,9 +211,12 @@ lipo -info "$APP/Contents/Helpers/buttre-config"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 ARCHIVE="$BUILD_DIR/buttre-${VERSION}-macos.zip"
+# The zip ships install.sh next to Buttre.app: copy + enable Telex/VNI/Nôm.
+cp "$HOST_DIR/install.sh" "$BUILD_DIR/install.sh"
+chmod +x "$BUILD_DIR/install.sh"
 echo "==> Zipping..."
 rm -f "$ARCHIVE"
-( cd "$BUILD_DIR" && zip -qry "buttre-${VERSION}-macos.zip" "Buttre.app" )
+( cd "$BUILD_DIR" && zip -qry "buttre-${VERSION}-macos.zip" "Buttre.app" "install.sh" )
 
 if [ -n "$NOTARY_PROFILE" ]; then
     if [ "$SIGNING_IDENTITY" = "-" ]; then
@@ -230,10 +233,10 @@ if [ -n "$NOTARY_PROFILE" ]; then
     xcrun stapler validate "$APP"
     spctl --assess --type execute --verbose=2 "$APP"
     rm -f "$ARCHIVE"
-    ( cd "$BUILD_DIR" && zip -qry "buttre-${VERSION}-macos.zip" "Buttre.app" )
+    ( cd "$BUILD_DIR" && zip -qry "buttre-${VERSION}-macos.zip" "Buttre.app" "install.sh" )
 fi
 
 echo ""
 echo "Artifact: $ARCHIVE"
-echo "Install:  sudo rm -rf /Library/Input\\ Methods/Buttre.app && sudo ditto '$APP' /Library/Input\\ Methods/Buttre.app"
-echo "First install: log out and back in, then add buttre under Vietnamese."
+echo "Install:  unzip, then run ./install.sh as your user (copies to /Library/Input Methods"
+echo "          and enables buttre Telex, VNI, Chữ Nôm in the input menu)."
