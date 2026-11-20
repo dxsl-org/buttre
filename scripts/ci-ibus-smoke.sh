@@ -16,12 +16,47 @@ FAIL=0
 say() { echo "[ibus-smoke] $*"; }
 die() { say "FAIL: $*"; exit 1; }
 
+# --- diagnostics (printed on every exit, pass or fail) ---
+# The engine logs to $XDG_CACHE_HOME/buttre/engine.log and TRUNCATES it per
+# process start, so the spawn wrapper below rotates the previous log aside:
+# every engine process the daemon started this run keeps its own file.
+ENGINE_LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/buttre"
+rm -f "$ENGINE_LOG_DIR"/engine.log* "$ENGINE_LOG_DIR/spawns"
+dump_diagnostics() {
+    say "--- engine processes spawned: $(grep -c . "$ENGINE_LOG_DIR/spawns" 2>/dev/null || echo 0)"
+    cat "$ENGINE_LOG_DIR/spawns" 2>/dev/null
+    for f in "$ENGINE_LOG_DIR"/engine.log*; do
+        [ -f "$f" ] || continue
+        say "--- $f"
+        cat "$f"
+    done
+    say "--- shared state"
+    for f in "$HOME/.config/buttre/method" "$HOME/.config/buttre/enabled" \
+             "$HOME/.local/share/buttre/settings.toml"; do
+        if [ -f "$f" ]; then say "$f:"; cat "$f"; echo; else say "$f: (absent)"; fi
+    done
+    say "--- global engine: $(ibus engine 2>/dev/null || echo '?')"
+}
+trap dump_diagnostics EXIT
+
 [ -x "$BIN" ] || die "buttre binary not found at $BIN"
 
 # --- user-level component registration (no sudo) ---
 COMP_DIR="$HOME/.local/share/ibus/component"
 mkdir -p "$COMP_DIR"
-sed "s|<exec>/usr/bin/buttre --ibus</exec>|<exec>$PWD/$BIN --ibus</exec>|" \
+# The component execs a wrapper that rotates the previous engine log and
+# records the spawn time, then becomes the real engine (same argv/env).
+mkdir -p "$ENGINE_LOG_DIR"
+WRAPPER="$COMP_DIR/buttre-ibus-ci-wrapper.sh"
+cat > "$WRAPPER" <<EOF
+#!/bin/sh
+LOG="$ENGINE_LOG_DIR/engine.log"
+[ -f "\$LOG" ] && mv "\$LOG" "\$LOG.\$(date +%s.%N)"
+echo "\$(date +%T.%N) pid=\$\$" >> "$ENGINE_LOG_DIR/spawns"
+exec "$PWD/$BIN" "\$@"
+EOF
+chmod +x "$WRAPPER"
+sed "s|<exec>/usr/bin/buttre --ibus</exec>|<exec>$WRAPPER --ibus</exec>|" \
     installers/linux/buttre.xml > "$COMP_DIR/buttre.xml"
 # Registry cache must be invalidated to pick up component XML changes.
 rm -f ~/.cache/ibus/bus/registry*
@@ -32,7 +67,9 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     eval "$(dbus-launch --sh-syntax)"
 fi
 pkill -f "buttre --ibus" 2>/dev/null
-export RUST_LOG=info
+# DEBUG for buttre's own crates: every ProcessKeyEvent with its engine path,
+# outcome and ops lands in the engine log dumped above.
+export RUST_LOG="info,buttre=debug,buttre_platform=debug"
 ibus-daemon -dr 2>/dev/null
 for _ in $(seq 1 15); do
     ibus list-engine >/dev/null 2>&1 && break

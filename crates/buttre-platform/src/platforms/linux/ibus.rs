@@ -360,7 +360,8 @@ impl ButtreEngine {
         state: u32,
     ) -> bool {
         tracing::debug!(
-            "ProcessKeyEvent: keyval=0x{:x}, state=0x{:x}",
+            "ProcessKeyEvent[{}]: keyval=0x{:x}, state=0x{:x}",
+            self.path.as_ref().map_or("-", |p| p.as_str()),
             keyval,
             state
         );
@@ -452,6 +453,13 @@ impl ButtreEngine {
                 bridge.process_char(ch)
             }
         };
+        // Typed text included: DEBUG only, which nothing ships by default.
+        tracing::debug!(
+            "ProcessKeyEvent[{}] -> handled={} ops={:?}",
+            self.path.as_ref().map_or("-", |p| p.as_str()),
+            outcome.handled,
+            outcome.ops
+        );
         self.emit_ops(&ctx, outcome.ops).await;
         outcome.handled
     }
@@ -461,7 +469,10 @@ impl ButtreEngine {
     /// Emitted per focus rather than once at construction because the panel
     /// tracks properties against the focused engine, not the component.
     async fn focus_in(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
-        tracing::info!("FocusIn");
+        tracing::info!(
+            "FocusIn[{}]",
+            self.path.as_ref().map_or("-", |p| p.as_str())
+        );
         // Mark this engine as the focused one so the async property-refresh
         // task (ibus_bus) knows which path to re-publish on an external method
         // change. Cleared on focus_out.
@@ -537,7 +548,10 @@ impl ButtreEngine {
     /// candidate popup, however, must be hidden explicitly so it can't linger
     /// over the newly focused field (some panels don't auto-hide it).
     async fn focus_out(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
-        tracing::info!("FocusOut");
+        tracing::info!(
+            "FocusOut[{}]",
+            self.path.as_ref().map_or("-", |p| p.as_str())
+        );
         // Relinquish focused-engine ownership so the refresh task doesn't emit
         // to an unfocused path. Guard on identity: a focus_in on the NEXT
         // engine may already have overwritten the slot, and clearing it then
@@ -560,7 +574,7 @@ impl ButtreEngine {
     }
 
     fn enable(&mut self) {
-        tracing::info!("Enable");
+        tracing::info!("Enable[{}]", self.path.as_ref().map_or("-", |p| p.as_str()));
         // Mirror the active state to the tray: buttre just became the global
         // engine (OS input-source switch or startup). The tray reflects the
         // real Vietnamese method again. Best-effort — a failed write only means
@@ -573,7 +587,10 @@ impl ButtreEngine {
     /// Same contract as [`Self::focus_out`] for the candidate popup: hide it
     /// when the engine is disabled while a Nôm list is showing.
     async fn disable(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
-        tracing::info!("Disable");
+        tracing::info!(
+            "Disable[{}]",
+            self.path.as_ref().map_or("-", |p| p.as_str())
+        );
         // buttre stopped being the global engine (OS switched to English/another
         // source). Tell the tray so it can show the disabled/English state.
         if let Err(e) = method_sync::write_enabled(false) {
