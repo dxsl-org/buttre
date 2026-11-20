@@ -11,13 +11,13 @@ Yêu cầu: Xcode Command Line Tools và Rust toolchain.
 ```bash
 xcode-select --install
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-bash hosts/macos/build_app.sh 0.7.11
+bash hosts/macos/build_app.sh 0.8.0-beta
 ```
 
 Kết quả:
 
 - `target/macos-app/Buttre.app`
-- `target/macos-app/buttre-0.7.11-macos.zip`
+- `target/macos-app/buttre-0.8.0-beta-macos.zip`
 
 Bundle chứa executable universal (`arm64` + `x86_64`), Rust dylib, keyboard
 tables và cơ sở dữ liệu Nôm. Xem
