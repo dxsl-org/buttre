@@ -48,16 +48,19 @@ else
 fi
 
 # --- [2] activation spawns the component and routes to it ---
-ibus engine buttre 2>/dev/null || true   # exit code unreliable (setxkbmap)
 # On-demand component spawn (ibus-daemon forks `buttre --ibus` on first
 # CreateEngine) plus its own startup work (method/macro state load, the
 # property-refresh task) can take longer than one second on a loaded CI
 # runner — poll like the registry check above instead of a single sleep.
+# The switch itself is re-issued each round: a request sent while the
+# daemon is still settling can be dropped, leaving xkb:us::eng active
+# (observed: passed on one commit, failed on the next with no IBus change).
 ACTIVE=""
 for _ in $(seq 1 15); do
+    ibus engine buttre 2>/dev/null || true   # exit code unreliable (setxkbmap)
+    sleep 1
     ACTIVE=$(ibus engine 2>/dev/null || true)
     [ "$ACTIVE" = "buttre" ] && break
-    sleep 1
 done
 if [ "$ACTIVE" = "buttre" ]; then
     say "PASS: buttre is the active engine"

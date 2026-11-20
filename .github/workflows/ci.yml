@@ -93,9 +93,10 @@ jobs:
         # plain debug run (it passes in every "Test on …" job) and blows
         # tarpaulin's per-test timeout once instrumented; it adds no
         # coverage the other learning tests don't, so skip it here only.
+        # One line: this job's shell is PowerShell (windows runner), which has
+        # no `\` line continuation.
         run: |
-          cargo tarpaulin --workspace --out xml --output-dir coverage --timeout 300 \
-            -- --skip english_escape_typing_is_stable_across_learning_sessions
+          cargo tarpaulin --workspace --out xml --output-dir coverage --timeout 300 -- --skip english_escape_typing_is_stable_across_learning_sessions
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
