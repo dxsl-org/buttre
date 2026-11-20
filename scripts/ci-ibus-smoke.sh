@@ -70,7 +70,9 @@ pkill -f "buttre --ibus" 2>/dev/null
 # DEBUG for buttre's own crates: every ProcessKeyEvent with its engine path,
 # outcome and ops lands in the engine log dumped above.
 export RUST_LOG="info,buttre=debug,buttre_platform=debug"
-ibus-daemon -dr 2>/dev/null
+# No panel: nothing here tests it, and a starting panel is the likely source
+# of the default-engine reset handled in [2].
+ibus-daemon -dr --panel=disable 2>/dev/null
 for _ in $(seq 1 15); do
     ibus list-engine >/dev/null 2>&1 && break
     sleep 1
@@ -86,23 +88,34 @@ fi
 
 # --- [2] activation spawns the component and routes to it ---
 # On-demand component spawn (ibus-daemon forks `buttre --ibus` on first
-# CreateEngine) plus its own startup work (method/macro state load, the
-# property-refresh task) can take longer than one second on a loaded CI
-# runner — poll like the registry check above instead of a single sleep.
-# The switch itself is re-issued each round: a request sent while the
-# daemon is still settling can be dropped, leaving xkb:us::eng active
-# (observed: passed on one commit, failed on the next with no IBus change).
+# CreateEngine) plus its own startup work can take longer than one second on
+# a loaded CI runner, so this polls.
+#
+# It also waits for the switch to STICK. CI logs (flaky runs) showed the
+# daemon side resetting the global engine to xkb:us::eng some seconds after
+# startup — FocusOut, Disable, Destroy on the buttre engine with no client
+# asking — sometimes before the scenarios start (harmless), sometimes in the
+# middle of them (every later key goes to xkb: 0/7). buttre must stay the
+# active engine for STABLE_SECS consecutive polls before any key is typed; a
+# reset during the wait re-issues the switch and restarts the count.
+STABLE_SECS=6
+STABLE=0
 ACTIVE=""
-for _ in $(seq 1 15); do
-    ibus engine buttre 2>/dev/null || true   # exit code unreliable (setxkbmap)
-    sleep 1
+for _ in $(seq 1 30); do
     ACTIVE=$(ibus engine 2>/dev/null || true)
-    [ "$ACTIVE" = "buttre" ] && break
+    if [ "$ACTIVE" = "buttre" ]; then
+        STABLE=$((STABLE + 1))
+        [ "$STABLE" -ge "$STABLE_SECS" ] && break
+    else
+        STABLE=0
+        ibus engine buttre 2>/dev/null || true   # exit code unreliable (setxkbmap)
+    fi
+    sleep 1
 done
-if [ "$ACTIVE" = "buttre" ]; then
-    say "PASS: buttre is the active engine"
+if [ "$STABLE" -ge "$STABLE_SECS" ]; then
+    say "PASS: buttre is the active engine (stable ${STABLE_SECS}s)"
 else
-    die "active engine is '$ACTIVE', expected 'buttre'"
+    die "active engine is '$ACTIVE', expected 'buttre' to stay active ${STABLE_SECS}s"
 fi
 if pgrep -f "buttre --ibus" >/dev/null; then
     say "PASS: daemon spawned the component process"
