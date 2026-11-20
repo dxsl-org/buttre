@@ -98,6 +98,24 @@ fn refresh_macro_rows(window: &ConfigWindow) {
     window.set_macro_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
 }
 
+/// Name handed to `single_instance`. Windows (named mutex) and Linux
+/// (abstract socket) take a bare name; the macOS backend `flock`s a FILE at
+/// that path, so a bare name resolves against the cwd — `/` when the IMKit
+/// host spawns the helper, where the create fails and the window never
+/// opens. Anchor it next to `settings.toml` so the lock is absolute and
+/// shared by every launch regardless of cwd.
+fn instance_lock_name() -> anyhow::Result<String> {
+    if cfg!(target_os = "macos") {
+        let settings = Settings::get_path()?;
+        let dir = settings
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("settings path has no parent"))?;
+        Ok(dir.join("buttre-config.lock").to_string_lossy().into_owned())
+    } else {
+        Ok("buttre-config".to_owned())
+    }
+}
+
 /// Entry point called by `buttre-platform`'s `--config` arg-dispatch arm.
 /// Blocks until the window is closed (Slint owns this process's event loop
 /// for its lifetime) — the caller must invoke this BEFORE any tray/hook
@@ -114,7 +132,7 @@ pub fn run(show_autostart: bool) -> anyhow::Result<()> {
     // cross-process "focus the existing window" primitive without extra
     // IPC, so the simpler, honest behavior is: exit immediately, leaving the
     // first window as-is.
-    let instance = single_instance::SingleInstance::new("buttre-config")
+    let instance = single_instance::SingleInstance::new(&instance_lock_name()?)
         .map_err(|e| anyhow::anyhow!("single-instance lock failed: {e}"))?;
     if !instance.is_single() {
         return Ok(());
