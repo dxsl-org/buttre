@@ -324,7 +324,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Buttre.app
-        run: bash hosts/macos/build_app.sh "${{ github.sha }}"
+        # "dev", not the commit SHA: the bundle version must be numeric
+        # (build_app.sh rejects anything else). Ad-hoc signed — the Apple
+        # secrets are used only by release.yml (build-macos-app).
+        run: bash hosts/macos/build_app.sh dev
 
       - name: Verify universal bundle
         run: |

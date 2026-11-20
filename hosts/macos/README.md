@@ -141,8 +141,26 @@ kiểm chứng runtime:
    sửa dấu tại chỗ; click sang chỗ khác rồi gõ phím dấu không được sửa lên
    chữ cũ; app không báo `selectedRange` vẫn gạch chân; Nôm luôn gạch chân.
 
-Developer ID signing and notarization are supported by `build_app.sh`; release
-automation still needs the notarization credentials provisioned in CI.
+## CI signing
+
+`build_app.sh` signs with a Developer ID Application identity
+(`MACOS_SIGNING_IDENTITY`, else the first one in the keychain) and notarizes
+when `MACOS_NOTARY_PROFILE` names a `notarytool` keychain profile
+(`MACOS_NOTARY_KEYCHAIN` optionally points at the keychain holding it).
+
+`release.yml` → `build-macos-app` does both on a throwaway keychain and
+publishes `buttre-<version>-macos-app.zip`. Repository secrets it needs:
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERT_P12_BASE64` | Developer ID Application certificate + private key, exported as `.p12`, base64 |
+| `MACOS_CERT_PASSWORD` | Password set when exporting the `.p12` |
+| `APPLE_API_KEY_P8` | Contents of the App Store Connect API key `AuthKey_<id>.p8` |
+| `APPLE_API_KEY_ID` | That key's Key ID |
+| `APPLE_API_ISSUER_ID` | The team's Issuer ID (App Store Connect → Integrations) |
+
+Missing secrets fail the job rather than publish an unsigned app. CI
+(`ci.yml`) keeps building an ad-hoc signed app as a compile gate only.
 
 > Lưu ý hạ tầng: plan chi tiết nằm trong `.agents/` (gitignored — KHÔNG đi
 > theo clone) nên checklist này là nguồn chính khi làm việc trên máy khác.

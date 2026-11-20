@@ -4,6 +4,7 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- ci: release có job `build-macos-app` build `Buttre.app` ký Developer ID + notarize trên keychain tạm, đính kèm `buttre-<version>-macos-app.zip` vào release; thiếu secret Apple thì job fail thay vì phát hành bản chưa ký. `build_app.sh` nhận thêm `MACOS_NOTARY_KEYCHAIN`. Job CI `macos-imkit` build với version `dev` (SHA commit không phải bundle version hợp lệ nên script từ chối)
 - macos: "Gõ thẳng không gạch chân" giờ hoạt động — Telex/VNI chốt chữ ngay khi gõ, sửa dấu bằng `insertText:replacementRange:` thay cho marked text. Trước khi thay, host đọc lại đúng đoạn chữ trước con trỏ (`attributedSubstringFromRange:`); lệch (con trỏ đã di chuyển, app không đọc lại được) thì không đụng gì, bắt đầu từ mới và gõ lại phím đó. App không báo được `selectedRange` vẫn dùng gạch chân; Nôm luôn gạch chân (cần bảng ứng viên). Click chuột kết thúc từ đang gõ. FFI v4: `ButtreKeyResult.replaced` + `buttre_engine_sync_client`
 - macos, linux (IBus/Wayland): "Xóa lùi theo phím thô" giờ có tác dụng — trước đây chỉ bàn phím của tray (backend Hook) áp `backspace_mode`; engine của IMKit/IBus/Wayland bỏ qua. Ở chế độ gạch chân Backspace giờ cũng bỏ phím thô cuối (`vieetj` ⌫ → `viêt`) thay vì luôn xoá theo ký tự hiển thị
 - engine bridge: chuyển sang Nôm khi đang gõ thẳng không còn ánh xạ nhầm composition thành hành động gõ thẳng; phím điều hướng/phím tắt ở chế độ gõ thẳng kết thúc từ, để phím dấu sau đó không sửa lùi lên chữ không liên quan

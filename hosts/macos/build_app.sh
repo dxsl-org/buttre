@@ -28,6 +28,9 @@ BUILD_DIR="target/macos-app"
 APP="$BUILD_DIR/Buttre.app"
 SIGNING_IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
+# Keychain holding the notarytool profile; empty = notarytool's default
+# (login keychain). CI stores the profile in a throwaway keychain.
+NOTARY_KEYCHAIN="${MACOS_NOTARY_KEYCHAIN:-}"
 if [ -z "$SIGNING_IDENTITY" ]; then
     while IFS= read -r identity; do
         if [[ "$identity" =~ \"(Developer\ ID\ Application:.*)\" ]]; then
@@ -218,8 +221,11 @@ if [ -n "$NOTARY_PROFILE" ]; then
         exit 1
     fi
     echo "==> Notarizing..."
-    xcrun notarytool submit "$ARCHIVE" \
-        --keychain-profile "$NOTARY_PROFILE" --wait
+    NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
+    if [ -n "$NOTARY_KEYCHAIN" ]; then
+        NOTARY_ARGS+=(--keychain "$NOTARY_KEYCHAIN")
+    fi
+    xcrun notarytool submit "$ARCHIVE" "${NOTARY_ARGS[@]}" --wait
     xcrun stapler staple "$APP"
     xcrun stapler validate "$APP"
     spctl --assess --type execute --verbose=2 "$APP"

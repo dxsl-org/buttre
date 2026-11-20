@@ -76,7 +76,7 @@ jobs:
 
             **Windows**: Run the MSI installer. SmartScreen may warn on first run (unsigned build) — click "More info → Run anyway".
             **Linux**: `sudo dpkg -i buttre-*-linux-x86_64.deb` (Debian/Ubuntu) or `sudo dnf install buttre-*-linux-x86_64.rpm` (Fedora/RHEL). Dùng fcitx5? Cài thêm `sudo dpkg -i fcitx5-buttre-*.deb` để có menu kiểu gõ ngay trên panel fcitx5 (Fedora: build addon từ source — xem addons/fcitx5-buttre).
-            **macOS**: Developer artifact only. Extract the zip; strip quarantine with `xattr -d com.apple.quarantine libbuttre_platform.dylib` before linking.
+            **macOS**: `buttre-*-macos-app.zip` is the Developer ID–signed, notarized `Buttre.app`: unzip, then `sudo ditto Buttre.app "/Library/Input Methods/Buttre.app"`, log out and back in, and add the buttre modes under System Settings → Keyboard → Input Sources → Vietnamese. `buttre-*-macos-universal.zip` is the bare engine dylib for developers.
 
   build-linux:
     name: Build Linux packages
@@ -232,3 +232,111 @@ jobs:
           name: buttre ${{ steps.ver.outputs.version }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: target/macos/buttre-${{ steps.ver.outputs.version }}-macos-universal.zip
+
+  # Signed + notarized IMKit host (Buttre.app). Needs the Apple secrets
+  # (see hosts/macos/README.md "CI signing"); without them the job fails
+  # instead of publishing an unsigned app macOS would refuse to load.
+  build-macos-app:
+    name: Build signed macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-app-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Import signing certificate + notary credentials
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          for name in MACOS_CERT_P12_BASE64 MACOS_CERT_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret $name (see hosts/macos/README.md, CI signing)"
+              exit 1
+            fi
+          done
+
+          # Throwaway keychain: lives in RUNNER_TEMP, random password, gone
+          # with the runner.
+          KEYCHAIN="$RUNNER_TEMP/buttre-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          CERT="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$MACOS_CERT_P12_BASE64" | base64 --decode > "$CERT"
+          security import "$CERT" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$CERT"
+          # Let codesign use the key without a UI prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # codesign looks identities up through the user search list.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -n 1)"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::MACOS_CERT_P12_BASE64 holds no Developer ID Application identity with its private key"
+            exit 1
+          fi
+
+          # Validates the App Store Connect API key against Apple before
+          # the build spends any time.
+          API_KEY="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$API_KEY"
+          xcrun notarytool store-credentials buttre-notary \
+            --key "$API_KEY" --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" --keychain "$KEYCHAIN"
+          rm -f "$API_KEY"
+
+          {
+            echo "MACOS_SIGNING_IDENTITY=$IDENTITY"
+            echo "MACOS_NOTARY_PROFILE=buttre-notary"
+            echo "MACOS_NOTARY_KEYCHAIN=$KEYCHAIN"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize Buttre.app
+        run: bash hosts/macos/build_app.sh "${{ steps.ver.outputs.version }}"
+
+      - name: Rename to release filename
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          mv "target/macos-app/buttre-${V}-macos.zip" "target/macos-app/buttre-${V}-macos-app.zip"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
+          name: buttre ${{ steps.ver.outputs.version }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          files: target/macos-app/buttre-${{ steps.ver.outputs.version }}-macos-app.zip
+
+      - name: Delete signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/buttre-signing.keychain-db" || true
