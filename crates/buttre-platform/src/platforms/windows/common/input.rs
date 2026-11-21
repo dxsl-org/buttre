@@ -44,6 +44,10 @@ pub fn send_backspaces(count: usize) {
     if count == 0 {
         return;
     }
+    if let Some(hwnd) = super::message_transport::target() {
+        super::message_transport::post_replacement(hwnd, count, "");
+        return;
+    }
 
     debug!("Sending {} backspaces", count);
 
@@ -112,6 +116,10 @@ pub fn send_string(s: &str) {
     if s.is_empty() {
         return;
     }
+    if let Some(hwnd) = super::message_transport::target() {
+        super::message_transport::post_replacement(hwnd, 0, s);
+        return;
+    }
 
     debug!("Sending string: '{}'", s);
 
@@ -159,14 +167,20 @@ pub fn send_string(s: &str) {
 
 /// Send backspaces and string in one batch.
 ///
-/// In a Chromium omnibox (and ONLY there — see `omnibox_fix` for the
-/// two-gate detection) a raw `VK_BACK` is consumed dismissing the inline
-/// autocomplete selection instead of deleting the typed character, so the
-/// plain batch under-deletes by one. In that context this switches to the
-/// select-and-overwrite variant below; everywhere else the behavior is
-/// byte-for-byte what it always was.
+/// Two editor-specific routes, everywhere else the plain batch:
+/// - Windows 11 Notepad's editor garbles queued `SendInput` text, so there
+///   the edit is posted as window messages (see `message_transport`).
+/// - In a Chromium omnibox (and ONLY there — see `omnibox_fix` for the
+///   two-gate detection) a raw `VK_BACK` is consumed dismissing the inline
+///   autocomplete selection instead of deleting the typed character, so the
+///   plain batch under-deletes by one; there this switches to the
+///   select-and-overwrite variant below.
 #[cfg(windows)]
 pub fn send_replacement(backspace_count: usize, text: &str) {
+    if let Some(hwnd) = super::message_transport::target() {
+        super::message_transport::post_replacement(hwnd, backspace_count, text);
+        return;
+    }
     if backspace_count > 0 && super::omnibox_fix::should_apply_omnibox_fix() {
         debug!(
             "Omnibox fix: selection replacement, {} backspaces",
@@ -439,6 +453,10 @@ pub fn send_replacement_under_held_modifiers(backspace_count: usize, text: &str)
     // prefix is about to lift it — it would then skip the sandwich and select
     // nothing. Under-deleting by one in a Chromium omnibox while the toggle
     // chord is held is the far smaller failure.
+    //
+    // Never the posted-message transport either, even in Notepad: a posted
+    // VK_BACK is read against the editor thread's key state, where the held
+    // Ctrl turns it into delete-word — the very failure this batch prevents.
     let mut inputs =
         wrap_in_modifier_release(&held, build_plain_replacement(backspace_count, text));
     send_batch(&mut inputs, "replacement under held modifiers");

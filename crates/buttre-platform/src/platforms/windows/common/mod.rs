@@ -11,6 +11,7 @@
 pub mod candidate_window;
 pub mod input;
 pub mod key_utils;
+pub mod message_transport;
 pub mod omnibox_fix;
 pub mod vk_codes;
 

@@ -184,6 +184,30 @@ fn record_output_hwnd() {
     LAST_OUTPUT_HWND.store(hwnd as isize, Ordering::Release);
 }
 
+/// Deliver a keystroke the hook would otherwise pass through — `backspaces`
+/// deletions then `text` — on the posted-message channel when the focused
+/// editor uses it (`message_transport`). Returns `true` when posted, in which
+/// case the caller must block the original key.
+///
+/// Required by `message_transport`'s ordering invariant: posted messages
+/// overtake queued keyboard input, so with buttre's own edits posted, a
+/// passed-through key could land after an edit that was meant to follow it
+/// (`va` + `â` → `âa`). Only for keys typed while an engine is active: in
+/// English mode nothing is posted, so plain passthrough keeps its order.
+#[cfg(windows)]
+fn post_instead_of_passthrough(backspaces: usize, text: &str) -> bool {
+    match crate::platforms::windows::common::message_transport::target() {
+        Some(hwnd) => {
+            crate::platforms::windows::common::message_transport::post_replacement(
+                hwnd, backspaces, text,
+            );
+            record_output_hwnd();
+            true
+        }
+        None => false,
+    }
+}
+
 /// Pure comparison extracted from `dispatch_toggle_last_word` so it's
 /// unit-testable without a live HWND. `0` never matches (see the module docs
 /// above) — the safe default before the very first recorded output.
@@ -867,6 +891,16 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 }
             }
         }
+        // Engine active but nothing to rewrite: the OS would delete one
+        // character, so post that deletion when the editor needs ordered
+        // posted delivery. English mode (no keyboard) keeps plain passthrough.
+        let engine_active = KEYBOARD
+            .get()
+            .and_then(|keyboard| keyboard.try_read().ok())
+            .is_some_and(|kb_opt| kb_opt.is_some());
+        if engine_active && post_instead_of_passthrough(1, "") {
+            return 1;
+        }
         // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
         return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
     }
@@ -932,6 +966,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // Drop lock immediately - we'll lock again for processing below
         } else {
             // Lock failed - keyboard busy, skip this keystroke
+            if post_instead_of_passthrough(0, ch.encode_utf8(&mut [0; 4])) {
+                return 1;
+            }
             // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
             return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
         }
@@ -1011,6 +1048,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     if check_fast_typing_escape(ch) {
         debug!("Fast typing escape detected for '{}'", ch);
         reset_engine();
+        if post_instead_of_passthrough(0, ch.encode_utf8(&mut [0; 4])) {
+            return 1;
+        }
         // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
         return unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) };
     }
@@ -1244,7 +1284,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     // PROCESSING flag is cleared automatically by ProcessingGuard's Drop impl.
 
     // SAFETY: CallNextHookEx is safe because hook_handle is valid from SetWindowsHookExW
-    if block_key {
+    if block_key || post_instead_of_passthrough(0, ch.encode_utf8(&mut [0; 4])) {
         1
     } else {
         unsafe { CallNextHookEx(hook_handle as _, code, wparam, lparam) }

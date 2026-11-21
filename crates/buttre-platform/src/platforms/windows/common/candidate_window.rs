@@ -132,7 +132,7 @@ unsafe extern "system" fn window_proc(
 }
 
 /// Show candidates inline (returns formatted text to display)
-/// Format: "1天 2𡗶 (trời) 3霄 4𡗶 5天"
+/// Format: " 1天 2𡗶 trời 3霄 4𡗶 5天"
 pub fn show_candidates(candidates: Vec<Candidate>, input: String) -> Option<String> {
     if candidates.is_empty() {
         return None;
@@ -152,8 +152,9 @@ pub fn show_candidates(candidates: Vec<Candidate>, input: String) -> Option<Stri
         }
     }
 
-    // Format candidates: " 1𡗶 (trời) 2天 3霄"
-    // Display the full text (includes Vietnamese meaning in parentheses)
+    // Format candidates: " 1𡗶 trời 2天 3霄"
+    // Display includes the Vietnamese meaning, minus the parentheses the
+    // engine's display text carries (see `inline_label`).
     // Note: main_action already committed/replaced the input text,
     // so we only need to append candidates
     // Add leading space for better readability: "tr 1𡨸 2𡧲 3𡷿"
@@ -162,7 +163,7 @@ pub fn show_candidates(candidates: Vec<Candidate>, input: String) -> Option<Stri
         if i > 0 {
             formatted.push(' ');
         }
-        formatted.push_str(&format!("{}{}", i + 1, candidate.text));
+        formatted.push_str(&format!("{}{}", i + 1, inline_label(candidate)));
     }
 
     // Store formatted text for later deletion
@@ -180,6 +181,31 @@ pub fn show_candidates(candidates: Vec<Candidate>, input: String) -> Option<Stri
         formatted
     );
     Some(formatted)
+}
+
+/// Inline label of one candidate: the engine's display text `𡗶 (trời)` as
+/// `𡗶 trời`.
+///
+/// Every inline character is typed into the user's document and deleted
+/// again on the next keystroke; in Windows 11 Notepad each one costs
+/// milliseconds (measured: ~210 → ~150 ms per keystroke for a 5-candidate
+/// line without the parentheses). The numbered prefix already separates
+/// candidates, so the parentheses carry no information. Text that is not
+/// in `value (meaning)` form is shown unchanged.
+fn inline_label(candidate: &Candidate) -> std::borrow::Cow<'_, str> {
+    let meaning = candidate.value.as_deref().and_then(|value| {
+        let meaning = candidate
+            .text
+            .strip_prefix(value)?
+            .trim_start()
+            .strip_prefix('(')?
+            .strip_suffix(')')?;
+        Some((value, meaning))
+    });
+    match meaning {
+        Some((value, meaning)) => format!("{value} {meaning}").into(),
+        None => candidate.text.as_str().into(),
+    }
 }
 
 /// Hide candidates (clear inline state)
@@ -282,7 +308,7 @@ pub fn select_candidate(number: u8) -> Option<(String, usize)> {
 
     // Calculate total backspace count:
     // 1. Input text (e.g., "troi")
-    // 2. Candidates text (e.g., " 1𡗶 (trời) 2天 3霄")
+    // 2. Candidates text (e.g., " 1𡗶 trời 2天 3霄")
     let input_len = if let Some(input_lock) = INPUT_TEXT.get() {
         if let Ok(input_text) = input_lock.lock() {
             input_text.chars().count()
@@ -307,4 +333,39 @@ pub fn select_candidate(number: u8) -> Option<(String, usize)> {
 
     hide_candidates();
     Some((selected_value, backspace_count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buttre_engine::pipeline::CandidateType;
+
+    fn candidate(text: &str, value: Option<&str>) -> Candidate {
+        Candidate {
+            text: text.to_string(),
+            value: value.map(str::to_string),
+            candidate_type: CandidateType::Nom,
+            score: 0.0,
+        }
+    }
+
+    #[test]
+    fn inline_label_drops_parentheses_around_meaning() {
+        assert_eq!(inline_label(&candidate("𡗶 (trời)", Some("𡗶"))), "𡗶 trời");
+    }
+
+    /// Meanings that contain parentheses themselves keep their inner ones.
+    #[test]
+    fn inline_label_keeps_inner_parentheses() {
+        assert_eq!(
+            inline_label(&candidate("天 (trời (cõi))", Some("天"))),
+            "天 trời (cõi)"
+        );
+    }
+
+    #[test]
+    fn inline_label_leaves_other_shapes_unchanged() {
+        assert_eq!(inline_label(&candidate("天", None)), "天");
+        assert_eq!(inline_label(&candidate("天 trời", Some("天"))), "天 trời");
+    }
 }
