@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.9.1-beta] — 2026-11-21
+
 - windows (TSF): mỗi kiểu gõ là một bàn phím Windows riêng — "buttre Telex", "buttre VNI", "buttre Chữ Nôm" và từng bàn phím TOML — chọn bằng Win+Space như mọi bàn phím khác. Kiểu gõ lấy theo profile đang bật (`OnActivated`/`GetActiveProfile`), không còn đọc `Settings::input_method`. Telex giữ GUID profile cũ nên bàn phím đã thêm trước đó vẫn còn; GUID của các kiểu khác tính cố định từ id (`tsf/profiles.rs`), TOML thêm sau có profile khi đăng ký lại
 - windows (TSF): Ctrl+Shift+1…9 chuyển sang bàn phím buttre thứ N (1 Telex, 2 VNI, 3 Nôm, …) và bật buttre; Ctrl+Shift+` tắt buttre (gõ thẳng, bàn phím giữ nguyên) — Ctrl+Shift+0 cũng tắt nhưng Windows thường chặn tổ hợp này. Bật/tắt chung cho mọi ứng dụng (global compartment của TSF), không ghi file
 - windows (TSF): icon buttre cạnh chữ ENG trên thanh tác vụ (`GUID_LBI_INPUTMODE`): icon kiểu gõ khi bật, "E" khi tắt; bấm trái bật/tắt, bấm phải mở menu "Cấu hình buttre…" / Bật–Tắt
