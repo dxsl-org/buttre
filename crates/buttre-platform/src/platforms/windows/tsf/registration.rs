@@ -259,22 +259,42 @@ pub fn unregister_tsf_service() -> Result<()> {
     }
 }
 
+// Define GUID manually to match CLSID_BUTTRE_TEXT_SERVICE string
+const CLSID_BUTTRE: windows::core::GUID = windows::core::GUID {
+    data1: 0xE6B8A6C0,
+    data2: 0x1234,
+    data3: 0x5678,
+    data4: [0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78],
+};
+
+/// TSF categories the text service declares, as `(category, label)`.
+///
+/// `IMMERSIVESUPPORT` is how an IME declares itself compatible with Windows
+/// (packaged) apps and `SYSTRAYSUPPORT` with the taskbar input indicator.
+/// Every built-in keyboard IME declares both; buttre without them was never
+/// loaded into Windows Terminal. Deliberately NOT declared: `COMLESS`
+/// (buttre creates COM objects while active) and `UIELEMENTENABLED`
+/// (promises a UI-less candidate API buttre does not implement).
+fn categories() -> [(windows::core::GUID, &'static str); 4] {
+    use windows::Win32::UI::TextServices::{
+        GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+        GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, GUID_TFCAT_TIP_KEYBOARD,
+    };
+    [
+        (GUID_TFCAT_TIP_KEYBOARD, "Keyboard"),
+        (
+            GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+            "DisplayAttributeProvider",
+        ),
+        (GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, "ImmersiveSupport"),
+        (GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, "SystraySupport"),
+    ]
+}
+
 // Register Categories using ITfCategoryMgr
 fn register_categories() -> Result<()> {
-    use windows::core::*;
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
-    use windows::Win32::UI::TextServices::{
-        CLSID_TF_CategoryMgr, ITfCategoryMgr, GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
-        GUID_TFCAT_TIP_KEYBOARD,
-    };
-
-    // Define GUID manually to match CLSID_BUTTRE_TEXT_SERVICE string
-    const CLSID_BUTTRE: GUID = GUID {
-        data1: 0xE6B8A6C0,
-        data2: 0x1234,
-        data3: 0x5678,
-        data4: [0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78],
-    };
+    use windows::Win32::UI::TextServices::{CLSID_TF_CategoryMgr, ITfCategoryMgr};
 
     // SAFETY:
     // 1. CoCreateInstance is properly declared in windows crate
@@ -288,35 +308,18 @@ fn register_categories() -> Result<()> {
             CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
                 .context("Failed to create CategoryMgr")?;
 
-        cat_mgr
-            .RegisterCategory(&CLSID_BUTTRE, &GUID_TFCAT_TIP_KEYBOARD, &CLSID_BUTTRE)
-            .context("Failed to register Keyboard Category")?;
-
-        cat_mgr
-            .RegisterCategory(
-                &CLSID_BUTTRE,
-                &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
-                &CLSID_BUTTRE,
-            )
-            .context("Failed to register DisplayAttributeProvider Category")?;
+        for (category, label) in categories() {
+            cat_mgr
+                .RegisterCategory(&CLSID_BUTTRE, &category, &CLSID_BUTTRE)
+                .with_context(|| format!("Failed to register {label} category"))?;
+        }
     }
     Ok(())
 }
 
 fn unregister_categories() -> Result<()> {
-    use windows::core::*;
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
-    use windows::Win32::UI::TextServices::{
-        CLSID_TF_CategoryMgr, ITfCategoryMgr, GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
-        GUID_TFCAT_TIP_KEYBOARD,
-    };
-
-    const CLSID_BUTTRE: GUID = GUID {
-        data1: 0xE6B8A6C0,
-        data2: 0x1234,
-        data3: 0x5678,
-        data4: [0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78],
-    };
+    use windows::Win32::UI::TextServices::{CLSID_TF_CategoryMgr, ITfCategoryMgr};
 
     // SAFETY:
     // 1. CoCreateInstance is properly declared in windows crate
@@ -327,13 +330,9 @@ fn unregister_categories() -> Result<()> {
         if let Ok(cat_mgr) =
             CoCreateInstance::<_, ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
         {
-            let _ =
-                cat_mgr.UnregisterCategory(&CLSID_BUTTRE, &GUID_TFCAT_TIP_KEYBOARD, &CLSID_BUTTRE);
-            let _ = cat_mgr.UnregisterCategory(
-                &CLSID_BUTTRE,
-                &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
-                &CLSID_BUTTRE,
-            );
+            for (category, _) in categories() {
+                let _ = cat_mgr.UnregisterCategory(&CLSID_BUTTRE, &category, &CLSID_BUTTRE);
+            }
         }
     }
     Ok(())

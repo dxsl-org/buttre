@@ -143,6 +143,7 @@ $routed = Get-ChildItem $assemblyRoot -Recurse -ErrorAction SilentlyContinue |
         }
     }
 
+$preloadKey = "HKCU:\Keyboard Layout\Preload"
 $inPreload = if (Test-Path $preloadKey) {
     $p = Get-ItemProperty $preloadKey
     (Get-Item $preloadKey).GetValueNames() | ForEach-Object { $p.$_ }

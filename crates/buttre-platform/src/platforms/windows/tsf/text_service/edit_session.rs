@@ -17,6 +17,9 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::TextServices::*;
+use windows::Win32::UI::WindowsAndMessaging::{
+    IsWindow, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+};
 
 /// Helper function to set selection in a context
 ///
@@ -48,25 +51,37 @@ fn set_selection(
 /// the candidate panel silently fell back to a fixed screen position and
 /// appeared far away from the text being typed.
 ///
-/// Run this with `TF_ES_SYNC | TF_ES_READ`: the answer is needed before the
-/// panel can be placed, and a deferred session would place it a frame late,
-/// at the previous caret.
+/// Requested `TF_ES_SYNC | TF_ES_READ` first: the answer is needed before the
+/// panel is placed. A host that refuses the synchronous lock gets the same
+/// session deferred, with `move_window` set: it then moves the already-shown
+/// panel when it runs, instead of leaving it at a fallback position.
 #[implement(ITfEditSession)]
 pub struct QueryTextExt {
     context: ITfContext,
-    range: ITfRange,
+    /// The composition's range; `None` measures the caret (default
+    /// selection) instead — the composition may not exist yet on the first
+    /// key of a word, because it is started by an asynchronous session.
+    range: Option<ITfRange>,
     /// Filled in by [`ITfEditSession_Impl::DoEditSession`]; left `None` when
     /// the view cannot report an extent (some hosts return a clipped or empty
     /// rect while scrolling).
     out: Rc<Cell<Option<RECT>>>,
+    /// Window to move under the measured text, for the deferred case.
+    move_window: Option<HWND>,
 }
 
 impl QueryTextExt {
-    pub fn new(context: ITfContext, range: ITfRange, out: Rc<Cell<Option<RECT>>>) -> Self {
+    pub fn new(
+        context: ITfContext,
+        range: Option<ITfRange>,
+        out: Rc<Cell<Option<RECT>>>,
+        move_window: Option<HWND>,
+    ) -> Self {
         Self {
             context,
             range,
             out,
+            move_window,
         }
     }
 }
@@ -76,20 +91,56 @@ impl ITfEditSession_Impl for QueryTextExt_Impl {
         // SAFETY: `ec` is the cookie TSF granted for this session, and
         // `context`/`range` are the interfaces handed to the constructor.
         unsafe {
-            let view: ITfContextView = self.context.cast()?;
+            let range = match &self.this.range {
+                Some(range) => range.clone(),
+                None => {
+                    let mut selection = [TF_SELECTION::default(); 1];
+                    let mut fetched = 0u32;
+                    self.this.context.GetSelection(
+                        ec,
+                        TF_DEFAULT_SELECTION,
+                        &mut selection,
+                        &mut fetched,
+                    )?;
+                    let [TF_SELECTION { range, .. }] = selection;
+                    match ManuallyDrop::into_inner(range) {
+                        Some(range) if fetched > 0 => range,
+                        _ => return Ok(()),
+                    }
+                }
+            };
+            let view: ITfContextView = self.this.context.cast()?;
             let mut rect = RECT::default();
             let mut clipped = BOOL(0);
-            view.GetTextExt(ec, &self.range, &mut rect, &mut clipped)?;
+            view.GetTextExt(ec, &range, &mut rect, &mut clipped)?;
             // An all-zero rect means the host had nothing to report (caret
             // scrolled out of view). Treat it as "unknown" so the caller keeps
             // its previous position instead of jumping to the screen corner.
-            if rect.left != 0 || rect.top != 0 || rect.right != 0 || rect.bottom != 0 {
-                self.out.set(Some(rect));
+            if rect.left == 0 && rect.top == 0 && rect.right == 0 && rect.bottom == 0 {
+                debug!("GetTextExt reported an empty rect");
+                return Ok(());
+            }
+            self.this.out.set(Some(rect));
+            if let Some(window) = self.this.move_window {
+                if IsWindow(Some(window)).as_bool() {
+                    let _ = SetWindowPos(
+                        window,
+                        None,
+                        rect.left,
+                        rect.bottom + PANEL_GAP,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         Ok(())
     }
 }
+
+/// Pixels between the measured text and the candidate panel below it.
+pub const PANEL_GAP: i32 = 2;
 
 /// Edit Session 1: Insert Text at Selection
 ///
@@ -401,10 +452,12 @@ impl ITfEditSession_Impl for EndComposition_Impl {
                 .composition
                 .ShiftStart(ec, &new_composition_start)?;
 
-            // 3. Set selection at end
-            set_selection(&self.this.context, ec, new_composition_start, TF_AE_END)?;
+            // The caret is deliberately left where it is. Every writer already
+            // put it at the end of the composition; when the composition ends
+            // because the user clicked or moved elsewhere (`OnEndEdit`),
+            // setting it here dragged the caret back to the word.
 
-            // 4. End composition
+            // 3. End composition
             self.this.composition.EndComposition(ec)?;
 
             debug!("Composition ended successfully");

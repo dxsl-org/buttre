@@ -92,11 +92,29 @@ impl CandidatePanel {
         Ok(Self { hwnd, shared })
     }
 
+    /// False once Windows has destroyed the panel's window — which happens
+    /// with its owner (see [`Self::show`]). The caller then builds a new one.
+    pub fn is_alive(&self) -> bool {
+        // SAFETY: IsWindow accepts any handle value, including stale ones.
+        unsafe { IsWindow(Some(self.hwnd)).as_bool() }
+    }
+
+    /// The panel's window, for an edit session that positions it later.
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
     /// Show `state`'s current page at screen position `(x, y)`, resizing to fit.
     ///
     /// `y` should already be the BOTTOM of the caret so the panel sits under the
     /// text rather than over it.
-    pub fn show(&self, state: &CandidateState, x: i32, y: i32) {
+    ///
+    /// `owner` is the host's window. Microsoft's IME requirements make the
+    /// candidate window an OWNED window of the app it serves: an unowned
+    /// top-level popup was never seen over Windows Terminal. Set on every show
+    /// because one panel serves every window of the host thread. An owner
+    /// destroys its owned windows with it, hence [`Self::is_alive`].
+    pub fn show(&self, state: &CandidateState, x: i32, y: i32, owner: Option<HWND>) {
         if state.is_empty() {
             self.hide();
             return;
@@ -119,9 +137,14 @@ impl CandidatePanel {
         let size = candidate_render::measure(self.hwnd, self.shared.font, &content);
         *self.shared.content.borrow_mut() = content;
 
-        // SAFETY: hwnd is this panel's own window, valid until Drop.
+        // SAFETY: hwnd is this panel's own window, valid until Drop; `owner`
+        // is a window handle the host reported (a stale one only makes
+        // SetWindowLongPtrW fail). GWLP_HWNDPARENT on a popup sets its OWNER.
         // SWP_NOACTIVATE keeps the host application's focus intact.
         unsafe {
+            if let Some(owner) = owner {
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+            }
             let _ = SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),

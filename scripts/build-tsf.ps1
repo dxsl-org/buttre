@@ -143,9 +143,11 @@ were missing the TSF category registration a working text service needs
 (`ITfCategoryMgr`, a COM call no registry row can express). #>
 function Invoke-ProductRegistration([string]$exePath, [switch]$Remove) {
     $flag = if ($Remove) { "--unregister-tsf" } else { "--register-tsf" }
-    & $exePath $flag
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: $exePath $flag failed (code $LASTEXITCODE)." -ForegroundColor Red
+    # buttre.exe is a GUI-subsystem binary: `& $exe` returns before it exits,
+    # leaving $LASTEXITCODE empty and its output printed after this check.
+    $process = Start-Process -FilePath $exePath -ArgumentList $flag -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        Write-Host "ERROR: $exePath $flag failed (code $($process.ExitCode))." -ForegroundColor Red
         exit 1
     }
 }

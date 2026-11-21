@@ -52,9 +52,13 @@ use windows::core::HSTRING;
 /// Pending composition data
 ///
 /// Holds the text and cursor position that we want to apply to the document.
+/// Both offsets are UTF-16 units — TSF's unit, not Rust `char`s.
 #[derive(Clone, Default)]
 pub struct PendingComposition {
     pub text: HSTRING,
+    /// Caret position inside `text`, in UTF-16 units.
     pub cursor: usize,
-    pub previous_length: usize, // Track previous text length for backspace
+    /// Length of the previous composition text in UTF-16 units, for the
+    /// recovery path that rewrites already-committed text.
+    pub previous_length: usize,
 }

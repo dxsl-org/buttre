@@ -11,14 +11,16 @@ use super::display_attribute::{
     DisplayAttributeEnum, DisplayAttributeInfo, GUID_DISPLAY_ATTRIBUTE_CONVERTED,
     GUID_DISPLAY_ATTRIBUTE_INPUT,
 };
-use super::edit_session::{EndComposition, InsertText, QueryTextExt, SetCompositionString};
+use super::edit_session::{
+    EndComposition, InsertText, QueryTextExt, SetCompositionString, PANEL_GAP,
+};
 use super::vietnamese_engine::{CandidateMotion, VietnameseEngine};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use tracing::debug;
 
 use crate::platforms::windows::tsf::com::{dll_add_ref, dll_release};
-use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, LPARAM, WPARAM};
+use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::TextServices::{CLSID_TF_CategoryMgr, ITfCategoryMgr};
@@ -195,6 +197,47 @@ impl TextService {
         }
     }
 
+    /// Queue `session` on `context`, synchronously when `sync` asks for it.
+    ///
+    /// Sync exists for one caller: finalizing the composition from
+    /// `OnTestKeyDown` for a key the application is about to handle (Enter,
+    /// arrows, shortcuts). That must land BEFORE the application acts on the
+    /// key — deferred, the newline or paste would go inside the composition
+    /// and the next composition update would overwrite it.
+    ///
+    /// Callers pass `sync = false` while an earlier `SetCompositionString` is
+    /// still queued: it would run after this one, out of order. A refused
+    /// lock (`TF_E_SYNCHRONOUS`) falls back to async — later than ideal,
+    /// never lost.
+    fn request_session(
+        &self,
+        context: &ITfContext,
+        session: &ITfEditSession,
+        sync: bool,
+    ) -> Result<()> {
+        // SAFETY: `context` and `session` are valid COM interfaces; client_id
+        // is the id TSF handed us at Activate.
+        unsafe {
+            if sync {
+                let granted = context.RequestEditSession(
+                    self.client_id.get(),
+                    session,
+                    TF_ES_SYNC | TF_ES_READWRITE,
+                )?;
+                if granted != TF_E_SYNCHRONOUS {
+                    return Ok(());
+                }
+                debug!("Synchronous edit session refused, deferring it");
+            }
+            context.RequestEditSession(
+                self.client_id.get(),
+                session,
+                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn write_text(
         &self,
         context: &ITfContext,
@@ -202,7 +245,28 @@ impl TextService {
         cursor: usize,
         sink: ITfCompositionSink,
     ) -> Result<()> {
+        self.write_text_with(context, text, cursor, sink, false)
+    }
+
+    /// [`Self::write_text`], optionally synchronous — see
+    /// [`Self::request_session`].
+    ///
+    /// `cursor` counts characters, like the engine; this is where it becomes
+    /// a TSF offset, which counts UTF-16 units. Most Nôm characters lie
+    /// outside the BMP (𡗶 is two units), so passing the character count
+    /// through put the caret between the two halves of the character, and
+    /// the next keystroke split it.
+    fn write_text_with(
+        &self,
+        context: &ITfContext,
+        text: &str,
+        cursor: usize,
+        sink: ITfCompositionSink,
+        sync: bool,
+    ) -> Result<()> {
         debug!("TextService::write_text: {}", text);
+        let cursor = utf16_offset(text, cursor);
+        let text_len = text.encode_utf16().count();
 
         // Reuse in-flight session if TSF hasn't executed it yet.
         // Only update text/cursor — previous_length was captured at session-create
@@ -213,7 +277,7 @@ impl TextService {
             let mut p = rc.borrow_mut();
             p.text = text.into();
             p.cursor = cursor;
-            self.last_text_len.set(text.chars().count());
+            self.last_text_len.set(text_len);
             return Ok(());
         }
 
@@ -224,21 +288,14 @@ impl TextService {
             previous_length,
         }));
         *self.pending_edit.borrow_mut() = Rc::downgrade(&pending);
-        // Track char count (UTF-16 BMP units) so DoEditSession's ShiftStart is correct.
-        self.last_text_len.set(text.chars().count());
-
+        // UTF-16 units, like every TSF offset: DoEditSession's recovery path
+        // shifts the range back by exactly this much.
+        self.last_text_len.set(text_len);
         let da = VARIANT::from(self.da_atom_input.get() as i32);
         let session =
             SetCompositionString::new(context.clone(), self.composition.clone(), sink, da, pending);
         let session_interface: ITfEditSession = session.into();
-        unsafe {
-            context.RequestEditSession(
-                self.client_id.get(),
-                &session_interface,
-                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
-            )?;
-        }
-        Ok(())
+        self.request_session(context, &session_interface, sync)
     }
 
     /// Insert finished text straight into the document, with no composition.
@@ -260,23 +317,20 @@ impl TextService {
 
         let session = InsertText::new(context.clone(), HSTRING::from(text));
         let session_interface: ITfEditSession = session.into();
-
-        // SAFETY: `context` and `session_interface` are valid COM interfaces;
-        // client_id is the id TSF handed us at Activate.
-        unsafe {
-            context.RequestEditSession(
-                self.client_id.get(),
-                &session_interface,
-                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
-            )?;
-        }
-        Ok(())
+        self.request_session(context, &session_interface, false)
     }
 
     /// Helper to end composition via EndComposition edit session
-    #[allow(unused_must_use)]
     pub fn end_composition(&self, context: &ITfContext) -> Result<()> {
+        self.end_composition_with(context, false)
+    }
+
+    /// [`Self::end_composition`], optionally synchronous — see
+    /// [`Self::request_session`].
+    fn end_composition_with(&self, context: &ITfContext, sync: bool) -> Result<()> {
         debug!("TextService::end_composition");
+        // A write still queued must land first, so this cannot jump ahead.
+        let sync = sync && self.pending_edit.borrow().upgrade().is_none();
 
         // Invalidate the write-coalescing slot: `write_text` reuses
         // `pending_edit` while its `SetCompositionString` session is still
@@ -292,14 +346,7 @@ impl TextService {
         if let Some(composition) = self.composition.get() {
             let session = EndComposition::new(context.clone(), composition);
             let session_interface: ITfEditSession = session.into();
-
-            unsafe {
-                context.RequestEditSession(
-                    self.client_id.get(),
-                    &session_interface,
-                    TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
-                )?;
-            }
+            self.request_session(context, &session_interface, sync)?;
 
             // Forget the composition we just ended (CRITICAL). Nothing else
             // will: `OnCompositionTerminated` fires only when the APPLICATION
@@ -321,28 +368,39 @@ impl TextService {
         Ok(())
     }
 
-    /// Screen position just under the composition, for placing the candidate
-    /// panel. `None` when the host cannot report one.
+    /// Screen position just under the composition — or under the caret while
+    /// no composition exists yet — for placing the candidate panel. `None`
+    /// when the host cannot report one now.
     ///
     /// The extent has to be read inside an edit session — see [`QueryTextExt`].
-    /// The session is requested SYNCHRONOUSLY; a host that refuses sync
-    /// sessions simply yields `None` rather than a stale position.
-    fn composition_screen_pos(&self, context: &ITfContext) -> Option<(i32, i32)> {
-        let composition = self.composition.get()?;
+    /// Requested synchronously; when the host refuses that, the session is
+    /// deferred and moves `panel` itself once it runs.
+    fn composition_screen_pos(&self, context: &ITfContext, panel: HWND) -> Option<(i32, i32)> {
         // SAFETY: `composition` is the live ITfComposition; GetRange takes no
         // edit cookie. RequestEditSession is a plain COM call on a valid
         // context with the client id TSF gave us at Activate.
         unsafe {
-            let range = composition.GetRange().ok()?;
+            let range = self.composition.get().and_then(|c| c.GetRange().ok());
             let out = Rc::new(Cell::new(None));
             let session: ITfEditSession =
-                QueryTextExt::new(context.clone(), range, out.clone()).into();
-            context
+                QueryTextExt::new(context.clone(), range.clone(), out.clone(), None).into();
+            let granted = context
                 .RequestEditSession(self.client_id.get(), &session, TF_ES_SYNC | TF_ES_READ)
+                .inspect_err(|e| debug!("Text extent query failed: {:?}", e))
                 .ok()?;
+            if granted == TF_E_SYNCHRONOUS {
+                debug!("Text extent query deferred; it will move the panel itself");
+                let session: ITfEditSession =
+                    QueryTextExt::new(context.clone(), range, out, Some(panel)).into();
+                let _ = context.RequestEditSession(
+                    self.client_id.get(),
+                    &session,
+                    TF_ES_ASYNC | TF_ES_READ,
+                );
+                return None;
+            }
             let rect = out.get()?;
-            // Two pixels of air so the panel does not touch the text.
-            Some((rect.left, rect.bottom + 2))
+            Some((rect.left, rect.bottom + PANEL_GAP))
         }
     }
 
@@ -365,33 +423,58 @@ impl TextService {
             return;
         }
 
-        // Position FIRST, while no RefCell is borrowed — for the same
-        // re-entrancy reason as above, and `composition_screen_pos` is the one
-        // call here that runs application code (a synchronous edit session).
-        //
-        // Three sources, best first. The composition extent is exact but
-        // unavailable on the FIRST keystroke of a word — `write_text` starts the
-        // composition through an ASYNC edit session, so there is nothing to
-        // measure yet. Without the caret fallback that first popup opened in the
-        // corner of the screen and only jumped into place on the second key.
-        let (x, y) = self
-            .composition_screen_pos(context)
-            .or_else(system_caret_pos)
-            .unwrap_or_else(|| self.last_panel_pos.get());
-        self.last_panel_pos.set((x, y));
-
-        let mut slot = self.candidate_panel.borrow_mut();
-        if slot.is_none() {
-            match CandidatePanel::new() {
-                Ok(panel) => *slot = Some(panel),
-                Err(e) => {
-                    debug!("Candidate panel unavailable: {:?}", e);
-                    return;
+        // The panel exists BEFORE positioning, so a deferred extent query has
+        // a window to move. Its borrow ends here: positioning runs
+        // application code, which can re-enter this object.
+        let panel_hwnd = {
+            let mut slot = self.candidate_panel.borrow_mut();
+            // An owner takes its owned windows down with it: rebuild after that.
+            if slot.as_ref().is_some_and(|panel| !panel.is_alive()) {
+                *slot = None;
+            }
+            if slot.is_none() {
+                match CandidatePanel::new() {
+                    Ok(panel) => *slot = Some(panel),
+                    Err(e) => {
+                        debug!("Candidate panel unavailable: {:?}", e);
+                        return;
+                    }
                 }
             }
-        }
-        if let Some(panel) = slot.as_ref() {
-            panel.show(&state, x, y);
+            match slot.as_ref() {
+                Some(panel) => panel.hwnd(),
+                None => return,
+            }
+        };
+
+        // Three sources, best first: the text extent (composition, or the
+        // caret before the composition exists), the system caret (plain Win32
+        // editors), the last position used.
+        let extent = self.composition_screen_pos(context, panel_hwnd);
+        let caret = if extent.is_none() {
+            system_caret_pos()
+        } else {
+            None
+        };
+        let (x, y) = extent
+            .or(caret)
+            .unwrap_or_else(|| self.last_panel_pos.get());
+        self.last_panel_pos.set((x, y));
+        let owner = candidate_owner(context);
+        debug!(
+            "Candidate panel at ({x}, {y}) from {}, owner {:?}",
+            if extent.is_some() {
+                "text extent"
+            } else if caret.is_some() {
+                "system caret"
+            } else {
+                "last position"
+            },
+            owner
+        );
+
+        if let Some(panel) = self.candidate_panel.borrow().as_ref() {
+            panel.show(&state, x, y, owner);
         }
     }
 
@@ -664,6 +747,45 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 }
 
 impl TextService_Impl {
+    /// Commit the open composition as finished text and forget the word.
+    ///
+    /// The single commit path for everything that ends a word without the
+    /// engine committing it itself: Enter, Escape, navigation and editing
+    /// keys, shortcuts. The boundary repair is probed and learning collected
+    /// BEFORE `reset` discards the raw keystrokes both read. `sync` is for
+    /// keys the application acts on right after (see `request_session`).
+    fn finalize_composition(&self, context: &ITfContext, sync: bool) {
+        if self.this.composition.is_started() {
+            // Bound to a local so the engine borrow ends before the COM calls
+            // below, which can re-enter this object.
+            let repaired = self.this.vietnamese_engine.borrow().boundary_repair();
+            if let Some(repaired) = repaired {
+                let sink: ITfCompositionSink = {
+                    let r: InterfaceRef<'_, ITfCompositionSink> = self.as_interface_ref();
+                    r.to_owned()
+                };
+                let len = repaired.chars().count();
+                if let Err(e) = self
+                    .this
+                    .write_text_with(context, &repaired, len, sink, sync)
+                {
+                    debug!("Failed to write boundary-repair text: {:?}", e);
+                }
+            }
+            if let Err(e) = self.this.end_composition_with(context, sync) {
+                debug!("Failed to end composition: {:?}", e);
+            }
+            // The word stays in the document (ending finalizes, never
+            // deletes), so it was accepted: collect before the reset below.
+            self.this
+                .vietnamese_engine
+                .borrow_mut()
+                .collect_pending_learning();
+        }
+        self.this.vietnamese_engine.borrow_mut().reset();
+        self.this.hide_candidates();
+    }
+
     /// Start watching `context` for edits, unless we already are.
     ///
     /// Advised per context rather than once per thread because
@@ -867,9 +989,16 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
         if self.this.key_busy.get() {
             return Ok(());
         }
-        if pdimfocus.is_null() && self.this.composition.is_started() {
-            debug!("OnSetFocus: focus lost, ending composition");
-            // SAFETY: pdimprevfocus is valid when pdimfocus is null per TSF contract
+        // Any move of focus OFF the document holding the composition ends it —
+        // focus lost entirely (`pdimfocus` null) or moved to another document
+        // of this thread (a Notepad tab, a find box). Left open, the engine's
+        // keystrokes carried over and the next word typed in the new
+        // document was composed onto the old one's.
+        let moved_away = (*pdimfocus).clone() != (*pdimprevfocus).clone();
+        if moved_away && self.this.composition.is_started() {
+            debug!("OnSetFocus: focus left the composing document, ending composition");
+            // SAFETY: GetBase is a plain COM call on the document manager TSF
+            // just handed us as the previously focused one.
             unsafe {
                 if let Ok(prev) = pdimprevfocus.ok() {
                     if let Ok(context) = prev.GetBase() {
@@ -1039,6 +1168,7 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
 /// `WindowsBackend::owns_word_toggle_chord`.
 const VK_WORD_TOGGLE: u16 = 0x5A; // 'Z'
 
+const VK_BACK: u16 = 0x08;
 const VK_RETURN: u16 = 0x0D;
 const VK_ESCAPE: u16 = 0x1B;
 const VK_SPACE: u16 = 0x20;
@@ -1048,6 +1178,40 @@ const VK_UP: u16 = 0x26;
 const VK_DOWN: u16 = 0x28;
 const VK_DIGIT_1: u16 = 0x31;
 const VK_DIGIT_9: u16 = 0x39;
+
+/// Clears `TextService::key_busy` when `OnKeyDown` returns, on every path.
+struct KeyBusyGuard<'a>(&'a Cell<bool>);
+
+impl Drop for KeyBusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+/// TSF offset (UTF-16 units) of the position `chars` characters into `text`.
+/// Clamped to the end of `text`.
+fn utf16_offset(text: &str, chars: usize) -> usize {
+    text.chars().take(chars).map(char::len_utf16).sum()
+}
+
+/// The window the candidate panel must be owned by: the context's view
+/// window, else the focused window — Microsoft's documented recipe for IME
+/// candidate windows. `None` leaves the panel unowned, as before.
+fn candidate_owner(context: &ITfContext) -> Option<windows::Win32::Foundation::HWND> {
+    // SAFETY: plain COM calls on a live context TSF handed us; GetFocus has no
+    // preconditions and returns a null handle when nothing has focus.
+    unsafe {
+        let view_window = context
+            .GetActiveView()
+            .and_then(|view| view.GetWnd())
+            .ok()
+            .filter(|hwnd| !hwnd.is_invalid());
+        view_window.or_else(|| {
+            let focus = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
+            (!focus.is_invalid()).then_some(focus)
+        })
+    }
+}
 
 /// Tell buttre-core that its data files sit next to THIS DLL, not next to the
 /// host application's executable.
@@ -1212,17 +1376,41 @@ fn is_printable_key(vkey: u16) -> bool {
 ///   would swallow the user's typing outright.
 ///
 /// Navigation and editing keys are now claimed by NOTHING: the caret moves in
-/// the application, and `ITfTextEditSink::OnEndEdit` tells us about it
-/// afterwards. Escape is the one exception — cancelling the composition without
-/// passing the key on is what every IME does, and what the candidate popup
-/// needs.
+/// the application. Mid-word they first commit the composition
+/// (`interrupts_composition`, from `OnTestKeyDown`). Escape and Backspace are
+/// the exceptions while composing — Escape cancels like every IME does,
+/// Backspace must edit the ENGINE's keystrokes: left to the application it
+/// deleted a character the engine still held, and the next tone key brought
+/// it back.
 fn claims_key(vkey: u16, engine_active: bool, composing: bool, candidates_open: bool) -> bool {
     if !engine_active {
         return false;
     }
     is_printable_key(vkey)
-        || (composing && vkey == VK_ESCAPE)
+        || (composing && matches!(vkey, VK_ESCAPE | VK_BACK))
         || (candidates_open && is_candidate_key(vkey))
+}
+
+/// Must the open composition be committed before the application handles
+/// this (unclaimed) key?
+///
+/// Every key that reaches the application mid-word acts at the caret, which
+/// sits inside or at the end of the composition: Enter's newline, a Tab, a
+/// paste, a Delete would land inside it and be overwritten by the next
+/// composition update, and the engine would carry the word's keystrokes into
+/// the next one. Only keys that do nothing on their own are exempt —
+/// modifiers (Shift must not commit mid-word), lock keys and IME-mode keys.
+fn interrupts_composition(vkey: u16) -> bool {
+    !matches!(vkey,
+        0x10..=0x12 |  // VK_SHIFT, VK_CONTROL, VK_MENU
+        0x14 |         // VK_CAPITAL
+        0x15..=0x1A |  // IME mode keys (kana/hangul, IME on/off, junja, final, kanji)
+        0x1C..=0x1F |  // VK_CONVERT .. VK_MODECHANGE
+        0x5B | 0x5C |  // VK_LWIN, VK_RWIN
+        0x90 | 0x91 |  // VK_NUMLOCK, VK_SCROLL
+        0xA0..=0xA5 |  // left/right Shift, Ctrl, Alt
+        0xE5           // VK_PROCESSKEY
+    )
 }
 
 impl ITfKeyEventSink_Impl for TextService_Impl {
@@ -1233,26 +1421,31 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
 
     fn OnTestKeyDown(
         &self,
-        _pic: Ref<'_, ITfContext>,
+        pic: Ref<'_, ITfContext>,
         wParam: WPARAM,
         _lParam: LPARAM,
     ) -> Result<BOOL> {
         let vkey = wParam.0 as u16;
 
-        // Check for modifiers first
-        if should_ignore(vkey) {
-            return Ok(BOOL(0));
-        }
-
         let engine_active = self.this.vietnamese_engine.borrow().is_active();
         let composing = self.this.composition.is_started();
         let candidates_open = !self.this.vietnamese_engine.borrow().candidates().is_empty();
-        let eaten = claims_key(vkey, engine_active, composing, candidates_open);
+        // Ctrl/Alt chords belong to the application (except our own hotkeys).
+        let eaten =
+            !should_ignore(vkey) && claims_key(vkey, engine_active, composing, candidates_open);
 
         debug!(
             "OnTestKeyDown: vkey={:?}, active={}, composing={}, eaten={}",
             vkey, engine_active, composing, eaten
         );
+
+        // This is the last moment before the application sees the key —
+        // `OnKeyDown` never runs for a key not claimed here.
+        if !eaten && composing && interrupts_composition(vkey) {
+            if let Some(context) = (*pic).clone() {
+                self.finalize_composition(&context, true);
+            }
+        }
 
         Ok(BOOL(eaten as i32))
     }
@@ -1294,64 +1487,48 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             }
         }
 
-        // Early exits before key_busy is set — these keys pass through immediately
-        if is_buffer_reset_key(vkey) {
-            debug!(
-                "Buffer reset key detected (vkey={}), resetting engine",
-                vkey
-            );
-            if self.this.composition.is_started() {
+        // Some hosts (Notepad, measured: 0 `OnTestKeyDown` against 459
+        // `OnKeyDown`) never ask `OnTestKeyDown` and send EVERY key here, so
+        // the return value is what decides whether the key is eaten. Apply the
+        // same rule `OnTestKeyDown` would have: a key we do not claim goes back
+        // to the application untouched — after committing the word if it acts
+        // on the document. Eating it instead swallowed every Backspace typed
+        // after a word had been committed. In hosts that do call
+        // `OnTestKeyDown`, an unclaimed key never reaches this point.
+        let engine_active = self.this.vietnamese_engine.borrow().is_active();
+        let composing = self.this.composition.is_started();
+        if should_ignore(vkey) || !claims_key(vkey, engine_active, composing, candidates_open) {
+            if composing && interrupts_composition(vkey) {
                 if let Some(context) = (*pic).clone() {
-                    // Word-boundary final repair (event-sourcing-completion
-                    // Phase 3): this reset-key commit path ends the
-                    // composition directly, bypassing process_key /
-                    // ConfirmComposition — probe BEFORE resetting the engine
-                    // below (reset() clears the state the probe reads) and
-                    // fold the correction in, same as the Enter branch.
-                    if let Some(repaired) = self.this.vietnamese_engine.borrow().boundary_repair() {
-                        let sink: ITfCompositionSink = {
-                            let r: InterfaceRef<'_, ITfCompositionSink> = self.as_interface_ref();
-                            r.to_owned()
-                        };
-                        if let Err(e) = self.this.write_text(
-                            &context,
-                            &repaired,
-                            repaired.chars().count(),
-                            sink,
-                        ) {
-                            debug!("Failed to write boundary-repair text: {:?}", e);
-                        }
-                    }
-                    let _ = self.this.end_composition(&context);
+                    self.finalize_composition(&context, true);
                 }
-                // COMMIT flush: every buffer-reset key on this branch —
-                // Escape included — ends the composition with the text
-                // STAYING in the document (end_composition finalizes, never
-                // deletes), so the word was accepted and learning collects
-                // BEFORE the reset below discards the raw. Inside the
-                // is_started guard on purpose: with no composition, the
-                // executor's leftover raw never reached the document (e.g.
-                // a failed write_text) and must not teach.
-                self.this
-                    .vietnamese_engine
-                    .borrow_mut()
-                    .collect_pending_learning();
             }
-            self.this.vietnamese_engine.borrow_mut().reset();
-            self.this.hide_candidates();
-            return Ok(BOOL(0));
-        }
-        if should_ignore(vkey) {
             return Ok(BOOL(0));
         }
 
-        // Extract context before setting key_busy: if this fails we return early, and since
-        // OnKeyUp may not be called after an error return, key_busy must stay false.
+        // Escape while composing, or a popup key the candidate list declined:
+        // commit the word, keeping its text in the document.
+        if is_buffer_reset_key(vkey) {
+            debug!("Buffer reset key (vkey={}), committing the word", vkey);
+            match (*pic).clone() {
+                Some(context) => self.finalize_composition(&context, false),
+                None => {
+                    self.this.vietnamese_engine.borrow_mut().reset();
+                    self.this.hide_candidates();
+                }
+            }
+            return Ok(BOOL(0));
+        }
+
         let context: ITfContext = (*pic).clone().ok_or(E_FAIL)?;
 
-        // Mark mid-keystroke only after we have a valid context so OnSetFocus doesn't
-        // misfire a spurious doc-switch reset during this key event.
+        // Mark mid-keystroke so OnSetFocus doesn't misfire a spurious
+        // doc-switch commit during this key event. Cleared when this call
+        // returns, on every path: `OnKeyUp` never runs (`OnTestKeyUp` claims
+        // nothing), and clearing there left the flag stuck after the first
+        // key — which silently disabled ending the composition on focus loss.
         self.this.key_busy.set(true);
+        let _key_busy = KeyBusyGuard(&self.this.key_busy);
         let sink: ITfCompositionSink = {
             let r: InterfaceRef<'_, ITfCompositionSink> = self.as_interface_ref();
             r.to_owned()
@@ -1450,9 +1627,17 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 //
                 // The engine's buffer already holds the full post-backspace
                 // text. Use that.
+                // The key is claimed (`claims_key`), so it is eaten whatever
+                // this returns — every path must leave screen and engine in
+                // agreement.
                 let action = self.this.vietnamese_engine.borrow_mut().process_backspace();
                 if !matches!(action, Action::Replace { .. }) {
-                    return Ok(BOOL(0));
+                    // The engine holds nothing to delete while a composition
+                    // is showing: they disagree. Commit what is on screen so
+                    // the next Backspace goes to the application.
+                    debug!("Backspace: engine had nothing to delete, committing the composition");
+                    self.finalize_composition(&context, false);
+                    return Ok(BOOL(1));
                 }
                 let text = self.this.vietnamese_engine.borrow().buffer_content();
                 debug!(
@@ -1461,13 +1646,16 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 );
 
                 if text.is_empty() {
-                    // Nothing left to compose. End the composition rather than
-                    // setting it empty — same trigger as above, and there is
-                    // genuinely nothing to display any more.
-                    if self.this.composition.is_started() {
-                        if let Err(e) = self.this.end_composition(&context) {
-                            debug!("Failed to end emptied composition: {:?}", e);
-                        }
+                    // The last character was deleted: clear it from the
+                    // composition, then close it. Ending without clearing
+                    // committed that character instead of deleting it. The
+                    // application may terminate the emptied composition
+                    // itself; that only resets an engine already empty.
+                    if let Err(e) = self.this.write_text(&context, "", 0, sink.clone()) {
+                        debug!("Failed to clear the composition: {:?}", e);
+                    }
+                    if let Err(e) = self.this.end_composition(&context) {
+                        debug!("Failed to end emptied composition: {:?}", e);
                     }
                     return Ok(BOOL(1));
                 }
@@ -1481,41 +1669,11 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 }
                 Ok(BOOL(1))
             }
-            // Handle space/enter - finalize composition
-            // Note: We might want engine to handle punctuation too, so we pass punctuation through
+            // Enter normally never gets here: unclaimed, it commits the word in
+            // `OnTestKeyDown` and goes to the application. Only a candidate
+            // popup with nothing to select routes it here.
             else if ch == '\r' {
-                // Enter always ends composition
-                if self.this.composition.is_started() {
-                    // Word-boundary final repair (event-sourcing-completion
-                    // Phase 3): Enter ends the composition directly,
-                    // bypassing process_key/ConfirmComposition entirely —
-                    // without this probe a shape-only inferred word (e.g.
-                    // VNI "nhat6") commits unrepaired (red-team finding).
-                    // Probe BEFORE end_composition/reset and fold the
-                    // correction into the composition text if it differs.
-                    if let Some(repaired) = self.this.vietnamese_engine.borrow().boundary_repair() {
-                        if let Err(e) = self.this.write_text(
-                            &context,
-                            &repaired,
-                            repaired.chars().count(),
-                            sink.clone(),
-                        ) {
-                            debug!("Failed to write boundary-repair text: {:?}", e);
-                        }
-                    }
-                    if let Err(e) = self.this.end_composition(&context) {
-                        debug!("Failed to end composition: {:?}", e);
-                    }
-                    {
-                        // COMMIT flush (Enter): the composed word stays in
-                        // the document — collect learning BEFORE the reset
-                        // discards the raw.
-                        let mut engine = self.this.vietnamese_engine.borrow_mut();
-                        engine.collect_pending_learning();
-                        engine.reset();
-                    }
-                    self.this.hide_candidates();
-                }
+                self.finalize_composition(&context, false);
                 Ok(BOOL(0))
             }
             // Normal character (including space and punctuation)
@@ -1635,6 +1793,19 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                         }
                     }
                 }
+                // The key was claimed, so the application will never see it:
+                // if no action used it, type it ourselves rather than lose it.
+                if handled == BOOL(0) {
+                    debug!(
+                        "Engine declined claimed key '{}', inserting it as typed",
+                        ch
+                    );
+                    self.finalize_composition(&context, false);
+                    if let Err(e) = self.this.insert_text(&context, ch.encode_utf8(&mut [0; 4])) {
+                        debug!("Failed to insert declined key: {:?}", e);
+                    }
+                    handled = BOOL(1);
+                }
                 Ok(handled)
             }
         } else {
@@ -1644,7 +1815,6 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
 
     fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, _wParam: WPARAM, _lParam: LPARAM) -> Result<BOOL> {
-        self.this.key_busy.set(false);
         Ok(BOOL(0))
     }
 
@@ -1739,12 +1909,58 @@ mod tests {
     }
 
     #[test]
-    fn escape_is_the_one_key_a_composition_consumes() {
+    fn escape_is_claimed_only_while_composing() {
         assert!(claims_key(VK_ESCAPE, true, true, false));
         assert!(
             !claims_key(VK_ESCAPE, true, false, false),
             "with nothing composing, Escape belongs to the application"
         );
+    }
+
+    /// 𡗶 is one character but two UTF-16 units: the caret after it must be
+    /// offset 2, or it sits between the surrogate halves and the next key
+    /// splits the character.
+    #[test]
+    fn caret_offsets_count_utf16_units() {
+        assert_eq!(utf16_offset("𡗶", 1), 2);
+        assert_eq!(utf16_offset("a𡗶b", 2), 3);
+        assert_eq!(utf16_offset("trời", 4), 4);
+        assert_eq!(utf16_offset("𡗶", 5), 2, "clamped to the end");
+    }
+
+    /// Backspace mid-word must edit the engine's keystrokes; left to the
+    /// application it deleted a letter the engine still held, and the next
+    /// tone key brought it back.
+    #[test]
+    fn backspace_is_claimed_only_while_composing() {
+        assert!(claims_key(VK_BACK, true, true, false));
+        assert!(
+            !claims_key(VK_BACK, true, false, false),
+            "with nothing composing, Backspace deletes text in the application"
+        );
+        assert!(!claims_key(VK_BACK, false, true, false));
+    }
+
+    /// Keys that act on the document must commit the word before the
+    /// application gets them, or their effect lands inside the composition.
+    #[test]
+    fn acting_keys_interrupt_the_composition() {
+        // Enter, Tab, Delete, arrows, Home/End, F5, 'V' (Ctrl+V), VK_PACKET
+        for vkey in [
+            VK_RETURN, 0x09, 0x2E, 0x25, 0x27, 0x24, 0x23, 0x74, 0x56, 0xE7,
+        ] {
+            assert!(interrupts_composition(vkey), "vkey {vkey:#x}");
+        }
+    }
+
+    /// Shift held for a capital letter mid-word must not commit the word.
+    #[test]
+    fn modifier_and_lock_keys_do_not_interrupt_the_composition() {
+        for vkey in [
+            0x10u16, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA5, 0x14, 0x5B, 0x90, 0xE5,
+        ] {
+            assert!(!interrupts_composition(vkey), "vkey {vkey:#x}");
+        }
     }
 
     #[test]
