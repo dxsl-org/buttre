@@ -27,17 +27,22 @@ fn main() {
     let src_keyboards = workspace_root.join("keyboards");
 
     // Honor CARGO_TARGET_DIR instead of assuming `<workspace>/target/<profile>`:
-    // derive the profile output dir from OUT_DIR, which cargo always sets to
-    // `<target>/<profile>/build/<pkg>-<hash>/out` under the REAL target dir. A
-    // redirected target (common on a VirtualBox shared folder, where build
-    // outputs must live on a real filesystem) would otherwise stage assets
-    // where cargo-deb / cargo-generate-rpm never look, and packaging fails on a
-    // missing buttre_nom.db.
+    // derive the profile output dir from OUT_DIR, which cargo always places
+    // under `<target>/<profile>/build/` in the REAL target dir. A redirected
+    // target (common on a VirtualBox shared folder, where build outputs must
+    // live on a real filesystem) would otherwise stage assets where cargo-deb /
+    // cargo-generate-rpm never look, and packaging fails on a missing
+    // buttre_nom.db. The depth below `build/` is not fixed: cargo ≤1.9x used
+    // `build/<pkg>-<hash>/out`, cargo 1.100 uses `build/<pkg>/<hash>/out` — a
+    // fixed `nth(3)` staged into `<profile>/build/` and broke the MSI/.deb.
+    // The nearest `build` ancestor is the right one: package dirs are never
+    // named `build`.
     let out_dir = env::var("OUT_DIR").unwrap();
     let target_dir = Path::new(&out_dir)
         .ancestors()
-        .nth(3)
-        .expect("OUT_DIR is always <target>/<profile>/build/<pkg>/out")
+        .find(|dir| dir.file_name().is_some_and(|name| name == "build"))
+        .and_then(Path::parent)
+        .expect("OUT_DIR is always under <target>/<profile>/build/")
         .to_path_buf();
     let dest_keyboards = target_dir.join("keyboards");
 
