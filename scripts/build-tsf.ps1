@@ -90,7 +90,8 @@ $repoRoot = Resolve-Path "$PSScriptRoot\.."
 # copies of these GUIDs exist and they have to agree or the TIP silently
 # fails to load.
 $CLSID      = "{E6B8A6C0-1234-5678-9ABC-DEF012345678}"
-$ProfileGuid = "{B7447743-7652-4AB6-8D82-250D935EBCC0}"
+# Profile GUIDs (one per input method) live in profiles.rs; the post-install
+# check below enumerates whatever was registered instead of naming one.
 $ClsidKey   = "HKLM:\SOFTWARE\Classes\CLSID\$CLSID"
 $TipKey     = "HKLM:\SOFTWARE\Microsoft\CTF\TIP\$CLSID"
 
@@ -382,9 +383,11 @@ try {
     $profiles = @()
     Get-ChildItem "$TipKey\LanguageProfile" -ErrorAction SilentlyContinue | ForEach-Object {
         $lcid = Split-Path $_.Name -Leaf
-        $p = Get-ItemProperty "$($_.PSPath)\$ProfileGuid" -ErrorAction SilentlyContinue
-        if ($p -and $p.Enable -eq 1) {
-            $profiles += [pscustomobject]@{ Lcid = $lcid; Description = $p.Description }
+        Get-ChildItem $_.PSPath -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($p -and $p.Enable -eq 1) {
+                $profiles += [pscustomobject]@{ Lcid = $lcid; Description = $p.Description }
+            }
         }
     }
     if (-not $profiles) {

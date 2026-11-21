@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use winreg::enums::*;
 use winreg::RegKey;
 
+use super::profiles::{guid_string, profiles_in, ProfileEntry};
+
 // GUIDs for buttre TSF
 pub const CLSID_BUTTRE_TEXT_SERVICE: &str = "{E6B8A6C0-1234-5678-9ABC-DEF012345678}";
-// Must match the LanguageProfile GUID in installers/windows/product.wxs —
-// MSI and runtime registration write the same profile or uninstall orphans one.
-pub const GUID_PROFILE: &str = "{B7447743-7652-4AB6-8D82-250D935EBCC0}";
+// Profile GUIDs live in `profiles.rs` — one per input method.
 
 // Language IDs
 const LANGID_VIETNAMESE: u32 = 0x042A; // Vietnamese (0x042A)
@@ -65,38 +65,74 @@ pub fn unregister_com_server() -> Result<()> {
     }
 }
 
-/// Register TSF service for a specific language
-fn register_tsf_language_profile(tip_key: &RegKey, dll_path: &Path, langid: u32) -> Result<()> {
-    let profile_path = format!("LanguageProfile\\0x{:08X}\\{}", langid, GUID_PROFILE);
-    let (profile_key, _) = tip_key
-        .create_subkey(&profile_path)
-        .context("Failed to create language profile key")?;
+/// Register every input-method profile under one language, and drop profiles
+/// of ours that are no longer offered (a keyboard TOML that was removed).
+///
+/// Written over the existing keys rather than deleted and recreated: a profile
+/// key that disappears, even briefly, makes Windows prune the user's own
+/// keyboard choice for it.
+fn register_tsf_language_profiles(
+    tip_key: &RegKey,
+    dll_path: &Path,
+    langid: u32,
+    profiles: &[ProfileEntry],
+) -> Result<()> {
+    let language_path = format!("LanguageProfile\\0x{:08X}", langid);
+    let (language_key, _) = tip_key
+        .create_subkey(&language_path)
+        .context("Failed to create language key")?;
 
-    profile_key
-        .set_value("Description", &"buttre - Vietnamese Input")
-        .context("Failed to set description")?;
+    let wanted: Vec<String> = profiles.iter().map(|p| guid_string(&p.guid)).collect();
+    prune_stale_profiles(&language_key, &wanted);
 
     let dll_path_str = dll_path.to_string_lossy().to_string();
-    profile_key
-        .set_value("IconFile", &dll_path_str)
-        .context("Failed to set icon file")?;
-
-    profile_key
-        .set_value("IconIndex", &0u32)
-        .context("Failed to set icon index")?;
-
-    // CRITICAL: Enable the profile so Windows will load the DLL
-    #[cfg(debug_assertions)]
-    eprintln!("Setting Enable flag for language 0x{:08X}", langid);
-
-    profile_key
-        .set_value("Enable", &1u32)
-        .context("Failed to set Enable flag")?;
-
-    #[cfg(debug_assertions)]
-    eprintln!("Enable flag set successfully!");
-
+    for (profile, guid) in profiles.iter().zip(&wanted) {
+        let (profile_key, _) = language_key
+            .create_subkey(guid)
+            .with_context(|| format!("Failed to create profile key {guid}"))?;
+        profile_key
+            .set_value("Description", &profile.description)
+            .context("Failed to set description")?;
+        profile_key
+            .set_value("IconFile", &dll_path_str)
+            .context("Failed to set icon file")?;
+        profile_key
+            .set_value("IconIndex", &0u32)
+            .context("Failed to set icon index")?;
+        // Machine-wide availability; the user still adds the keyboard in
+        // Settings (see `lang_check` for why this is not "added").
+        profile_key
+            .set_value("Enable", &1u32)
+            .context("Failed to set Enable flag")?;
+    }
     Ok(())
+}
+
+/// Delete profile keys under one language that are not in `wanted`. Only
+/// GUID-shaped names are touched: anything else is not a profile we wrote.
+fn prune_stale_profiles(language_key: &RegKey, wanted: &[String]) {
+    let stale: Vec<String> = language_key
+        .enum_keys()
+        .filter_map(|name| name.ok())
+        .filter(|name| is_guid_key(name) && !wanted.iter().any(|w| w.eq_ignore_ascii_case(name)))
+        .collect();
+    for name in stale {
+        match language_key.delete_subkey_all(&name) {
+            Ok(()) => tracing::info!("removed stale TSF profile {name}"),
+            Err(e) => tracing::warn!("could not remove stale TSF profile {name}: {e}"),
+        }
+    }
+}
+
+/// `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}` — the only key names `LanguageProfile`
+/// language keys hold for profiles.
+fn is_guid_key(name: &str) -> bool {
+    name.len() == 38
+        && name.starts_with('{')
+        && name.ends_with('}')
+        && name[1..37].chars().enumerate().all(|(i, c)| {
+            matches!(i, 8 | 13 | 18 | 23) == (c == '-') && (c == '-' || c.is_ascii_hexdigit())
+        })
 }
 
 /// Language IDs to register the text service under.
@@ -232,14 +268,32 @@ pub fn register_tsf_service(dll_path: &Path) -> Result<()> {
 
     prune_stale_language_profiles(&tip_key, &languages);
 
-    // Register for each supported language
+    // The keyboards installed next to THIS DLL — the same folder the text
+    // service resolves profiles against at runtime (`set_resource_dir`).
+    // Never `current_exe()`: under regsvr32 that is System32.
+    let keyboards = dll_path
+        .parent()
+        .map(|dir| dir.join("keyboards"))
+        .unwrap_or_default();
+    let profiles = profiles_in(&keyboards);
+    for profile in &profiles {
+        tracing::info!(
+            "TSF profile {} = {} ({})",
+            guid_string(&profile.guid),
+            profile.method_id,
+            profile.description
+        );
+    }
+
     for &langid in &languages {
-        register_tsf_language_profile(&tip_key, dll_path, langid).with_context(|| {
-            format!(
-                "Failed to register language profile for LANGID 0x{:08X}",
-                langid
-            )
-        })?;
+        register_tsf_language_profiles(&tip_key, dll_path, langid, &profiles).with_context(
+            || {
+                format!(
+                    "Failed to register language profiles for LANGID 0x{:08X}",
+                    langid
+                )
+            },
+        )?;
     }
 
     Ok(())

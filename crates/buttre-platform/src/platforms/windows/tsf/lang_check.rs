@@ -82,21 +82,23 @@ pub fn enabled_langids() -> Vec<u32> {
         .enum_keys()
         .filter_map(|name| name.ok())
         .filter_map(|language| languages.open_subkey(language).ok())
-        .flat_map(|language| added_langids_in(&language))
+        .flat_map(|language| added_profiles_in(&language))
+        .filter(|(langid, profile)| !explicitly_disabled(&hkcu, *langid, profile))
+        .map(|(langid, _)| langid)
         .collect();
 
-    langids.retain(|langid| !explicitly_disabled(&hkcu, *langid));
     langids.sort_unstable();
     langids.dedup();
     langids
 }
 
-/// Langids from one language subkey's value NAMES.
+/// `(langid, profile)` of every buttre keyboard in one language subkey, read
+/// from the value NAMES.
 ///
 /// Windows records a keyboard as a value named `<langid>:<layout-or-tip>`, where
 /// a text service is spelled `{clsid}{profile}`. The value's DATA is only an
 /// ordering index, so the name is the whole signal.
-fn added_langids_in(language: &RegKey) -> Vec<u32> {
+fn added_profiles_in(language: &RegKey) -> Vec<(u32, String)> {
     language
         .enum_values()
         .filter_map(|entry| entry.ok())
@@ -104,42 +106,35 @@ fn added_langids_in(language: &RegKey) -> Vec<u32> {
         .collect()
 }
 
-/// `"0409:{clsid}{profile}"` → `Some(0x0409)` when the CLSID is ours.
+/// `"0409:{clsid}{profile}"` → `Some((0x0409, "{profile}"))` when the CLSID is
+/// ours. buttre registers one profile per input method, so the profile part
+/// says WHICH of them the user added.
 ///
 /// Case-insensitive on the GUID: Windows has written both cases over the years,
 /// and a case-sensitive compare here would silently answer "not added".
-fn parse_tip_entry(name: &str) -> Option<u32> {
+fn parse_tip_entry(name: &str) -> Option<(u32, String)> {
     let (langid, service) = name.split_once(':')?;
-    if !service
-        .to_ascii_uppercase()
-        .starts_with(&CLSID_BUTTRE_TEXT_SERVICE.to_ascii_uppercase())
-    {
-        return None;
-    }
-    u32::from_str_radix(langid, 16).ok()
+    let service = service.to_ascii_uppercase();
+    let profile = service.strip_prefix(&CLSID_BUTTRE_TEXT_SERVICE.to_ascii_uppercase())?;
+    let langid = u32::from_str_radix(langid, 16).ok()?;
+    Some((langid, profile.to_string()))
 }
 
-/// Has the user explicitly switched this language's profile OFF?
+/// Has the user explicitly switched this one profile OFF?
 ///
 /// `HKCU\...\CTF\TIP\<clsid>\LanguageProfile\0x0000<langid>\<profile>` carries
 /// `Enable` only as an override. A MISSING key means "no opinion" — treating it
-/// as "not added" is what made the previous version of this module wrong.
-fn explicitly_disabled(hkcu: &RegKey, langid: u32) -> bool {
+/// as "not added" is what made the previous version of this module wrong. Per
+/// profile, not per language: with one profile per input method, a disabled
+/// VNI must not hide the Telex the user still types with.
+fn explicitly_disabled(hkcu: &RegKey, langid: u32, profile: &str) -> bool {
     let path = format!(
-        "Software\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile\\0x{:08X}",
-        CLSID_BUTTRE_TEXT_SERVICE, langid
+        "Software\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile\\0x{:08X}\\{}",
+        CLSID_BUTTRE_TEXT_SERVICE, langid, profile
     );
-    let Ok(language) = hkcu.open_subkey(path) else {
-        return false;
-    };
-    // Any profile under it explicitly zeroed counts as off; a language with no
-    // profiles listed is simply unopinionated.
-    language
-        .enum_keys()
-        .filter_map(|name| name.ok())
-        .filter_map(|profile| language.open_subkey(profile).ok())
-        .filter_map(|profile| profile.get_value::<u32, _>("Enable").ok())
-        .any(|enable| enable == 0)
+    hkcu.open_subkey(path)
+        .and_then(|key| key.get_value::<u32, _>("Enable"))
+        .is_ok_and(|enable| enable == 0)
 }
 
 #[cfg(test)]
@@ -151,9 +146,12 @@ mod tests {
     #[test]
     fn tip_entries_parse_as_windows_writes_them() {
         let name = format!("0409:{CLSID_BUTTRE_TEXT_SERVICE}{PROFILE}");
-        assert_eq!(parse_tip_entry(&name), Some(0x0409));
+        assert_eq!(parse_tip_entry(&name), Some((0x0409, PROFILE.to_string())));
         let vietnamese = format!("042a:{CLSID_BUTTRE_TEXT_SERVICE}{PROFILE}");
-        assert_eq!(parse_tip_entry(&vietnamese), Some(0x042A));
+        assert_eq!(
+            parse_tip_entry(&vietnamese),
+            Some((0x042A, PROFILE.to_string()))
+        );
     }
 
     #[test]
@@ -165,7 +163,7 @@ mod tests {
             CLSID_BUTTRE_TEXT_SERVICE.to_ascii_lowercase(),
             PROFILE.to_ascii_lowercase()
         );
-        assert_eq!(parse_tip_entry(&lower), Some(0x0409));
+        assert_eq!(parse_tip_entry(&lower), Some((0x0409, PROFILE.to_string())));
     }
 
     #[test]

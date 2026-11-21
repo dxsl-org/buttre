@@ -33,18 +33,18 @@ Script sẽ tự động:
 2. Click nút **⋯** (3 chấm) bên cạnh Vietnamese
 3. Chọn **Language options**
 4. Trong phần **Keyboards**, click **Add a keyboard**
-5. Tìm và chọn **buttre Vietnamese Input**
+5. Tìm và chọn **buttre Telex** (thêm **buttre VNI**, **buttre Chữ Nôm**… nếu cần — mỗi kiểu gõ là một bàn phím riêng, xem ADR-0004)
    - Nếu không thấy: Restart máy và thử lại
 
 ### Bước 4: Chuyển sang buttre TSF
 
 **Cách 1: Dùng phím tắt**
 - Nhấn `Windows + Space` để switch giữa các input methods
-- Chọn **Vietnamese** > **buttre Vietnamese Input**
+- Chọn **buttre Telex** / **buttre VNI** / **buttre Chữ Nôm** (hoặc `Ctrl+Shift+1/2/3`)
 
 **Cách 2: Dùng Taskbar**
 - Click vào icon ngôn ngữ ở góc phải taskbar (VIE hoặc ENG)
-- Chọn **Vietnamese** > **buttre Vietnamese Input**
+- Chọn **buttre Telex** / **buttre VNI** / **buttre Chữ Nôm**
 
 ## 🧪 Test Cases
 

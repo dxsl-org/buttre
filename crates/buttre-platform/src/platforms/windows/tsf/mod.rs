@@ -49,68 +49,18 @@ pub mod com;
 pub mod factory; // Public for COM exports
 pub mod ipc;
 // Note: key_event_sink is integrated into text_service module
+pub mod keyboard_setup; // `buttre --add-keyboard` / `--disable-layout-hotkey`
 pub mod lang_check; // Public so `buttre --tsf-status` reports the same verdict
 pub mod logging;
+pub mod profiles; // Public so `buttre --tsf-status` can list them
 pub mod registration; // Public for COM exports
+pub(crate) mod settings_launcher;
 mod text_ops;
 pub mod text_service;
 
 use factory::ClassFactory;
 use logging::log_debug;
 pub use registration::{get_dll_path, register_server, unregister_server};
-
-use buttre_core::Keyboard;
-use std::sync::{Arc, Mutex, RwLock};
-
-/// Windows TSF Backend
-pub struct TsfBackend {
-    _keyboard: Option<Arc<RwLock<Option<Keyboard>>>>,
-}
-
-impl TsfBackend {
-    pub fn new() -> Result<Self> {
-        // Check 1: TSF DLL must be registered
-        if !registration::is_tsf_registered() {
-            anyhow::bail!("TSF service not registered");
-        }
-
-        // Check 2: Ensure we can get DLL path (sanity check)
-        get_dll_path()?;
-
-        // Check 3: the user must have ADDED buttre as an input method.
-        //
-        // Registration only makes it available in Windows' picker. Until it is
-        // selected there, no application ever activates the text service, so
-        // choosing this backend would leave the user unable to type at all —
-        // and choosing Hook while it IS selected means both layers run, with
-        // the hook winning because it sees keys first.
-        if !lang_check::is_buttre_text_service_enabled() {
-            anyhow::bail!(
-                "buttre is registered but not added as a Windows input method. \
-                 Add it under Settings > Time & language > Language & region > \
-                 (language) > Keyboards, then restart buttre."
-            );
-        }
-
-        Ok(Self { _keyboard: None })
-    }
-
-    pub fn init(&mut self, keyboard: Arc<RwLock<Option<Keyboard>>>) -> Result<()> {
-        logging::init_logging();
-        self._keyboard = Some(keyboard);
-        // TSF DLL runs in its own process, so "init" here might handle IPC setup
-        // which is already started in main.rs (pipe_server).
-        Ok(())
-    }
-
-    pub fn set_enabled(&mut self, _enabled: bool) {
-        // TSF status is usually controlled by the OS or our IPC broker
-    }
-
-    pub fn cleanup(&mut self) {
-        // Global cleanup
-    }
-}
 
 // ============================================================================
 // COM EXPORTS - Required by Windows for TSF to work

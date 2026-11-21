@@ -52,7 +52,7 @@ Sẽ thấy dialog box "DllRegisterServer succeeded"
 1. Trong **Language & Region**, click vào **Vietnamese**
 2. Click **Options**
 3. Trong **Keyboards**, click **Add a keyboard**
-4. Tìm và chọn **"buttre - Vietnamese Input"**
+4. Tìm và chọn **"buttre Telex"** (và **"buttre VNI"**, **"buttre Chữ Nôm"**… nếu cần — mỗi kiểu gõ là một bàn phím riêng)
 5. (Optional) Xóa các bộ gõ khác nếu không dùng
 
 ---
@@ -143,7 +143,7 @@ regsvr32.exe /u target\release\buttre_platform.dll
 
 1. **Settings** → **Language & Region**
 2. Click **Vietnamese** → **Options**
-3. Trong **Keyboards**, xóa **"buttre - Vietnamese Input"**
+3. Trong **Keyboards**, xóa các bàn phím **"buttre …"**
 
 ---
 

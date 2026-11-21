@@ -4,6 +4,7 @@
       Id="*"
       Name="buttre"
       Language="1033"
+      Codepage="65001"
       Version="$(var.Version)"
       Manufacturer="buttre project"
       UpgradeCode="8C5B151A-3EAC-4313-ACEA-E85BACB1CA82">
@@ -15,8 +16,12 @@
       TSF CLSID: E6B8A6C0-1234-5678-9ABC-DEF012345678
       Must match CLSID_buttre_TEXT_SERVICE in crates/buttre-platform/src/platforms/windows/tsf/mod.rs.
 
-      TSF Profile GUID: B7447743-7652-4AB6-8D82-250D935EBCC0
-      Language Profile GUID for vi-VN (LCID 0x042A). Choose once, never change.
+      TSF profiles: one per input method, GUIDs owned by
+      crates/buttre-platform/src/platforms/windows/tsf/profiles.rs, registered
+      by the RegisterTsf custom action below, never written here.
+
+      Codepage 65001: the Vietnamese strings (shortcuts, feature tree) do not
+      fit the default 1252, which failed the link with LGHT0311.
     -->
 
     <Package InstallerVersion="500"
@@ -28,7 +33,17 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of buttre is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <Feature Id="MainFeature" Title="buttre" Level="1">
+    <!--
+      Feature tree = the keyboard picker. Every keyboard is REGISTERED whatever
+      is ticked (the TOMLs ship in MainFeature), so an unticked one can still be
+      added later in Settings → Language → Keyboards. A ticked one is also
+      ADDED to the installing user's keyboard list by the per-user actions
+      below; the marker components only exist so each choice has a feature
+      state (&Feature=3) to condition on.
+    -->
+    <Feature Id="MainFeature" Title="buttre" Level="1" Absent="disallow"
+             AllowAdvertise="no" Display="expand"
+             Description="Bộ gõ buttre (bắt buộc).">
       <ComponentRef Id="CoreBinary" />
       <ComponentRef Id="TsfDll" />
       <ComponentRef Id="StartMenuShortcuts" />
@@ -36,7 +51,46 @@
       <?ifdef IncludeNomDb ?>
         <ComponentRef Id="NomDb" />
       <?endif ?>
+
+      <Feature Id="Keyboards" Title="Bàn phím thêm vào Windows" Level="1"
+               AllowAdvertise="no" Display="expand"
+               Description="Bàn phím được chọn sẽ có ngay trong Win+Space. Bàn phím không chọn vẫn thêm được sau trong Settings → Language → Keyboards.">
+        <Feature Id="Kb_telex" Title="Telex" Level="1" AllowAdvertise="no"
+                 Description="buttre Telex — Ctrl+Shift+1"><ComponentRef Id="Pick_telex" /></Feature>
+        <Feature Id="Kb_vni" Title="VNI" Level="1" AllowAdvertise="no"
+                 Description="buttre VNI — Ctrl+Shift+2"><ComponentRef Id="Pick_vni" /></Feature>
+        <Feature Id="Kb_nom" Title="Chữ Nôm" Level="1" AllowAdvertise="no"
+                 Description="buttre Chữ Nôm — Ctrl+Shift+3"><ComponentRef Id="Pick_nom" /></Feature>
+        <Feature Id="Kb_cham" Title="Chăm (Latinh)" Level="1000" AllowAdvertise="no"
+                 Description="buttre Chăm (Latinh)"><ComponentRef Id="Pick_cham" /></Feature>
+        <Feature Id="Kb_cham_akhar_thrah" Title="Chăm (Akhar Thrah)" Level="1000" AllowAdvertise="no"
+                 Description="buttre Chăm (Akhar Thrah)"><ComponentRef Id="Pick_cham_akhar_thrah" /></Feature>
+        <Feature Id="Kb_hmong" Title="Hmong (Mông RPA)" Level="1000" AllowAdvertise="no"
+                 Description="buttre Hmong (Mông RPA)"><ComponentRef Id="Pick_hmong" /></Feature>
+        <Feature Id="Kb_khmer" Title="Khmer (NiDA)" Level="1000" AllowAdvertise="no"
+                 Description="buttre Khmer (NiDA)"><ComponentRef Id="Pick_khmer" /></Feature>
+        <Feature Id="Kb_muong_tay_nung" Title="Mường, Tày, Nùng (Latinh)" Level="1000" AllowAdvertise="no"
+                 Description="buttre Mường, Tày, Nùng,... (Latinh)"><ComponentRef Id="Pick_muong_tay_nung" /></Feature>
+        <Feature Id="Kb_taynguyen" Title="Tây Nguyên (Êđê, Bana, Jrai)" Level="1000" AllowAdvertise="no"
+                 Description="buttre Tây Nguyên (Êđê, Bana, Jrai,...)"><ComponentRef Id="Pick_taynguyen" /></Feature>
+        <Feature Id="Kb_thai" Title="Thái (Tây Bắc)" Level="1000" AllowAdvertise="no"
+                 Description="buttre Thái (Tây Bắc)"><ComponentRef Id="Pick_thai" /></Feature>
+      </Feature>
+
+      <Feature Id="LayoutHotkey" Title="Tắt Ctrl+Shift đổi bàn phím của Windows" Level="1"
+               AllowAdvertise="no"
+               Description="Ctrl+Shift của Windows đổi bàn phím trước khi buttre nhận được Ctrl+Shift+1…9. Win+Space vẫn đổi bàn phím như cũ.">
+        <ComponentRef Id="Pick_layout_hotkey" />
+      </Feature>
     </Feature>
+
+    <!-- Welcome → feature tree, skipping the license page (Order 2 overrides). -->
+    <UI>
+      <UIRef Id="WixUI_FeatureTree" />
+      <UIRef Id="WixUI_ErrorProgressText" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="CustomizeDlg" Order="2">1</Publish>
+      <Publish Dialog="CustomizeDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">1</Publish>
+    </UI>
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <!--
@@ -129,6 +183,18 @@
             </Component>
           <?endif ?>
 
+          <!-- Feature-state markers for the keyboard picker (see the feature tree). -->
+          <Component Id="Pick_telex" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="telex" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_vni" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="vni" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_nom" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="nom" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_cham" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="cham" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_cham_akhar_thrah" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="cham_akhar_thrah" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_hmong" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="hmong" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_khmer" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="khmer" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_muong_tay_nung" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="muong_tay_nung" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_taynguyen" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="taynguyen" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_thai" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="thai" Type="integer" Value="1" KeyPath="yes" /></Component>
+          <Component Id="Pick_layout_hotkey" Guid="*"><RegistryValue Root="HKLM" Key="Software\buttre\Picked" Name="layout_hotkey" Type="integer" Value="1" KeyPath="yes" /></Component>
         </Directory>
       </Directory>
     </Directory>
@@ -173,9 +239,41 @@
                   Impersonate="no"
                   Return="ignore" />
 
+    <!--
+      Per-user steps: add each ticked keyboard to the installing user's list,
+      and switch off Windows' Ctrl+Shift layout hotkey if ticked. Deferred so
+      registration (above) has run; Impersonate="yes" because the keyboard list
+      and the hotkey live in HKCU of the user who ran the installer.
+      Return="ignore": a keyboard that cannot be added is one click away in
+      Settings, never a reason to roll back the install.
+    -->
+    <CustomAction Id="Add_telex" FileKey="ButtreExe" ExeCommand="--add-keyboard telex" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_vni" FileKey="ButtreExe" ExeCommand="--add-keyboard vni" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_nom" FileKey="ButtreExe" ExeCommand="--add-keyboard nom" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_cham" FileKey="ButtreExe" ExeCommand="--add-keyboard cham" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_cham_akhar_thrah" FileKey="ButtreExe" ExeCommand="--add-keyboard cham_akhar_thrah" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_hmong" FileKey="ButtreExe" ExeCommand="--add-keyboard hmong" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_khmer" FileKey="ButtreExe" ExeCommand="--add-keyboard khmer" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_muong_tay_nung" FileKey="ButtreExe" ExeCommand="--add-keyboard muong_tay_nung" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_taynguyen" FileKey="ButtreExe" ExeCommand="--add-keyboard taynguyen" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="Add_thai" FileKey="ButtreExe" ExeCommand="--add-keyboard thai" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="DisableLayoutHotkey" FileKey="ButtreExe" ExeCommand="--disable-layout-hotkey" Execute="deferred" Impersonate="yes" Return="ignore" />
+
     <InstallExecuteSequence>
       <!-- After the DLL exists on disk; skipped when only removing. -->
       <Custom Action="RegisterTsf" After="InstallFiles">NOT REMOVE</Custom>
+      <!-- Only after registration: a keyboard must exist before it can be added. -->
+      <Custom Action="Add_telex" After="RegisterTsf">NOT REMOVE AND &amp;Kb_telex=3</Custom>
+      <Custom Action="Add_vni" After="Add_telex">NOT REMOVE AND &amp;Kb_vni=3</Custom>
+      <Custom Action="Add_nom" After="Add_vni">NOT REMOVE AND &amp;Kb_nom=3</Custom>
+      <Custom Action="Add_cham" After="Add_nom">NOT REMOVE AND &amp;Kb_cham=3</Custom>
+      <Custom Action="Add_cham_akhar_thrah" After="Add_cham">NOT REMOVE AND &amp;Kb_cham_akhar_thrah=3</Custom>
+      <Custom Action="Add_hmong" After="Add_cham_akhar_thrah">NOT REMOVE AND &amp;Kb_hmong=3</Custom>
+      <Custom Action="Add_khmer" After="Add_hmong">NOT REMOVE AND &amp;Kb_khmer=3</Custom>
+      <Custom Action="Add_muong_tay_nung" After="Add_khmer">NOT REMOVE AND &amp;Kb_muong_tay_nung=3</Custom>
+      <Custom Action="Add_taynguyen" After="Add_muong_tay_nung">NOT REMOVE AND &amp;Kb_taynguyen=3</Custom>
+      <Custom Action="Add_thai" After="Add_taynguyen">NOT REMOVE AND &amp;Kb_thai=3</Custom>
+      <Custom Action="DisableLayoutHotkey" After="Add_thai">NOT REMOVE AND &amp;LayoutHotkey=3</Custom>
       <!--
         Before the DLL is deleted, so the COM server is still loadable.
 

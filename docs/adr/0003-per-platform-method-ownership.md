@@ -1,6 +1,6 @@
 # ADR-0003: Ai sở hữu lựa chọn kiểu gõ — quyết định theo từng nền tảng
 
-- **Trạng thái**: Accepted
+- **Trạng thái**: Accepted — dòng Windows và quyết định 5 thay bởi [[ADR-0004]] (2026-11-21)
 - **Ngày**: 2026-07-29
 - **Thay thế một phần**: [[ADR-0002]] (tray sở hữu chọn kiểu gõ trên mọi nền tảng)
 - **Bối cảnh liên quan**: chuỗi sự cố TSF 28–29/07/2026, lỗi "chọn English là đứt" trên

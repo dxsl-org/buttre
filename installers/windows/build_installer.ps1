@@ -62,6 +62,9 @@ try {
     } else {
         Write-Host "==> Nom DB not found, MSI will ship without it"
     }
+    # UTF-8 database codepage for the Vietnamese strings (see buttre.wxl).
+    $wxl = Join-Path $repoRoot "installers\windows\buttre.wxl"
+    $wixArgs += @("-L", "-loc", "-L", $wxl)
 
     if ($Version -eq "") {
         # cargo pkgid returns something like path+file:///...#0.6.3-alpha

@@ -74,22 +74,22 @@ if (-not $buttreExe) {
     # the tray, which then exits non-zero on the single-instance lock. Treat a
     # missing verdict line as "cannot tell" — reporting HOOK there would be a
     # second lying diagnostic, which is what this section was rewritten to stop.
-    $answered = ($status -join "`n") -match 'tray will use:'
+    $answered = ($status -join "`n") -match 'buttre runs as:'
     $status | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
 
     if (-not $answered) {
         Write-Host "  ?   $buttreExe is too old for --tsf-status." -ForegroundColor DarkYellow
         Write-Host "      Reinstall (.\scripts\build-tsf.ps1 -Install) to get this check." -ForegroundColor Gray
     } elseif ($exitCode -eq 0) {
-        Write-Host "  OK  TSF backend - the Nom candidate window is reachable." -ForegroundColor Green
+        Write-Host "  OK  TSF keyboards - no tray; Win+Space or Ctrl+Shift+1-9, Ctrl+Shift+`` = off." -ForegroundColor Green
     } else {
         Write-Host ""
-        Write-Host "  Everything you type goes through the HOOK, so TSF-only features" -ForegroundColor Yellow
-        Write-Host "  (the Nom candidate window) never appear." -ForegroundColor Gray
+        Write-Host "  buttre runs as the HOOK app (tray): no buttre keyboard is added," -ForegroundColor Yellow
+        Write-Host "  so TSF-only features (the Nom candidate window) never appear." -ForegroundColor Gray
         Write-Host ""
         Write-Host "  Fix: Settings > Time and language > Language and region >" -ForegroundColor Cyan
-        Write-Host "       (a language) > Options > Add a keyboard > buttre" -ForegroundColor Cyan
-        Write-Host "       Then Win+Space to switch to it, and RESTART buttre.exe." -ForegroundColor Cyan
+        Write-Host "       (a language) > Options > Add a keyboard > buttre Telex / VNI / ..." -ForegroundColor Cyan
+        Write-Host "       Then quit the tray; buttre needs no process of its own." -ForegroundColor Cyan
     }
 }
 

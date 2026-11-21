@@ -67,26 +67,10 @@ pub struct VietnameseEngine {
     /// per-keystroke check be a cheap atomic load + compare instead of an
     /// unconditional `set_strict_spelling` write.
     strict_applied: bool,
-    /// `Settings::input_method` mirror — how the TRAY's method choice reaches
-    /// this process at all.
-    ///
-    /// The text service runs inside the host application and shares no state
-    /// with the tray, so picking VNI in the tray menu changed nothing here:
-    /// the service was constructed with a hard-coded Telex and `set_mode` had
-    /// no caller anywhere. Written by `_macros_watcher` (notify's thread) on
-    /// any `settings.toml` change, consumed lazily on the keystroke path —
-    /// same contract as `strict_spelling`, for the same reason: a TSF text
-    /// service has no event loop to deliver the change on.
-    input_method: Arc<Mutex<String>>,
-    /// Method id last applied to the live `Keyboard`, so the per-keystroke
-    /// check is a string compare rather than an unconditional rebuild.
+    /// Method id last selected through [`Self::select_method`] — the active
+    /// TSF profile, so the per-activation call is a string compare rather than
+    /// an unconditional keyboard rebuild.
     method_applied: String,
-    /// `Settings::enabled` mirror — is the IME on at all? Same transport and
-    /// same lazy-consumption contract as `strict_spelling`; ADR-0003 makes the
-    /// tray its owner and this file its only bridge into this process. While
-    /// `false`, [`Self::is_active`] reports inactive and the key sink claims
-    /// nothing, so every key reaches the host application untouched.
-    enabled: Arc<AtomicBool>,
     /// Personal-learning store, shared with every `Keyboard` this engine
     /// wires (`sync_learning`) and content-swapped by `_macros_watcher` on
     /// external `learning.toml` changes — the same lifecycle as `macros`.
@@ -124,9 +108,9 @@ impl VietnameseEngine {
     /// and `MacroStore::load_gated` degrade to safe defaults on any IO/parse
     /// failure rather than erroring, which matters because this DLL runs
     /// in-process inside an arbitrary host app under `panic = abort`.
-    /// Starts in the SAVED method (`Settings::input_method`), not a fixed
-    /// default — that is how the tray's choice reaches a text service running
-    /// in someone else's process.
+    /// Starts in Telex; the text service selects the real method from the
+    /// active TSF profile at `Activate` ([`Self::select_method`]) — the
+    /// profile, not `Settings::input_method`, is what decides on Windows TSF.
     ///
     /// No `Default` impl on purpose: this reads `settings.toml` and spawns a
     /// filesystem watcher, which is not what `default()` should mean.
@@ -134,17 +118,11 @@ impl VietnameseEngine {
     pub fn new() -> Self {
         let settings = Settings::load();
         let macros = Arc::new(Mutex::new(MacroStore::load_gated(settings.shorthand)));
-        let saved = VietnameseMode::from_settings_id(&settings.input_method);
-        let mut engine = Self::new_with_macros(saved, macros.clone());
-        engine.method_applied = settings.input_method.clone();
+        let mut engine = Self::new_with_macros(VietnameseMode::Telex, macros.clone());
+        engine.method_applied = "telex".to_string();
         engine
             .strict_spelling
             .store(settings.strict_spelling, Ordering::Relaxed);
-        *engine
-            .input_method
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = settings.input_method;
-        engine.enabled.store(settings.enabled, Ordering::Relaxed);
         // Personal learning: load the store only when the feature is on
         // (disk untouched otherwise), spawn the merged-write thread, and
         // let `sync_learning` wire the keyboard on the first keystroke.
@@ -163,8 +141,6 @@ impl VietnameseEngine {
         engine._macros_watcher = spawn_reload_watcher(
             macros,
             engine.strict_spelling.clone(),
-            engine.input_method.clone(),
-            engine.enabled.clone(),
             engine.learning.clone(),
             engine.learning_enabled.clone(),
         );
@@ -193,11 +169,7 @@ impl VietnameseEngine {
             // `process_key`'s lazy sync then pushes it into the keyboard.
             strict_spelling: Arc::new(AtomicBool::new(false)),
             strict_applied: false,
-            input_method: Arc::new(Mutex::new(String::new())),
             method_applied: String::new(),
-            // Tests construct through here and expect typing to work; `new()`
-            // overwrites this with the real `Settings::enabled` right after.
-            enabled: Arc::new(AtomicBool::new(true)),
             learning: Arc::new(Mutex::new(LearningStore::default())),
             learning_tx,
             learning_enabled: Arc::new(AtomicBool::new(false)),
@@ -267,15 +239,8 @@ impl VietnameseEngine {
     /// stored state carries the highlight, and only it survives the cursor keys
     /// the caller may feed in afterwards.
     pub fn process_key(&mut self, ch: char) -> Vec<Action> {
-        self.sync_method();
         self.sync_strict_spelling();
         self.sync_learning();
-        // Belt to `is_active`'s braces: the key sink already refuses to claim
-        // keys while disabled, so this is only reached by paths that bypass it
-        // (candidate routing, tests). Off means UNTOUCHED keys, always.
-        if !self.enabled.load(Ordering::Relaxed) {
-            return vec![Action::DoNothing];
-        }
         let Some(kb) = self.keyboard.as_mut() else {
             return vec![Action::DoNothing];
         };
@@ -327,22 +292,16 @@ impl VietnameseEngine {
         }
     }
 
-    /// Whether this engine transforms anything at all: the IME is ON
-    /// (`Settings::enabled`, ADR-0003) AND a keyboard is loaded (a custom
-    /// layout whose TOML is missing or unparseable loads none).
+    /// Whether this engine transforms anything at all: a keyboard is loaded
+    /// (a custom layout whose TOML is missing or unparseable loads none).
+    /// On/off is the active TSF profile itself — when the user switches to
+    /// another keyboard, keys never reach this text service.
     ///
     /// The key sink MUST consult this before claiming a key: when inactive,
     /// `process_key` returns `DoNothing` for everything, and a key claimed but
     /// then declined is swallowed rather than passed on.
     pub fn is_active(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed) && self.keyboard.is_some()
-    }
-
-    /// Set the enabled flag directly — integration tests only, which have no
-    /// settings watcher to deliver it. Production flips arrive through
-    /// `spawn_reload_watcher` writing the shared atomic.
-    pub fn set_enabled_for_test(&mut self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
+        self.keyboard.is_some()
     }
 
     /// The candidates currently offered, for rendering and for deciding
@@ -479,26 +438,22 @@ impl VietnameseEngine {
         }
     }
 
-    /// Adopt a method the tray switched to since the last keystroke (see the
-    /// `input_method` field).
-    ///
-    /// Cheap when nothing changed: one lock and a string compare. Rebuilding
-    /// the keyboard is the expensive branch, and it only runs on an actual
-    /// switch.
-    fn sync_method(&mut self) {
-        let wanted = {
-            let guard = self
-                .input_method
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            guard.clone()
-        };
-        if wanted.is_empty() || wanted == self.method_applied {
+    /// Switch to `method_id` (the active TSF profile's method). A no-op when
+    /// it is already the current method, so `Activate` and every profile
+    /// notification can call it unconditionally.
+    pub fn select_method(&mut self, method_id: &str) {
+        if method_id == self.method_applied {
             return;
         }
-        tracing::info!("TSF: switching input method to '{wanted}'");
-        self.set_mode(VietnameseMode::from_settings_id(&wanted));
-        self.method_applied = wanted;
+        tracing::info!("TSF: input method '{method_id}' (from the active profile)");
+        self.set_mode(VietnameseMode::from_settings_id(method_id));
+        self.method_applied = method_id.to_string();
+    }
+
+    /// The method currently selected (`telex`, `vni`, `nom`, or a keyboard
+    /// TOML's id) — what the language-bar button shows.
+    pub fn method_id(&self) -> &str {
+        &self.method_applied
     }
 
     /// Push a changed `Settings::strict_spelling` into the live `Keyboard`

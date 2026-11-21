@@ -14,6 +14,8 @@ use super::display_attribute::{
 use super::edit_session::{
     EndComposition, InsertText, QueryTextExt, SetCompositionString, PANEL_GAP,
 };
+use super::langbar::ModeButton;
+use super::switching::{self, SwitchCommand};
 use super::vietnamese_engine::{CandidateMotion, VietnameseEngine};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -51,6 +53,14 @@ pub struct TextService {
     keystroke_tid: Cell<u32>,
     thread_cookies: RefCell<Vec<u32>>,
     keyboard_openclose_cookie: Cell<u32>,
+    /// Mirror of buttre's session-wide on/off compartment (`switching.rs`),
+    /// refreshed at `Activate` and by `OnChange`. Off = claim no key.
+    buttre_enabled: Cell<bool>,
+    /// Advise cookie for that compartment's change sink.
+    enabled_cookie: Cell<u32>,
+    /// The input-mode button next to "ENG" (`langbar.rs`), registered with the
+    /// thread's language bar from `Activate` to `Deactivate`.
+    mode_button: RefCell<Option<ComObject<ModeButton>>>,
     pub(crate) key_busy: Cell<bool>,
     vietnamese_engine: Rc<RefCell<VietnameseEngine>>,
     /// Nôm candidate popup, created on first use and reused afterwards —
@@ -141,6 +151,9 @@ impl TextService {
             keystroke_tid: Cell::new(0),
             thread_cookies: RefCell::new(Vec::new()),
             keyboard_openclose_cookie: Cell::new(TF_INVALID_COOKIE),
+            buttre_enabled: Cell::new(true),
+            enabled_cookie: Cell::new(TF_INVALID_COOKIE),
+            mode_button: RefCell::new(None),
             key_busy: Cell::new(false),
             vietnamese_engine: Rc::new(RefCell::new(VietnameseEngine::new())),
             candidate_panel: RefCell::new(None),
@@ -557,6 +570,114 @@ impl TextService {
         }
         true
     }
+
+    /// Switch the engine to the method `profile` stands for. Called with the
+    /// active profile at `Activate` and on every profile switch.
+    ///
+    /// An open composition is committed first: it was composed by the
+    /// previous method's keystrokes, and the next update under the new method
+    /// would overwrite it with a recomposition of different keys.
+    fn adopt_profile(&self, profile: &GUID) {
+        let Some(method) = crate::platforms::windows::tsf::profiles::method_for_profile(profile)
+        else {
+            debug!("TSF profile {profile:?} is not one of ours");
+            return;
+        };
+        debug!("TSF profile {profile:?} -> method '{method}'");
+        if self.composition.is_started() {
+            if let Some(context) = self.focused_context() {
+                let _ = self.end_composition(&context);
+            }
+        }
+        {
+            let mut engine = self.vietnamese_engine.borrow_mut();
+            engine.reset();
+            engine.select_method(&method);
+        }
+        self.update_mode_button();
+    }
+
+    /// Bring the language-bar button in line with the current method and
+    /// on/off state. Borrows are released before the button's COM callback.
+    fn update_mode_button(&self) {
+        let method = self.vietnamese_engine.borrow().method_id().to_string();
+        let on = self.buttre_enabled.get();
+        let button = self.mode_button.borrow().clone();
+        if let Some(button) = button {
+            button.set_state(&method, on);
+        }
+    }
+
+    /// The context of the document that has focus in this thread, if any.
+    fn focused_context(&self) -> Option<ITfContext> {
+        let tm = self.thread_mgr.borrow().as_ref().cloned()?;
+        // SAFETY: plain COM calls on the thread manager TSF gave us.
+        unsafe { tm.GetFocus().ok()?.GetBase().ok() }
+    }
+
+    /// Re-read the session-wide on/off value. Turning off commits the word
+    /// being typed — it stays in the document as typed, the way switching
+    /// keyboards would leave it.
+    fn refresh_enabled(&self) {
+        let Some(tm) = self.thread_mgr.borrow().as_ref().cloned() else {
+            return;
+        };
+        let on = switching::read_enabled(&tm);
+        let was = self.buttre_enabled.replace(on);
+        if was && !on {
+            debug!("buttre turned off");
+            if self.composition.is_started() {
+                if let Some(context) = self.focused_context() {
+                    let _ = self.end_composition(&context);
+                }
+            }
+            self.vietnamese_engine.borrow_mut().reset();
+            self.hide_candidates();
+        } else if !was && on {
+            debug!("buttre turned on");
+        }
+        self.update_mode_button();
+    }
+
+    /// Carry out `Ctrl+Shift+0…9` (see `switching.rs`).
+    fn apply_switch(&self, command: SwitchCommand) {
+        let Some(tm) = self.thread_mgr.borrow().as_ref().cloned() else {
+            return;
+        };
+        let client_id = self.client_id.get();
+        let on = !matches!(command, SwitchCommand::TurnOff);
+        if let SwitchCommand::Activate(slot) = command {
+            let Some(entry) = switching::installed_profile_for_slot(slot) else {
+                debug!("Ctrl+Shift+{slot}: no buttre keyboard in that slot");
+                return;
+            };
+            if active_buttre_profile() != Some(entry.guid) {
+                // `OnActivated` adopts the method once Windows switches.
+                if let Err(e) = switching::activate_profile(&entry.guid) {
+                    debug!(
+                        "Ctrl+Shift+{slot}: could not activate '{}' (not added in Settings?): {:?}",
+                        entry.description, e
+                    );
+                }
+            }
+        }
+        if let Err(e) = switching::write_enabled(&tm, client_id, on) {
+            debug!(
+                "Could not switch buttre {}: {:?}",
+                if on { "on" } else { "off" },
+                e
+            );
+        }
+        // The compartment notifies every sink, ours included; refreshing here
+        // too keeps this keystroke's own process right even if it does not.
+        self.refresh_enabled();
+    }
+
+    /// buttre is on (`Ctrl+Shift+0…9`) AND has a keyboard loaded — the
+    /// condition for claiming any typing key.
+    fn is_typing_active(&self) -> bool {
+        self.buttre_enabled.get() && self.vietnamese_engine.borrow().is_active()
+    }
 }
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
@@ -570,6 +691,56 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         let tm: ITfThreadMgr = ptim.ok()?.clone();
         *self.this.thread_mgr.borrow_mut() = Some(tm);
         self.this.client_id.set(tid);
+
+        // The active keyboard profile IS the input method (`profiles.rs`).
+        if let Some(profile) = active_buttre_profile() {
+            self.this.adopt_profile(&profile);
+        }
+
+        // Session-wide on/off (Ctrl+Shift+0…9): read the current value, and
+        // watch it so a switch made in another application lands here too.
+        self.this.refresh_enabled();
+        if let Some(tm) = self.this.thread_mgr.borrow().as_ref().cloned() {
+            let sink: ITfCompartmentEventSink = {
+                let r: InterfaceRef<'_, ITfCompartmentEventSink> = self.as_interface_ref();
+                r.to_owned()
+            };
+            // SAFETY: plain COM calls on the compartment of a live thread
+            // manager; the sink is this object, unadvised in Deactivate.
+            unsafe {
+                match switching::enabled_compartment(&tm)
+                    .and_then(|c| c.cast::<ITfSource>())
+                    .and_then(|source| source.AdviseSink(&ITfCompartmentEventSink::IID, &sink))
+                {
+                    Ok(cookie) => self.this.enabled_cookie.set(cookie),
+                    Err(e) => debug!("Watching the on/off compartment failed: {:?}", e),
+                }
+            }
+        }
+
+        // The input-mode button next to "ENG": method icon while on, "E" while
+        // off; a click toggles the same session-wide switch.
+        if let Some(tm) = self.this.thread_mgr.borrow().as_ref().cloned() {
+            let toggle_tm = tm.clone();
+            let toggle = Box::new(move || {
+                let on = switching::read_enabled(&toggle_tm);
+                if let Err(e) = switching::write_enabled(&toggle_tm, tid, !on) {
+                    debug!("Mode button could not toggle buttre: {:?}", e);
+                }
+            });
+            let method = self.this.vietnamese_engine.borrow().method_id().to_string();
+            let button =
+                ModeButton::new(&method, self.this.buttre_enabled.get(), toggle).into_object();
+            // SAFETY: plain COM calls on the thread manager TSF gave us.
+            let added = unsafe {
+                tm.cast::<ITfLangBarItemMgr>()
+                    .and_then(|mgr| mgr.AddItem(&button.to_interface::<ITfLangBarItem>()))
+            };
+            match added {
+                Ok(()) => *self.this.mode_button.borrow_mut() = Some(button),
+                Err(e) => debug!("Adding the mode button to the language bar failed: {:?}", e),
+            }
+        }
 
         // Transport claim (phase 03): tell the hook this PROCESS hosts a live
         // text service. Process id, not thread id — in Chromium/Qt/Notepad the
@@ -731,6 +902,30 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             }
         }
         self.this.keyboard_openclose_cookie.set(TF_INVALID_COOKIE);
+        if let Some(tm) = tm.as_ref() {
+            let cookie = self.this.enabled_cookie.replace(TF_INVALID_COOKIE);
+            if cookie != TF_INVALID_COOKIE {
+                // SAFETY: the cookie came from AdviseSink on this compartment.
+                unsafe {
+                    if let Ok(source) =
+                        switching::enabled_compartment(tm).and_then(|c| c.cast::<ITfSource>())
+                    {
+                        let _ = source.UnadviseSink(cookie);
+                    }
+                }
+            }
+        }
+        // Take the button out BEFORE the COM call: RemoveItem unadvises its
+        // sink, which runs this object's code.
+        let button = self.this.mode_button.borrow_mut().take();
+        if let (Some(tm), Some(button)) = (tm.as_ref(), button) {
+            // SAFETY: plain COM calls on the thread manager stored at Activate.
+            unsafe {
+                if let Ok(mgr) = tm.cast::<ITfLangBarItemMgr>() {
+                    let _ = mgr.RemoveItem(&button.to_interface::<ITfLangBarItem>());
+                }
+            }
+        }
         self.unadvise_all_edit_sinks();
 
         self.this.composition.clear();
@@ -1058,62 +1253,40 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
 }
 
 impl ITfActiveLanguageProfileNotifySink_Impl for TextService_Impl {
-    /// The user switched input profiles in THIS app (Win+Space). Treat leaving
-    /// buttre as a COMMAND to turn off (ADR-0003 invariant 3): with the hook
-    /// covering non-TSF apps, this is the only thing that keeps Win+Space
-    /// meaning "off" — without it the hook would take over the moment the
-    /// profile deactivated, and switching to English-US would still type
-    /// Vietnamese.
+    /// The user switched to one of buttre's profiles (Win+Space, Ctrl+Shift,
+    /// the keyboard list): adopt the method that profile stands for.
     ///
-    /// KNOWN GAP (field-tested 2026-07-30, why `hook_fallback` defaults off):
-    /// switching to the plain "English - US" KEYBOARD LAYOUT did not fire this
-    /// sink at all — a watched log showed zero `OnActivated` lines across the
-    /// switch, in Notepad, with the sink advised. TSF apparently only notifies
-    /// TIP-to-TIP transitions here, and a layout is not a TIP. Before Both
-    /// mode can default on, the off-command needs a source that covers
-    /// layout switches — candidates: `Deactivate` (fires, but also on app
-    /// close), or the tray polling the claim cell going quiet.
-    ///
-    /// Asymmetric on purpose. `fActivated = TRUE` is NOT a command to turn on:
-    /// it also fires when a new app inherits an already-active buttre profile,
-    /// so honouring it would silently re-enable an IME the user just turned
-    /// off from the tray every time they opened a window. Deactivation has no
-    /// such ambiguity — it only fires when the user actively switches away.
-    /// The cost: Win+Space back to buttre while tray-disabled shows the
-    /// profile active but typing off (grey icon says why); turning on is one
-    /// tray click. Logged either way for field diagnosis.
+    /// Deactivation needs nothing: once another keyboard is active, keys stop
+    /// reaching this text service. It used to write `Settings::enabled = false`
+    /// so a hook running alongside would stand down; the TSF build no longer
+    /// runs a hook alongside, and that write leaked into the separately-run
+    /// hook app's on/off state.
     // Signature is fixed by the windows-rs-generated trait (COM vtable
-    // contract) — cannot be `unsafe fn`; the pointer read is scoped below.
+    // contract) — cannot be `unsafe fn`; the pointer reads are scoped below.
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn OnActivated(
         &self,
         clsid: *const GUID,
-        _guidprofile: *const GUID,
+        guidprofile: *const GUID,
         factivated: BOOL,
     ) -> Result<()> {
-        // SAFETY: clsid is supplied by TSF for the duration of the call; null
-        // is checked before the read, and GUID is POD.
-        let ours = unsafe {
-            !clsid.is_null() && *clsid == crate::platforms::windows::tsf::CLSID_BUTTRE_TEXT_SERVICE
+        // SAFETY: both pointers are supplied by TSF for the duration of the
+        // call; null is checked before each read, and GUID is POD.
+        let profile = unsafe {
+            let ours = !clsid.is_null()
+                && *clsid == crate::platforms::windows::tsf::CLSID_BUTTRE_TEXT_SERVICE;
+            (ours && !guidprofile.is_null()).then(|| *guidprofile)
         };
-        if !ours {
+        let Some(profile) = profile else {
             return Ok(());
-        }
+        };
 
-        debug!("OnActivated(ours): factivated={}", factivated.as_bool());
-        if !factivated.as_bool() {
-            // Commit whatever is mid-composition before the profile goes away,
-            // then persist the command through the same file the tray owns —
-            // its watcher (and every other TSF process's watcher) picks it up.
-            let mut settings = buttre_core::Settings::load();
-            if settings.enabled {
-                settings.enabled = false;
-                if let Err(e) = settings.save() {
-                    debug!("OnActivated: could not persist enabled=false: {e:?}");
-                } else {
-                    debug!("OnActivated: user left the buttre profile — IME off");
-                }
-            }
+        debug!(
+            "OnActivated(ours): profile={profile:?} factivated={}",
+            factivated.as_bool()
+        );
+        if factivated.as_bool() {
+            self.this.adopt_profile(&profile);
         }
         Ok(())
     }
@@ -1127,10 +1300,13 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn OnChange(&self, rguid: *const GUID) -> Result<()> {
         // SAFETY: rguid is a valid pointer provided by TSF framework
-        unsafe {
-            if rguid.is_null() || *rguid != GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
-                return Ok(());
-            }
+        let changed = unsafe { (!rguid.is_null()).then(|| *rguid) };
+        if changed == Some(switching::GUID_COMPARTMENT_BUTTRE_ENABLED) {
+            self.this.refresh_enabled();
+            return Ok(());
+        }
+        if changed != Some(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE) {
+            return Ok(());
         }
         // Clone ITfThreadMgr out of the RefCell before COM calls so the borrow
         // is released. GetCompartment/GetValue may call back into this sink.
@@ -1197,7 +1373,7 @@ fn utf16_offset(text: &str, chars: usize) -> usize {
 /// The window the candidate panel must be owned by: the context's view
 /// window, else the focused window — Microsoft's documented recipe for IME
 /// candidate windows. `None` leaves the panel unowned, as before.
-fn candidate_owner(context: &ITfContext) -> Option<windows::Win32::Foundation::HWND> {
+fn candidate_owner(context: &ITfContext) -> Option<HWND> {
     // SAFETY: plain COM calls on a live context TSF handed us; GetFocus has no
     // preconditions and returns a null handle when nothing has focus.
     unsafe {
@@ -1210,6 +1386,22 @@ fn candidate_owner(context: &ITfContext) -> Option<windows::Win32::Foundation::H
             let focus = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
             (!focus.is_invalid()).then_some(focus)
         })
+    }
+}
+
+/// The active keyboard profile, when it is one of buttre's.
+fn active_buttre_profile() -> Option<GUID> {
+    // SAFETY: CoCreateInstance on a system CLSID in a thread TSF has already
+    // initialised COM for; GetActiveProfile writes into a local POD struct.
+    unsafe {
+        let manager: ITfInputProcessorProfileMgr =
+            CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER).ok()?;
+        let mut profile = TF_INPUTPROCESSORPROFILE::default();
+        manager
+            .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile)
+            .ok()?;
+        (profile.clsid == crate::platforms::windows::tsf::CLSID_BUTTRE_TEXT_SERVICE)
+            .then_some(profile.guidProfile)
     }
 }
 
@@ -1288,6 +1480,19 @@ fn is_candidate_key(vkey: u16) -> bool {
         vkey,
         VK_RETURN | VK_ESCAPE | VK_SPACE | VK_PRIOR | VK_NEXT | VK_UP | VK_DOWN
     ) || matches!(vkey, VK_DIGIT_1..=VK_DIGIT_9)
+}
+
+/// The `Ctrl+Shift+<digit>` switch command `vkey` forms with the modifiers
+/// held right now, if any.
+fn switch_command_for(vkey: u16) -> Option<SwitchCommand> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardState, VK_CONTROL, VK_MENU, VK_SHIFT,
+    };
+    let mut state = [0u8; 256];
+    // SAFETY: GetKeyboardState fills a caller-owned 256-byte buffer.
+    unsafe { GetKeyboardState(&mut state) }.ok()?;
+    let down = |vk: u16| state[usize::from(vk)] & 0x80 != 0;
+    switching::switch_command(vkey, down(VK_CONTROL.0), down(VK_SHIFT.0), down(VK_MENU.0))
 }
 
 fn is_hotkey(vkey: u16) -> bool {
@@ -1427,7 +1632,14 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     ) -> Result<BOOL> {
         let vkey = wParam.0 as u16;
 
-        let engine_active = self.this.vietnamese_engine.borrow().is_active();
+        // Ctrl+Shift+0…9 is always ours, on or off — it is how buttre is
+        // turned back on. Carried out in `OnKeyDown`, never here: this is a
+        // question, and hosts may ask it more than once per key.
+        if switch_command_for(vkey).is_some() {
+            return Ok(BOOL(1));
+        }
+
+        let engine_active = self.this.is_typing_active();
         let composing = self.this.composition.is_started();
         let candidates_open = !self.this.vietnamese_engine.borrow().candidates().is_empty();
         // Ctrl/Alt chords belong to the application (except our own hotkeys).
@@ -1467,6 +1679,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
 
         debug!("OnKeyDown: vkey={:?}", vkey);
 
+        if let Some(command) = switch_command_for(vkey) {
+            debug!("Switch command {:?}", command);
+            self.this.apply_switch(command);
+            return Ok(BOOL(1));
+        }
+
         // The candidate popup gets first refusal — several of its keys (Escape,
         // Page Up/Down) are also buffer-reset keys, and while a list is up they
         // mean something else entirely.
@@ -1495,7 +1713,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         // on the document. Eating it instead swallowed every Backspace typed
         // after a word had been committed. In hosts that do call
         // `OnTestKeyDown`, an unclaimed key never reaches this point.
-        let engine_active = self.this.vietnamese_engine.borrow().is_active();
+        let engine_active = self.this.is_typing_active();
         let composing = self.this.composition.is_started();
         if should_ignore(vkey) || !claims_key(vkey, engine_active, composing, candidates_open) {
             if composing && interrupts_composition(vkey) {

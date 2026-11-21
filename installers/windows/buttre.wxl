@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sets the MSI database codepage to UTF-8. WixUIExtension's own en-us
+  localization declares 1252, which overrides Product/@Codepage and rejects
+  the Vietnamese strings in product.wxs (shortcuts, keyboard picker) with
+  LGHT0311.
+-->
+<WixLocalization Culture="en-us" Codepage="65001"
+                 xmlns="http://schemas.microsoft.com/wix/2006/localization" />

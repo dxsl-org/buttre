@@ -604,11 +604,13 @@ cargo clippy --all-targets --all-features  # Linting
 ./scripts/check-tsf-status.ps1
 ```
 
-MSI đăng ký bằng **registry thuần**, không có CustomAction nào nên nó không
-bao giờ gọi `DllRegisterServer`. Vì thế `build-tsf.ps1` mặc định cũng ghi
-registry chứ không chạy `regsvr32` — dùng `regsvr32` là đang test một service
-đăng ký đầy đủ hơn bản ship (thêm profile en-US và hai TSF category). Cờ
-`-SelfRegister` giữ đường đó lại để khoanh vùng lỗi.
+MSI và `build-tsf.ps1 -Install` đăng ký cùng một đường: `buttre.exe
+--register-tsf` (custom action deferred, chạy quyền SYSTEM) — đăng ký một profile
+TSF cho **mỗi kiểu gõ** (`tsf/profiles.rs`) và dọn GUID profile cũ. Sau đó MSI
+chạy `buttre.exe --add-keyboard <id>` dưới quyền người cài cho từng bàn phím được
+chọn, và `--disable-layout-hotkey` nếu mục đó được chọn. Cờ `-SelfRegister` đi qua
+`regsvr32` → `DllRegisterServer` (cùng code) để khoanh vùng lỗi. Mô hình chọn
+kiểu gõ trên Windows: [ADR-0004](adr/0004-windows-tsf-os-owned-methods.md).
 
 ---
 

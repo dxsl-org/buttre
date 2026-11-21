@@ -69,12 +69,35 @@ fn run_tsf_registration(_unregister: bool) -> Result<()> {
     anyhow::bail!("--register-tsf is Windows-only")
 }
 
+/// `buttre --add-keyboard <id>` / `--disable-layout-hotkey`: the installer's
+/// per-user steps (impersonated MSI actions), see `tsf::keyboard_setup`.
+#[cfg(platform_windows)]
+fn run_keyboard_setup(args: &[String]) -> Result<()> {
+    use buttre_platform::platforms::windows::tsf::keyboard_setup;
+    if args.iter().any(|a| a == "--disable-layout-hotkey") {
+        return keyboard_setup::disable_layout_hotkey();
+    }
+    let id = args
+        .iter()
+        .skip_while(|a| *a != "--add-keyboard")
+        .nth(1)
+        .ok_or_else(|| {
+            anyhow::anyhow!("--add-keyboard needs a keyboard id (telex, vni, nom, ...)")
+        })?;
+    keyboard_setup::add_keyboard(id)
+}
+
+#[cfg(not(platform_windows))]
+fn run_keyboard_setup(_args: &[String]) -> Result<()> {
+    anyhow::bail!("--add-keyboard / --disable-layout-hotkey are Windows-only")
+}
+
 /// Flags whose whole purpose is to print something.
 ///
 /// Windows-only, like the single function that reads it: no other platform
 /// builds a GUI-subsystem binary, so nowhere else needs to reattach a console.
 #[cfg(platform_windows)]
-const REPORTING_FLAGS: [&str; 8] = [
+const REPORTING_FLAGS: [&str; 10] = [
     "--version",
     "-V",
     "--help",
@@ -83,6 +106,8 @@ const REPORTING_FLAGS: [&str; 8] = [
     "--tsf-status",
     "--register-tsf",
     "--unregister-tsf",
+    "--add-keyboard",
+    "--disable-layout-hotkey",
 ];
 
 /// Bind stdout/stderr to the console that launched us, so the reporting flags
@@ -157,15 +182,16 @@ fn attach_parent_console(args: &[String]) {
 #[cfg(not(platform_windows))]
 fn attach_parent_console(_args: &[String]) {}
 
-/// `buttre --tsf-status`: report which backend the tray will pick, and why.
+/// `buttre --tsf-status`: report how buttre runs on this machine, and why.
 ///
 /// Exists so diagnostics ask the AUTHORITY instead of guessing. A shell script
 /// reading `HKCU\...\CTF\SortOrder` to infer "is buttre added as an input
 /// method" answered NO while the text service was demonstrably running — the
 /// same wrong-proxy mistake that made the backend gate test the language list.
-/// Here the script calls the very function the tray decides with.
+/// Here the script calls the very functions `method_owner` decides with.
 ///
-/// Exit code 0 = TSF, 1 = Hook, so a caller can branch without parsing text.
+/// Exit code 0 = TSF keyboards (no tray), 1 = Hook (tray), so a caller can
+/// branch without parsing text.
 #[cfg(platform_windows)]
 fn run_tsf_status() -> Result<()> {
     use buttre_platform::platforms::windows::tsf::{lang_check, registration};
@@ -186,8 +212,12 @@ fn run_tsf_status() -> Result<()> {
     println!("registered (HKLM, available):   {registered}");
     println!("added by you (HKCU, languages): {under}");
     println!(
-        "tray will use:                  {}",
-        if registered && enabled { "TSF" } else { "Hook" }
+        "buttre runs as:                 {}",
+        if registered && enabled {
+            "TSF keyboards (no tray; Win+Space, Ctrl+Shift+1-9, Ctrl+Shift+` = off)"
+        } else {
+            "Hook (tray)"
+        }
     );
     if registered && enabled {
         return Ok(());
@@ -341,7 +371,9 @@ fn main() -> Result<()> {
              --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \
              --register-tsf    Register the Windows TSF text service (needs Administrator)\n  \
              --unregister-tsf  Remove that registration (needs Administrator)\n  \
-             --tsf-status      Report whether the tray will use TSF or the hook\n  \
+             --tsf-status      Report whether buttre runs as TSF keyboards or the hook tray\n  \
+             --add-keyboard <id>       Add a buttre keyboard to your Windows list (telex, vni, nom, ...)\n  \
+             --disable-layout-hotkey   Turn off Windows' Ctrl+Shift keyboard switching\n  \
              --version   Print version and exit\n  \
              --help      Print this help and exit",
             ver = env!("CARGO_PKG_VERSION")
@@ -356,6 +388,12 @@ fn main() -> Result<()> {
     }
     if args.iter().any(|a| a == "--unregister-tsf") {
         return run_tsf_registration(true);
+    }
+    if args
+        .iter()
+        .any(|a| a == "--add-keyboard" || a == "--disable-layout-hotkey")
+    {
+        return run_keyboard_setup(&args);
     }
     if args.iter().any(|a| a == "--tsf-status") {
         return run_tsf_status();
@@ -413,9 +451,10 @@ fn main() -> Result<()> {
         // Đưa entry autostart về dạng mới (`--autostart`): entry cũ chạy
         // `buttre` trần, mà ở nhánh này nghĩa là bật cửa sổ Cấu hình mỗi lần
         // đăng nhập. Ghi lại theo đúng setting hiện tại là idempotent và tự
-        // lành sau một lần chạy. Linux-only: macOS không có autostart
-        // (IMKit do hệ thống khởi chạy — buttre-autostart bail có chủ ý).
-        #[cfg(platform_linux)]
+        // lành sau một lần chạy. Windows (bàn phím TSF): entry `--autostart`
+        // thoát im lặng ở nhánh dưới. macOS không có autostart (IMKit do hệ
+        // thống khởi chạy — buttre-autostart bail có chủ ý).
+        #[cfg(any(platform_linux, platform_windows))]
         if let Err(e) = buttre_autostart::set_enabled(Settings::load().startup) {
             log::warn!("autostart reconciliation on OS-owned platform failed: {e:?}");
         }

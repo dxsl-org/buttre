@@ -39,12 +39,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// is deliberate: it ties the watch to the `VietnameseEngine`'s (and thus
 /// the TSF text service instance's) lifetime, so no watcher thread survives
 /// deactivation.
-#[allow(clippy::too_many_arguments)] // reason: one watcher serves every settings/store mirror in this process
 pub fn spawn_reload_watcher(
     store: Arc<Mutex<MacroStore>>,
     strict: Arc<AtomicBool>,
-    method: Arc<Mutex<String>>,
-    enabled: Arc<AtomicBool>,
     learning_store: Arc<Mutex<LearningStore>>,
     learning_enabled: Arc<AtomicBool>,
 ) -> Option<RecommendedWatcher> {
@@ -86,14 +83,8 @@ pub fn spawn_reload_watcher(
                 let next = MacroStore::load_gated(settings.shorthand);
                 *store.lock().unwrap_or_else(PoisonError::into_inner) = next;
                 strict.store(settings.strict_spelling, Ordering::Relaxed);
-                // `settings.toml` is also how the tray's method choice
-                // reaches this process — the text service lives inside the
-                // host application and shares no state with the tray.
-                *method.lock().unwrap_or_else(PoisonError::into_inner) = settings.input_method;
-                // `Settings::enabled` travels the same road (ADR-0003): the
-                // tray owns the flag, this file is the only bridge into
-                // this process.
-                enabled.store(settings.enabled, Ordering::Relaxed);
+                // The input method is NOT read here: on Windows TSF the
+                // active keyboard profile decides it (`profiles.rs`).
                 let was = learning_enabled.swap(settings.learning_enabled, Ordering::Relaxed);
                 // Runtime OFF→ON: the store was never loaded (construction
                 // skips disk while off) — reload now or the session learns
@@ -142,8 +133,6 @@ mod tests {
         let _ = spawn_reload_watcher(
             store,
             Arc::new(AtomicBool::new(false)),
-            Arc::new(Mutex::new(String::new())),
-            Arc::new(AtomicBool::new(true)),
             Arc::new(Mutex::new(LearningStore::default())),
             Arc::new(AtomicBool::new(true)),
         );

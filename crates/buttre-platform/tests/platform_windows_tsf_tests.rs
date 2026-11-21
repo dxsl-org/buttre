@@ -441,9 +441,9 @@ fn test_backspacing_the_only_char_empties_the_buffer() {
 
 use buttre_platform::platforms::windows::tsf::text_service::vietnamese_engine::VietnameseMode as Mode;
 
-/// The tray writes `Settings::input_method`; the text service parses it. A
-/// mismatch here is invisible at runtime — the service just keeps typing the
-/// wrong method, which is exactly what happened when nothing parsed it at all.
+/// The active TSF profile's method id (`profiles.rs`) is parsed here. A
+/// mismatch is invisible at runtime — the service just keeps typing the wrong
+/// method, which is exactly what happened when nothing parsed it at all.
 #[test]
 fn test_settings_ids_map_to_modes() {
     assert_eq!(Mode::from_settings_id("telex"), Mode::Telex);
@@ -457,27 +457,6 @@ fn test_unknown_method_id_becomes_a_custom_lookup() {
         Mode::from_settings_id("taynguyen"),
         Mode::Custom("taynguyen".to_string())
     );
-}
-
-#[test]
-fn test_disabled_engine_passes_keys_through() {
-    // Off is `Settings::enabled`, not a mode (ADR-0003): the engine keeps its
-    // keyboard but must not compose — the host application receives raw keys.
-    let mut engine = VietnameseEngine::new_with_macros(Mode::Telex, vn_macro_store());
-    engine.set_enabled_for_test(false);
-    let actions = engine.process_key('a');
-    assert!(
-        actions.iter().all(|a| matches!(a, Action::DoNothing)),
-        "a disabled engine must not compose: {actions:?}"
-    );
-    assert!(!engine.is_active(), "the key sink must claim nothing");
-
-    // Flipping back on resumes composing with the SAME method — nothing to
-    // restore, because turning off never overwrote it.
-    engine.set_enabled_for_test(true);
-    engine.process_key('a');
-    engine.process_key('s');
-    assert_eq!(engine.buffer_content(), "á");
 }
 
 #[test]

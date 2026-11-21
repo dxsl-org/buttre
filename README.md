@@ -36,11 +36,11 @@ Chúng tôi code buttre vì:
 ### 3. 🔒 Bảo Mật & Riêng Tư Tuyệt Đối
 - **Zero telemetry**: Không thu thập, không gửi bất kỳ dữ liệu nào về server
 - **Không keylogging**: Mọi thao tác đều xử lý local
-- **Không yêu cầu quyền admin**: Chạy với quyền user thông thường
+- **Quyền admin chỉ lúc cài**: Đăng ký bộ gõ với Windows (MSI) cần Admin một lần; khi gõ, buttre chạy với quyền user thông thường
 - **Open source hoàn toàn**: Bạn có thể audit từng dòng code
 
 ### 4. 🎨 Thiết Kế Tối Giản
-- **Giao diện tối giản**: Chỉ có system tray icon nhỏ gọn
+- **Giao diện tối giản**: Windows — mỗi kiểu gõ là một bàn phím Windows, trạng thái hiện ở icon nhỏ cạnh chữ ENG (không tray); bản Hook có icon tray. Xem [QUICK-START.md](QUICK-START.md)
 - **Không quảng cáo, không spam**: Tập trung 100% vào trải nghiệm gõ
 - **Không phiền nhiễu**: Không có popup, notification không cần thiết
 

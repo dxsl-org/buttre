@@ -27,8 +27,13 @@ pub enum MethodOwner {
 /// biên dịch trên Linux nên không thể là đầu vào của bảng.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfacePath {
-    /// Windows: hai đường truyền (TSF + hook), chỉ buttre phân xử được.
-    Windows,
+    /// Windows with a buttre keyboard added: every input method is its own
+    /// Windows keyboard (TSF profile), switched with Win+Space or buttre's
+    /// Ctrl+Shift+0…9 inside the text service — no tray (ADR-0004).
+    WindowsTsf,
+    /// Windows without a buttre keyboard added, or `buttre --hook`: the
+    /// global keyboard hook, which only buttre can steer — tray.
+    WindowsHook,
     /// macOS IMKit: menu input-source của OS — mỗi kiểu gõ (Telex, VNI, Nôm,
     /// từng keyboard đóng gói) là một input mode riêng trong Info.plist.
     MacosImkit,
@@ -53,10 +58,11 @@ pub enum SurfacePath {
 /// Bảng quyết định thuần (ADR-0003) — test pin từng dòng.
 pub fn owner_of(path: SurfacePath) -> MethodOwner {
     match path {
-        SurfacePath::MacosImkit | SurfacePath::LinuxFcitx5 | SurfacePath::LinuxIbus => {
-            MethodOwner::Os
-        }
-        SurfacePath::Windows
+        SurfacePath::MacosImkit
+        | SurfacePath::LinuxFcitx5
+        | SurfacePath::LinuxIbus
+        | SurfacePath::WindowsTsf => MethodOwner::Os,
+        SurfacePath::WindowsHook
         | SurfacePath::LinuxWaylandNative
         | SurfacePath::LinuxFcitx5NoAddon
         | SurfacePath::LinuxUndetected => MethodOwner::Buttre,
@@ -68,7 +74,19 @@ pub fn owner_of(path: SurfacePath) -> MethodOwner {
 pub fn current_surface() -> SurfacePath {
     #[cfg(platform_windows)]
     {
-        SurfacePath::Windows
+        use crate::platforms::windows::tsf::{lang_check, registration};
+        // `--hook` runs the hook app deliberately, whatever is installed. The
+        // TSF text service keeps publishing its transport claim, so in apps
+        // where a buttre keyboard is active the hook still stands down.
+        let forced_hook = std::env::args().any(|arg| arg == "--hook");
+        if !forced_hook
+            && registration::is_tsf_registered()
+            && lang_check::is_buttre_text_service_enabled()
+        {
+            SurfacePath::WindowsTsf
+        } else {
+            SurfacePath::WindowsHook
+        }
     }
     #[cfg(platform_macos)]
     {
@@ -123,7 +141,10 @@ mod tests {
             owner_of(SurfacePath::LinuxWaylandNative),
             MethodOwner::Buttre
         );
-        assert_eq!(owner_of(SurfacePath::Windows), MethodOwner::Buttre);
+        // ADR-0004: Windows TSF hands method choice to the OS keyboard list;
+        // the hook app keeps the tray.
+        assert_eq!(owner_of(SurfacePath::WindowsTsf), MethodOwner::Os);
+        assert_eq!(owner_of(SurfacePath::WindowsHook), MethodOwner::Buttre);
         assert_eq!(owner_of(SurfacePath::LinuxUndetected), MethodOwner::Buttre);
         // fcitx5 sống nhưng addon chưa cài = KHÔNG có menu OS nào vẽ buttre
         // — bỏ tray ở đây là lấy mất công tắc duy nhất của người dùng.

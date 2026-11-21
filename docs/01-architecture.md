@@ -187,10 +187,10 @@ for action in actions {
 **Vị trí**: `crates/buttre-platform/`
 
 **Trách nhiệm**:
-- Windows: TSF (Text Services Framework) — hoạt động
+- Windows: TSF (Text Services Framework) — hoạt động. Mỗi kiểu gõ là một profile TSF (bàn phím Windows riêng), OS sở hữu lựa chọn kiểu gõ, không tray ([ADR-0004](adr/0004-windows-tsf-os-owned-methods.md)); bản Hook (`buttre --hook`, hoặc chưa thêm bàn phím buttre) giữ tray
 - Linux: IBus (GNOME/X11) + Wayland-native `zwp_input_method_v2` (sway/Hyprland/KDE) — hoạt động; semantics composition dùng chung qua `shared/engine_bridge.rs`
 - macOS: FFI (`ButtreKeyResult`) sẵn sàng; IMKit host đang phát triển
-- UI system tray
+- UI system tray (Linux, Windows bản Hook)
 - Quản lý cài đặt
 
 **Các Module Chính**:
@@ -202,12 +202,19 @@ buttre-platform/
 │   │       └── tsf/
 │   │           ├── com.rs                      # Tiện ích COM (DllMain, ref count)
 │   │           ├── factory.rs                  # COM class factory
-│   │           ├── registration.rs             # Đăng ký TSF
+│   │           ├── registration.rs             # Đăng ký TSF (mọi profile, dọn GUID cũ)
+│   │           ├── profiles.rs                 # Bảng profile: kiểu gõ ⇄ GUID tất định
+│   │           ├── keyboard_setup.rs           # --add-keyboard, --disable-layout-hotkey (installer)
+│   │           ├── settings_launcher.rs        # Mở `buttre.exe --config` từ menu icon chế độ
 │   │           ├── text_ops.rs                 # Thao tác text
 │   │           ├── ipc.rs                      # Giao tiếp liên tiến trình
 │   │           ├── logging.rs                  # Debug logging
 │   │           ├── text_service/
 │   │           │   ├── text_service_stub.rs    # ITfTextInputProcessorEx + ITfKeyEventSink
+│   │           │   ├── switching.rs            # Ctrl+Shift+1…9 / Ctrl+Shift+` + global compartment bật/tắt
+│   │           │   ├── langbar.rs              # Icon chế độ cạnh ENG (GUID_LBI_INPUTMODE)
+│   │           │   ├── mode_icon.rs            # PNG → HICON cho icon chế độ
+│   │           │   ├── mode_menu.rs            # Menu chuột phải: Cấu hình / Bật–Tắt
 │   │           │   ├── composition.rs          # State composition
 │   │           │   ├── edit_session.rs         # Xử lý edit session
 │   │           │   ├── display_attribute.rs    # Thuộc tính hiển thị
@@ -220,7 +227,7 @@ buttre-platform/
 ```
 
 **Tích Hợp Platform**:
-- **Windows**: Biên dịch thành DLL, đăng ký qua `regsvr32`
+- **Windows**: Biên dịch thành DLL; MSI/`build-tsf.ps1` đăng ký bằng `buttre.exe --register-tsf` (cùng code với `DllRegisterServer`)
 - **macOS**: dylib + FFI cho IMKit host (host đang phát triển)
 - **Linux**: binary chạy 2 chế độ — `--ibus` (ibus-daemon spawn) và `--ime` (Wayland-native tự dò, fallback IBus)
 
@@ -625,11 +632,11 @@ Học cá nhân hóa là một cơ chế **tự động, dựa trên hành vi ty
 
 ## Tích Hợp Platform
 
-### Mô Hình Sở Hữu Kiểu Gõ (ADR-0003)
+### Mô Hình Sở Hữu Kiểu Gõ (ADR-0003, Windows: ADR-0004)
 
 **Trạng thái**: ✅ Đã cài đặt (phase-04)
 
-buttre không sở hữu lựa chọn kiểu gõ ở mọi nơi — quyết định này phụ thuộc **runtime** và **theo từng nền tảng**. Hàm [`method_owner::decide()`](crates/buttre-platform/src/shared/method_owner.rs) probe đường IME (Linux D-Bus probes, macOS giả định, Windows hardcode) và phân nhánh hành vi:
+buttre không sở hữu lựa chọn kiểu gõ ở mọi nơi — quyết định này phụ thuộc **runtime** và **theo từng nền tảng**. Hàm [`method_owner::decide()`](crates/buttre-platform/src/shared/method_owner.rs) probe đường IME (Linux D-Bus probes, macOS giả định, Windows: đã thêm bàn phím buttre nào chưa / cờ `--hook`) và phân nhánh hành vi:
 
 | Nền tảng | Menu của OS | Sở hữu | Tray | Cửa Sổ Cấu Hình |
 |---|---|---|---|---|
@@ -637,7 +644,8 @@ buttre không sở hữu lựa chọn kiểu gõ ở mọi nơi — quyết đ�
 | Linux fcitx5 + addon | ✅ Panel status area | OS | ❌ Không | Settings window |
 | macOS IMKit | ✅ Input Source menu | OS | ❌ Không | Settings window |
 | Linux Wayland-native | ❌ Không có | buttre | ✅ Có | Tray + Settings |
-| Windows | ❌ Không có | buttre | ✅ Có | Tray + Settings |
+| Windows TSF (đã thêm bàn phím buttre) | ✅ Danh sách bàn phím (Win+Space) + icon chế độ cạnh ENG | OS | ❌ Không | Menu icon chế độ + Settings |
+| Windows Hook (chưa thêm / `--hook`) | ❌ Không có | buttre | ✅ Có | Tray + Settings |
 
 **Hệ quả**:
 
@@ -647,7 +655,7 @@ buttre không sở hữu lựa chọn kiểu gõ ở mọi nơi — quyết đ�
 - **Radio English**: Trên IBus, nó viết lệnh toggle `Settings::enabled` chứ không phải lựa chọn kiểu gõ — nó tắt engine, không chuyển sang kiểu English fake.
 - **`--doctor`**: In owner + surface để tìm phía máy bị lệch nhau.
 
-Xem chi tiết [docs/adr/0003-per-platform-method-ownership.md](adr/0003-per-platform-method-ownership.md).
+Xem chi tiết [docs/adr/0003-per-platform-method-ownership.md](adr/0003-per-platform-method-ownership.md) và, cho Windows, [docs/adr/0004-windows-tsf-os-owned-methods.md](adr/0004-windows-tsf-os-owned-methods.md).
 
 ---
 
