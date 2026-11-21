@@ -76,11 +76,11 @@ Sinh bởi script build (danh sách bàn phím TOML lấy từ cùng vòng lặp
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
-    <allowed-os-versions><os-version min="11.0"/></allowed-os-versions>
+<installer-gui-script minSpecVersion="2">
     <title>buttre</title>
     <options customize="allow" require-scripts="false" hostArchitectures="arm64,x86_64"/>
     <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
-    <os-version min="11.0"/>
+    <allowed-os-versions><os-version min="11.0"/></allowed-os-versions>
 
     <choices-outline>
         <line choice="app"/>
