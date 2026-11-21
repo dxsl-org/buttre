@@ -197,7 +197,7 @@ Xây dựng một **bộ gõ tiếng Việt hiện đại, hiệu năng cao, đa
 - [ ] Phân phối
   - [ ] .deb package (Ubuntu/Debian)
   - [ ] .rpm package (Fedora/RHEL)
-  - [ ] AUR package (Arch Linux)
+  - [ ] AUR package (Arch Linux) — họ Arch ~34% Linux desktop, xem [linux-coverage-test-matrix.md](linux-coverage-test-matrix.md)
   - [ ] Flatpak (tùy chọn)
 - [ ] Kiểm thử
   - [ ] Kiểm thử trong gedit, LibreOffice, Firefox

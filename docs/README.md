@@ -30,6 +30,7 @@ docs/
 ├── VIETNAMESE_ACCENT.md           # Đặc tả chính tả tiếng Việt
 ├── MANUAL_TESTING_GUIDE.md        # Hướng dẫn kiểm thử thủ công TSF DLL
 ├── FFI_SAFETY_GUIDE.md            # Các pattern FFI an toàn (macOS/Linux)
+├── linux-coverage-test-matrix.md  # Linux: độ phủ gói cài theo distro, ma trận máy ảo test
 └── journals/                      # Nhật ký phát triển
 ```
 
