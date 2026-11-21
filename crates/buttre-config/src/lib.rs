@@ -145,6 +145,10 @@ pub fn run(show_autostart: bool) -> anyhow::Result<()> {
 
     let window = ConfigWindow::new()?;
     window.set_show_autostart(show_autostart);
+    // Windows reads nothing of `use_preedit`: neither the Hook nor the TSF
+    // backend has a no-preedit mode. The value still round-trips through the
+    // hidden property, so saving here never clears it for other platforms.
+    window.set_show_no_preedit(!cfg!(target_os = "windows"));
     apply_settings_to_window(&window, &settings);
     // Single-sourced from Cargo.toml — the old help_dialog.rs MessageBox
     // had this hardcoded ("0.7.7-beta") and silently went stale after every
