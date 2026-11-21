@@ -19,6 +19,13 @@ Kết quả:
 - `target/macos-app/Buttre.app`
 - `target/macos-app/buttre-0.8.0-beta-macos.zip`
 
+Bộ cài `.pkg` (chạy sau `build_app.sh`):
+
+```bash
+bash hosts/macos/build_pkg.sh 0.8.0-beta
+# → target/macos-app/buttre-0.8.0-beta-macos.pkg
+```
+
 Bundle chứa executable universal (`arm64` + `x86_64`), Rust dylib, keyboard
 tables và cơ sở dữ liệu Nôm. Xem
 [`hosts/macos/README.md`](hosts/macos/README.md) để biết cách ký Developer ID
@@ -29,7 +36,16 @@ bằng `installers/macos/build_dylib.sh`; nó không phải bộ gõ có thể c
 
 ## Cài đặt
 
-Cài cho mọi tài khoản:
+**Bộ cài `.pkg`** (khuyên dùng): bấm đúp `buttre-<version>-macos.pkg`. Nút
+**Customize** có một ô cho mỗi bàn phím — Telex, VNI, Chữ Nôm chọn sẵn, bàn
+phím dân tộc không chọn. App được cài vào `/Library/Input Methods` cho mọi
+tài khoản, các bàn phím đã chọn hiện ngay trong menu bàn phím của người đang
+đăng nhập, không cần đăng xuất.
+
+**Zip:** giải nén, chạy `./install.sh` dưới quyền người dùng (hỏi mật khẩu
+admin, bật Telex, VNI, Chữ Nôm).
+
+Cài tay cho mọi tài khoản:
 
 ```bash
 sudo rm -rf "/Library/Input Methods/Buttre.app"
@@ -44,7 +60,7 @@ rm -rf "$HOME/Library/Input Methods/Buttre.app"
 ditto target/macos-app/Buttre.app "$HOME/Library/Input Methods/Buttre.app"
 ```
 
-Đăng xuất rồi đăng nhập lại. Sau đó mở:
+Cài tay thì đăng xuất rồi đăng nhập lại. Bàn phím chưa có trong menu thì mở:
 
 `System Settings → Keyboard → Text Input → Edit → (+) → Vietnamese`
 

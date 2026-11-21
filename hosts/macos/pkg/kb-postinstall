@@ -1,0 +1,25 @@
+#!/bin/bash
+# kb-<method>.pkg postinstall — runs as root after buttre-app.pkg (the
+# Distribution's choices-outline orders it first). build_pkg.sh substitutes
+# @MODE@ with the method id. See docs/macos-pkg-installer-design.md.
+#
+# TISEnableInputSource under root does nothing for the user, so the enable
+# runs in the logged-in user's session. Failing to enable one keyboard never
+# fails the install (like the MSI's Return="ignore"): the app is in place and
+# the keyboard can be added under System Settings → Keyboard → Text Input →
+# Edit → (+) → Vietnamese.
+MODE="@MODE@"
+APP="/Library/Input Methods/Buttre.app/Contents/MacOS/buttre"
+
+# Installing onto another volume: no session of that system to enable in.
+if [ "${3:-/}" != "/" ]; then
+    exit 0
+fi
+USER_NAME="$(stat -f %Su /dev/console 2>/dev/null)"
+# Nobody logged in (MDM, loginwindow): nothing to enable for — skip.
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ] || [ "$USER_NAME" = "loginwindow" ]; then
+    exit 0
+fi
+USER_ID="$(id -u "$USER_NAME")" || exit 0
+launchctl asuser "$USER_ID" sudo -u "$USER_NAME" "$APP" --install "$MODE" || true
+exit 0

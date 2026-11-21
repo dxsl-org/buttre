@@ -19,11 +19,16 @@ method (Apple TN2150) — buttre simply won't compose there, by design.
 hosts/macos/
 ├── Info.plist                 # IMKit bundle keys (connection name, controller class, input mode)
 ├── build_app.sh               # universal build → sign/notarize → Buttre.app → zip
+├── build_pkg.sh               # Buttre.app → buttre-<ver>-macos.pkg (chọn bàn phím khi cài)
+├── install.sh                 # cài từ zip: copy + bật Telex/VNI/Nôm
+├── pkg/
+│   ├── app-preinstall         # dừng bản đang chạy, xoá bản cũ
+│   ├── app-postinstall        # khởi động lại imklaunchagent của người dùng (gõ được không cần logout)
+│   └── kb-postinstall         # mẫu: `buttre --install <id>` trong phiên người dùng
 └── src/
-    ├── main.m                 # IMKServer bootstrap
+    ├── main.m                 # IMKServer bootstrap; `--install [method…]`
     ├── ButtreInputController.h
     └── ButtreInputController.m # NSEvent → engine → setMarkedText/insertText; input-menu items
-```
 
 `build_app.sh` also bundles the Rust `buttre` binary as
 `Contents/Helpers/buttre-config` — the settings window (`--config`).
@@ -64,14 +69,41 @@ Requires Xcode command-line tools and the Rust aarch64/x86_64 Apple targets
 under an `Input Methods` directory; launching it in Finder or copying it to
 `/Applications` does not register an input source.
 
+**`.pkg` (release):** `bash hosts/macos/build_pkg.sh <version>` after
+`build_app.sh` → `target/macos-app/buttre-<version>-macos.pkg`. Double-click
+it; **Customize** has one box per keyboard (Telex, VNI, Chữ Nôm selected,
+bundled keyboards not). The app goes to `/Library/Input Methods`; each picked
+keyboard is enabled in the logged-in user's session (`buttre --install <id>`),
+no logout needed: the app's postinstall restarts the user's `imklaunchagent`,
+which otherwise keeps failing to launch the replaced bundle
+(`LaunchInputMethod() Error, status=-50` — in the menu, types nothing until
+logout). Enabling never fails the install — a keyboard that did not
+come up can be added in System Settings. Signed with a Developer ID Installer
+identity (`MACOS_INSTALLER_IDENTITY`, else the first in the keychain; none →
+unsigned, local testing only) and notarized like `build_app.sh`. Design:
+[`docs/macos-pkg-installer-design.md`](../../docs/macos-pkg-installer-design.md).
+
+**zip:** unzip, run `./install.sh` as your user (asks for the admin password,
+enables Telex, VNI, Chữ Nôm). By hand:
+
 ```bash
 sudo rm -rf "/Library/Input Methods/Buttre.app"
 sudo ditto target/macos-app/Buttre.app "/Library/Input Methods/Buttre.app"
+"/Library/Input Methods/Buttre.app/Contents/MacOS/buttre" --install          # Telex, VNI, Nôm
+"/Library/Input Methods/Buttre.app/Contents/MacOS/buttre" --install thai     # chosen modes
 ```
 
-Log out and back in, then open **System Settings → Keyboard → Text Input →
-Edit → (+) → Vietnamese** and add the buttre modes you want (buttre Telex,
-buttre VNI, buttre Chữ Nôm, one per bundled keyboard).
+Other modes: **System Settings → Keyboard → Text Input → Edit → (+) →
+Vietnamese** (buttre Telex, buttre VNI, buttre Chữ Nôm, one per bundled
+keyboard).
+
+**Uninstall:** remove the buttre keyboards in System Settings → Text Input,
+then:
+
+```bash
+sudo rm -rf "/Library/Input Methods/Buttre.app"
+pkgutil --pkgs | grep '^org\.dxsl\.buttre\.' | xargs -n1 sudo pkgutil --forget
+```
 
 Select buttre, then type `vieejt` → `việt` (marked/underlined preedit while
 composing, committed on space). No Accessibility prompt should appear.
@@ -156,7 +188,9 @@ when `MACOS_NOTARY_PROFILE` names a `notarytool` keychain profile
 (`MACOS_NOTARY_KEYCHAIN` optionally points at the keychain holding it).
 
 `release.yml` → `build-macos-app` does both on a throwaway keychain and
-publishes `buttre-<version>-macos-app.zip`. Repository secrets it needs:
+publishes `buttre-<version>-macos-app.zip`; with the Installer certificate it
+also builds, signs and notarizes `buttre-<version>-macos.pkg`
+(`build_pkg.sh`). Repository secrets it needs:
 
 | Secret | Value |
 |---|---|
@@ -165,6 +199,8 @@ publishes `buttre-<version>-macos-app.zip`. Repository secrets it needs:
 | `APPLE_API_KEY_P8` | Contents of the App Store Connect API key `AuthKey_<id>.p8` |
 | `APPLE_API_KEY_ID` | That key's Key ID |
 | `APPLE_API_ISSUER_ID` | The team's Issuer ID (App Store Connect → Integrations) |
+| `MACOS_INSTALLER_CERT_P12_BASE64` | *Optional.* Developer ID **Installer** certificate + private key, `.p12`, base64 — without it no `.pkg` is published |
+| `MACOS_INSTALLER_CERT_PASSWORD` | Password of that `.p12` |
 
 Missing secrets fail the job rather than publish an unsigned app. CI
 (`ci.yml`) keeps building an ad-hoc signed app as a compile gate only.

@@ -29,6 +29,10 @@ echo "==> Copying Buttre.app to /Library/Input Methods (admin password)"
 pkill -f "$DEST/Contents/MacOS/buttre" 2>/dev/null || true
 sudo rm -rf "$DEST"
 sudo ditto "$SRC" "$DEST"
+# The session's imklaunchagent keeps state for the bundle just deleted and
+# fails to launch the new copy (buttre in the menu, typing nothing) until
+# logout. launchd restarts it at once with the new bundle.
+launchctl kickstart -k "gui/$(id -u)/com.apple.imklaunchagent" || true
 
 echo "==> Enabling buttre Telex, VNI, Chữ Nôm"
 "$DEST/Contents/MacOS/buttre" --install

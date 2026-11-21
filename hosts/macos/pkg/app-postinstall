@@ -1,0 +1,23 @@
+#!/bin/bash
+# buttre-app.pkg postinstall — runs as root right after Buttre.app is laid
+# down, before any kb-*.pkg script. See docs/macos-pkg-installer-design.md.
+#
+# Restart the logged-in user's imklaunchagent (the per-session launcher of
+# IMKit input methods). The running one keeps state for the bundle it knew
+# before preinstall deleted it, and fails every launch of the new copy
+# (log: "LaunchInputMethod() Error, status=-50") — buttre shows in the input
+# menu but types nothing until logout/reboot. launchd restarts it at once
+# (KeepAlive), it reads the new bundle and launches it on the next keystroke.
+# Never fails the install: worst case is the old logout-to-type behaviour.
+
+# Installing onto another volume: no session of that system to fix.
+if [ "${3:-/}" != "/" ]; then
+    exit 0
+fi
+USER_NAME="$(stat -f %Su /dev/console 2>/dev/null)"
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ] || [ "$USER_NAME" = "loginwindow" ]; then
+    exit 0
+fi
+USER_ID="$(id -u "$USER_NAME")" || exit 0
+launchctl kickstart -k "gui/$USER_ID/com.apple.imklaunchagent" || true
+exit 0

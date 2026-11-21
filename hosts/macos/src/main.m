@@ -4,11 +4,13 @@
 // and InputMethodServerControllerClass from Info.plist, then instantiates one
 // ButtreInputController per input session and routes key events to it.
 //
-// `buttre --install` (run as the logged-in user, after the bundle is copied
-// into an Input Methods folder): registers the bundle with Text Input Sources
-// and enables the primary modes — Telex, VNI, Chữ Nôm — so they show up in
-// the input menu without a trip to System Settings. The other modes (bundled
-// ethnic-minority keyboards) stay available for the user to add there.
+// `buttre --install [method…]` (run as the logged-in user, after the bundle is
+// copied into an Input Methods folder): registers the bundle with Text Input
+// Sources and enables the given methods' input modes so they show up in the
+// input menu without a trip to System Settings. With no method it enables the
+// primary ones — Telex, VNI, Chữ Nôm (`install.sh`); the `.pkg` installer
+// passes the keyboards picked under Customize, one per call. The other modes
+// stay available for the user to add in System Settings.
 //
 // The server object must outlive the run loop, so it is a global — releasing
 // it would tear the input method off the mach port the moment it was built.
@@ -19,9 +21,34 @@
 
 static IMKServer *gServer = nil;
 
-// Methods enabled by `--install`: "<bundle id>.<method>" input-mode ids.
+// Methods enabled by a bare `--install`: "<bundle id>.<method>" input-mode ids.
 static NSArray<NSString *> *primary_methods(void) {
     return @[ @"telex", @"vni", @"nom" ];
+}
+
+// The input-mode ids of `methods`, or nil after reporting every method the
+// bundle does not declare in ComponentInputModeDict (build_app.sh adds one
+// per bundled keyboard). Checked before touching TIS so a typo has no effect.
+static NSArray<NSString *> *mode_ids(NSBundle *bundle, NSArray<NSString *> *methods) {
+    NSDictionary *modeDict = bundle.infoDictionary[@"ComponentInputModeDict"];
+    NSDictionary *declared =
+        [modeDict isKindOfClass:[NSDictionary class]] ? modeDict[@"tsInputModeListKey"] : nil;
+    if (![declared isKindOfClass:[NSDictionary class]]) {
+        declared = @{};
+    }
+    NSMutableArray<NSString *> *ids = [NSMutableArray array];
+    BOOL ok = YES;
+    for (NSString *method in methods) {
+        NSString *modeID = [NSString stringWithFormat:@"%@.%@", bundle.bundleIdentifier, method];
+        if (declared[modeID] == nil) {
+            fprintf(stderr, "buttre: unknown input mode '%s' (no %s in Info.plist)\n",
+                    method.UTF8String, modeID.UTF8String);
+            ok = NO;
+            continue;
+        }
+        [ids addObject:modeID];
+    }
+    return ok ? ids : nil;
 }
 
 // Return the ids in `wanted` that TIS reports as DISABLED (or does not list);
@@ -65,16 +92,16 @@ static NSSet<NSString *> *disabled_sources(NSString *bundleID, NSSet<NSString *>
     return disabled;
 }
 
-// Register this bundle with Text Input Sources and enable the primary modes
-// (plus the input method itself, which owns them). Idempotent: enabled
-// sources are left alone. Returns 0 once TIS reports every one enabled.
+// Register this bundle with Text Input Sources and enable `modeIDs` (plus the
+// input method itself, which owns them). Idempotent: enabled sources are left
+// alone. Returns 0 once TIS reports every one enabled.
 //
 // TIS applies enable requests asynchronously: observed on macOS 13,
 // `TISEnableInputSource` returned noErr and the mode appeared seconds later.
 // So this requests once, then polls (servicing the run loop, which delivers
 // TIS's change notifications), re-requesting only every few seconds —
 // back-to-back requests were seen to be dropped.
-static int install_input_sources(NSBundle *bundle) {
+static int install_input_sources(NSBundle *bundle, NSArray<NSString *> *modeIDs) {
     OSStatus status = TISRegisterInputSource((__bridge CFURLRef)bundle.bundleURL);
     if (status != noErr) {
         fprintf(stderr, "buttre: TISRegisterInputSource(%s) failed: %d\n",
@@ -84,9 +111,7 @@ static int install_input_sources(NSBundle *bundle) {
 
     NSString *bundleID = bundle.bundleIdentifier;
     NSMutableSet<NSString *> *wanted = [NSMutableSet setWithObject:bundleID];
-    for (NSString *method in primary_methods()) {
-        [wanted addObject:[NSString stringWithFormat:@"%@.%@", bundleID, method]];
-    }
+    [wanted addObjectsFromArray:modeIDs];
 
     NSSet<NSString *> *disabled = disabled_sources(bundleID, wanted, YES);
     for (int second = 1; second <= 15 && disabled.count > 0; second++) {
@@ -101,8 +126,8 @@ static int install_input_sources(NSBundle *bundle) {
         }
         return 1;
     }
-    for (NSString *method in primary_methods()) {
-        printf("enabled %s.%s\n", bundleID.UTF8String, method.UTF8String);
+    for (NSString *modeID in modeIDs) {
+        printf("enabled %s\n", modeID.UTF8String);
     }
     return 0;
 }
@@ -111,7 +136,13 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSBundle *bundle = [NSBundle mainBundle];
         if (argc > 1 && strcmp(argv[1], "--install") == 0) {
-            return install_input_sources(bundle);
+            NSMutableArray<NSString *> *methods = [NSMutableArray array];
+            for (int i = 2; i < argc; i++) {
+                [methods addObject:@(argv[i])];
+            }
+            NSArray<NSString *> *modeIDs =
+                mode_ids(bundle, methods.count > 0 ? methods : primary_methods());
+            return modeIDs == nil ? 1 : install_input_sources(bundle, modeIDs);
         }
 
         NSString *connectionName =

@@ -1,0 +1,29 @@
+#!/bin/bash
+# buttre-app.pkg preinstall — runs as root before Buttre.app is laid down in
+# /Library/Input Methods. Installs files only; enabling keyboards is the
+# kb-*.pkg postinstalls' job. See docs/macos-pkg-installer-design.md.
+#
+# $3 = target volume ("/" for the boot volume).
+TARGET="${3:-/}"
+TARGET="${TARGET%/}"
+APP="$TARGET/Library/Input Methods/Buttre.app"
+
+# Stop a running older version so the next keystroke loads the new one.
+pkill -f "$APP/Contents/MacOS/buttre" 2>/dev/null || true
+
+# Remove the old bundle instead of letting Installer merge over it: files the
+# new version no longer ships (a dropped keyboard TOML) would stay inside the
+# bundle and break its code signature.
+rm -rf "$APP"
+
+# An older per-user copy (pre-installer releases) would shadow/duplicate the
+# system one for the logged-in user.
+USER_NAME="$(stat -f %Su /dev/console 2>/dev/null)"
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ] && [ "$USER_NAME" != "loginwindow" ]; then
+    HOME_DIR="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null \
+        | sed -n 's/^NFSHomeDirectory: //p')"
+    if [ -n "$HOME_DIR" ] && [ -d "$HOME_DIR/Library/Input Methods/Buttre.app" ]; then
+        rm -rf "$HOME_DIR/Library/Input Methods/Buttre.app"
+    fi
+fi
+exit 0

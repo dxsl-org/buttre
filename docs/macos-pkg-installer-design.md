@@ -1,6 +1,7 @@
 # Thiết kế: bộ cài `.pkg` cho macOS (chọn bàn phím như MSI Windows)
 
-- **Trạng thái**: Đề xuất — chưa cài đặt
+- **Trạng thái**: Đã cài đặt (`hosts/macos/build_pkg.sh`, `hosts/macos/pkg/`); đã kiểm chứng trên
+  macOS 13 (Intel) mục 1–5, còn mục 6 và secret CI (mục cuối)
 - **Ngày**: 2026-11-21
 - **Liên quan**: [ADR-0004](adr/0004-windows-tsf-os-owned-methods.md) (mô hình Windows tương ứng),
   `hosts/macos/` (IMKit host), `installers/windows/product.wxs` (bộ cài mẫu)
@@ -38,8 +39,16 @@ Ngoài phạm vi: Ctrl+Shift+1…9 trên macOS (việc của IMKit host, không 
 ```
 buttre-<ver>-macos.pkg            (productbuild --distribution, ký Developer ID Installer)
 ├── buttre-app.pkg                bắt buộc; payload Buttre.app → /Library/Input Methods
-│     preinstall:  pkill bản đang chạy; xoá ~/Library/Input Methods/Buttre.app của console user
-│     postinstall: không bật gì (chỉ cài file)
+│     preinstall:  pkill bản đang chạy; xoá bản cũ ở /Library/Input Methods (file thừa
+│                  trong bundle làm hỏng chữ ký) và ~/Library/Input Methods/Buttre.app của console user
+│     không relocatable (BundleIsRelocatable=false): không "nâng cấp" nhầm bản ở chỗ khác
+│     không kiểm version (BundleIsVersionChecked=false): đã có bản mới hơn thì PackageKit bỏ
+│                  qua payload nhưng preinstall vẫn xoá bản cũ → máy mất hẳn Buttre.app
+│     postinstall: không bật bàn phím; `launchctl kickstart -k gui/<uid>/com.apple.imklaunchagent`
+│                  của console user — imklaunchagent đang chạy giữ trạng thái của bundle vừa bị
+│                  xoá, mọi lần mở bản mới đều lỗi (`LaunchInputMethod() Error, status=-50`):
+│                  bàn phím hiện trong menu nhưng không gõ được tới khi đăng xuất/khởi động lại
+│                  (đã gặp khi thử, khởi động lại thì gõ được). launchd chạy lại agent ngay (KeepAlive)
 ├── kb-telex.pkg                  script-only (pkgbuild --nopayload --scripts)
 ├── kb-vni.pkg                    script-only
 ├── kb-nom.pkg                    script-only
@@ -72,13 +81,15 @@ Text Input → Edit → (+) → Vietnamese.
 
 ## Distribution XML
 
-Sinh bởi script build (danh sách bàn phím TOML lấy từ cùng vòng lặp với `build_app.sh`):
+Sinh bởi script build. Danh sách bàn phím và tên lấy từ chính `Buttre.app` đã build
+(`tsVisibleInputModeOrderedArrayKey` + `vi.lproj/InfoPlist.strings`), nên luôn khớp với
+các mode `build_app.sh` đã khai báo:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>buttre</title>
-    <options customize="allow" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <options customize="always" require-scripts="false" hostArchitectures="arm64,x86_64"/>
     <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
     <allowed-os-versions><os-version min="11.0"/></allowed-os-versions>
 
@@ -115,6 +126,9 @@ Sinh bởi script build (danh sách bàn phím TOML lấy từ cùng vòng lặp
     <!-- … -->
 </installer-gui-script>
 ```
+
+- `customize="always"`: màn hình chọn bàn phím luôn hiện, như bước của MSI. `"allow"` giấu
+  nó sau nút Customize nên người cài không thấy (đã gặp khi thử).
 
 - Thứ tự cài theo `choices-outline`: `app` luôn trước các `kb.*`, nên app đã nằm trong
   `/Library/Input Methods` khi các script bật bàn phím chạy.
@@ -166,7 +180,15 @@ Installer), không mất thêm phí.
 2. `spctl --assess --type install -vv buttre-<ver>-macos.pkg` → `accepted`, `source=Notarized Developer ID`.
 3. Cài bằng Installer.app: Customize hiện đủ bàn phím, chữ tiếng Việt đúng, mặc định đúng.
 4. Sau khi cài: menu input có đúng các bàn phím đã chọn (chọn thêm Thái để thử), gõ được
-   ngay không cần đăng xuất.
+   ngay không cần đăng xuất (log: `imklaunchagent` có PID mới, không còn
+   `LaunchInputMethod() Error, status=-50`).
 5. Cài đè bản mới khi buttre đang chạy: phím kế tiếp dùng bản mới.
 6. Máy chưa có ai đăng nhập (nếu thử được qua `sudo installer -pkg … -target /`
    từ SSH): cài xong không lỗi, không bật bàn phím nào.
+
+Kết quả 2026-11-21 (macOS 13.5, Intel, bản `dev`): 1–5 đạt. Mục 2: `spctl` → `accepted`,
+`source=Notarized Developer ID`; ticket của `.pkg` phủ cả `Buttre.app` bên trong (`spctl -t exec`
+cũng `Notarized Developer ID`). Mục 4 chỉ đạt sau khi thêm `kickstart` imklaunchagent vào
+postinstall; trước đó phải khởi động lại máy. Mục 6 chưa thử (cần SSH + sudo); script bỏ qua khi
+console user là `root`/`loginwindow`. CI còn thiếu secret `MACOS_INSTALLER_CERT_P12_BASE64` +
+`MACOS_INSTALLER_CERT_PASSWORD`: chưa có thì release chỉ đăng zip.
