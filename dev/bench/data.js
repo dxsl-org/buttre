@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795249423619,
+  "lastUpdate": 1795250244055,
   "repoUrl": "https://github.com/dxsl-org/buttre",
   "entries": {
     "buttre Benchmarks": [
@@ -11833,6 +11833,308 @@ window.BENCHMARK_DATA = {
           {
             "name": "lookup_method/Match/uw",
             "value": 1.3724923662848791,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tatdathua@Tats-iMac.local",
+            "name": "Tat Dat Hua"
+          },
+          "committer": {
+            "email": "tatdathua@Tats-iMac.local",
+            "name": "Tat Dat Hua"
+          },
+          "distinct": true,
+          "id": "eeaf2afd3bbfd4582ef7fd1cc2da159cdb9e53e8",
+          "message": "fix(build): chép keyboards và Nôm DB đúng thư mục với Cargo 1.100\n\n- Cargo 1.100 đặt OUT_DIR ở <profile>/build/<pkg>/<hash>/out; nth(3) cố định chép vào <profile>/build/, light.exe và cargo-deb không thấy file (release v0.9.1-beta lỗi MSI + Linux).\n- Tìm ancestor `build` gần nhất rồi lấy thư mục cha — đúng với cả layout cũ.",
+          "timestamp": "2026-11-21T15:23:01+07:00",
+          "tree_id": "652ae27def08c43d4f0a06547d9243b66f046233",
+          "url": "https://github.com/dxsl-org/buttre/commit/eeaf2afd3bbfd4582ef7fd1cc2da159cdb9e53e8"
+        },
+        "date": 1795250243574,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "compose_telex/nguwowif",
+            "value": 2124.264420333848,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/tuongwf",
+            "value": 1566.4086549792396,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/dduwowcj",
+            "value": 2165.5840515288387,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/thuongwf",
+            "value": 1703.192522855763,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/aa",
+            "value": 399.6528139801686,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/awf",
+            "value": 712.4898554818892,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_telex/a",
+            "value": 79.43874339201122,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/ngu7o72i",
+            "value": 1900.5988464367415,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/tuo7ng1",
+            "value": 1271.0199879044037,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/ddu7o7c5",
+            "value": 7854.941561910568,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/thu7o7ng1",
+            "value": 1972.6715074784572,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/a6",
+            "value": 345.0894656891766,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/a8f",
+            "value": 1207.539340022791,
+            "unit": "ns"
+          },
+          {
+            "name": "compose_vni/a",
+            "value": 79.60953958299179,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_telex_word/nguwowif",
+            "value": 18293.17939030321,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_telex_word/tuongwf",
+            "value": 14333.435978298043,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_telex_word/thuowngf",
+            "value": 15463.456789751737,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/plain_letter",
+            "value": 805.2825028645981,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/transform_trigger",
+            "value": 824.8786342014224,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/tone_trigger",
+            "value": 664.1030098388927,
+            "unit": "ns"
+          },
+          {
+            "name": "executor_keystroke_latency/space_passthrough",
+            "value": 277.7833121882411,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/viet",
+            "value": 12709.965896410915,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/nguoi",
+            "value": 16169.534399672033,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/thuong",
+            "value": 15590.310909745825,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/truong",
+            "value": 18885.354447805807,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/ban",
+            "value": 8947.115982132542,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/toi",
+            "value": 9740.342004537591,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/co",
+            "value": 8556.223839907665,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/la",
+            "value": 8600.634314981935,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/mot",
+            "value": 11179.31474747743,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_real_words/khong",
+            "value": 10797.759464697605,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/letter_a",
+            "value": 197.29677166388686,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/transform_6",
+            "value": 87.10012084023583,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/tone_1",
+            "value": 88.24081911946038,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/already_transformed",
+            "value": 279.375762462769,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_keystroke_latency/space",
+            "value": 102.2696863210842,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_sentence/simple_sentence",
+            "value": 30475.728493804603,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_sentence/learning_sentence",
+            "value": 28566.57176195402,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_worst_case/complex_word",
+            "value": 11651.393258357075,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_worst_case/windows_10",
+            "value": 11417.84385355571,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_allocations/new_executor",
+            "value": 6941.4689607680275,
+            "unit": "ns"
+          },
+          {
+            "name": "vni_allocations/reset_executor",
+            "value": 25.868673512495853,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/aa",
+            "value": 298.6383909628902,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/aa",
+            "value": 1.868878170570201,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/aw",
+            "value": 301.3166190215002,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/aw",
+            "value": 1.8662011780213497,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/dd",
+            "value": 299.3455540526042,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/dd",
+            "value": 1.560551264855265,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/ee",
+            "value": 301.16927253567826,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/ee",
+            "value": 1.5582335926636142,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/oo",
+            "value": 299.3709853735057,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/oo",
+            "value": 1.8696102317971126,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/ow",
+            "value": 301.2876075654644,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/ow",
+            "value": 1.870149814042316,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/HashMap/uw",
+            "value": 301.66576104760304,
+            "unit": "ns"
+          },
+          {
+            "name": "lookup_method/Match/uw",
+            "value": 1.5593172252729617,
             "unit": "ns"
           }
         ]
