@@ -144,7 +144,7 @@
           <!--
             The 32-bit text service, for 32-bit applications (Zalo): TSF loads
             the DLL into the application, so those cannot use the 64-bit one.
-            `--register-tsf` registers it in the 32-bit registry view
+            The RegisterTsf action registers it in the 32-bit registry view
             (registration::X86_DLL_NAME). Same folder as the 64-bit DLL so it
             finds the keyboards and the Nôm database the same way.
           -->
