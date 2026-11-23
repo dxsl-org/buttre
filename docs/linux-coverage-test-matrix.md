@@ -70,9 +70,32 @@ phải tự chạy `ibus-daemon -drx` và đặt `GTK_IM_MODULE`/`QT_IM_MODULE`/
 tắt bàn phím buttre trên Windows (Windows biến đổi phím trước khi tới WSL). Xem
 `scripts/setup-ibus-wsl2.sh`.
 
+## Nhận diện môi trường — đã kiểm trên VM (2026-11-23)
+
+Đăng nhập lại thật (autologin) sau mỗi thay đổi, đọc log `buttre --autostart` và `buttre --doctor`.
+"Os" = IBus/fcitx5 giữ phần chọn kiểu gõ, tray không chạy.
+
+| Máy | Cấu hình người dùng | Kết luận của buttre | Gõ thử |
+|---|---|---|---|
+| Ubuntu GNOME Wayland | mặc định (IBus) | Os · `LinuxIbus` | ✅ |
+| Ubuntu GNOME Wayland | fcitx5 theo wiki fcitx5 (`environment.d` + autostart), chưa addon | tray · `LinuxFcitx5NoAddon` + LƯU Ý | — |
+| Ubuntu GNOME Wayland | như trên + addon `fcitx5-buttre` | Os · `LinuxFcitx5` | ✅ |
+| Mint Cinnamon X11 | mặc định (IBus) | Os · `LinuxIbus` | ✅ |
+| Mint Cinnamon X11 | `im-config -n fcitx5`, chưa addon / có addon | `LinuxFcitx5NoAddon` / Os · `LinuxFcitx5` | ✅ |
+| Mint Cinnamon **Wayland** | mặc định (IBus) | Os · `LinuxIbus` | ✅ |
+| Fedora / CachyOS KDE Wayland | Virtual Keyboard = buttre | tray · `LinuxWaylandNative` | ✅ |
+| Fedora / CachyOS KDE Wayland | Virtual Keyboard chưa chọn | tray · `LinuxKwinUnconfigured` + thông báo | — |
+| Fedora KDE Wayland | Virtual Keyboard = IBus | Os · `LinuxIbus` (tray đang chạy tự thoát) | — |
+| Fedora / CachyOS KDE Wayland | Virtual Keyboard = Fcitx 5, chưa addon / có addon | `LinuxFcitx5NoAddon` / Os · `LinuxFcitx5` | ✅ |
+| CachyOS KDE Wayland | fcitx5 kiểu Arch wiki (`/etc/environment` + autostart, không chọn Virtual Keyboard) | Os · `LinuxFcitx5` (chờ fcitx5 0,5 s) | — |
+| CachyOS sway | `exec buttre --ime` + `exec buttre --autostart` | tray · `LinuxWaylandNative` (icon trên swaybar) | ✅ |
+
+Gói `kcm-fcitx5` của Fedora 45 hiện không cài được (`nothing provides libPlasma.so.7`); cấu hình
+fcitx5 bằng `fcitx5-configtool`.
+
 **Chưa kiểm chứng:**
 - Pop!_OS 24.04 dùng COSMIC, compositor riêng — chưa xác minh hỗ trợ `zwp_input_method_v2`.
-- Cinnamon Wayland trên Mint vẫn thử nghiệm.
+- Hyprland (cùng giao thức với sway, đã kiểm).
 
 Thêm máy thứ 5 khi có báo lỗi từ một trong hai.
 

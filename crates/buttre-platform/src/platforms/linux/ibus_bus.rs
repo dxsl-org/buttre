@@ -39,10 +39,18 @@ use buttre_core::state::macros::MacroStore;
 /// Measured on IBus 1.5.29: the file lives under `~/.config`, the socket it
 /// points to under `~/.cache/ibus/`.
 pub fn resolve_ibus_address() -> Result<String> {
+    resolve_ibus_endpoint().map(|(addr, _)| addr)
+}
+
+/// [`resolve_ibus_address`] plus the `IBUS_DAEMON_PID` of the address file
+/// it came from — `None` when the address came from `IBUS_ADDRESS` or the
+/// file names no pid. fcitx5 writes this file too (naming its own pid), so
+/// the pid tells a real ibus-daemon from fcitx5's IBus emulation.
+pub fn resolve_ibus_endpoint() -> Result<(String, Option<u32>)> {
     if let Ok(addr) = std::env::var("IBUS_ADDRESS") {
         let addr = addr.trim().to_string();
         if !addr.is_empty() {
-            return Ok(strip_guid(&addr));
+            return Ok((strip_guid(&addr), None));
         }
     }
 
@@ -100,18 +108,23 @@ fn read_machine_id() -> Result<String> {
     Err(anyhow!("machine-id not found (dbus or systemd)"))
 }
 
-/// Extract the `IBUS_ADDRESS=` line from an ibus-daemon address file.
-fn parse_address_file(path: &Path) -> Option<String> {
+/// Extract the `IBUS_ADDRESS=` and `IBUS_DAEMON_PID=` lines from an
+/// ibus-daemon address file; `None` without an address.
+fn parse_address_file(path: &Path) -> Option<(String, Option<u32>)> {
     let content = std::fs::read_to_string(path).ok()?;
+    let mut addr = None;
+    let mut pid = None;
     for line in content.lines() {
-        if let Some(addr) = line.strip_prefix("IBUS_ADDRESS=") {
-            let addr = addr.trim();
-            if !addr.is_empty() {
-                return Some(strip_guid(addr));
+        if let Some(value) = line.strip_prefix("IBUS_ADDRESS=") {
+            let value = value.trim();
+            if !value.is_empty() {
+                addr = Some(strip_guid(value));
             }
+        } else if let Some(value) = line.strip_prefix("IBUS_DAEMON_PID=") {
+            pid = value.trim().parse().ok();
         }
     }
-    None
+    addr.map(|a| (a, pid))
 }
 
 /// Drop the `,guid=…` suffix — zbus's address parser may reject keys it
@@ -295,18 +308,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_address_file_extracts_ibus_address_line() {
+    fn parse_address_file_extracts_address_and_daemon_pid() {
         let dir = std::env::temp_dir().join("buttre-ibus-bus-test");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("addr");
         std::fs::write(
             &file,
-            "# comment\nIBUS_ADDRESS=unix:path=/run/x,guid=deadbeef\nIBUS_DAEMON_PID=1\n",
+            "# comment\nIBUS_ADDRESS=unix:path=/run/x,guid=deadbeef\nIBUS_DAEMON_PID=4321\n",
         )
         .unwrap();
         assert_eq!(
-            parse_address_file(&file).as_deref(),
-            Some("unix:path=/run/x")
+            parse_address_file(&file),
+            Some(("unix:path=/run/x".to_string(), Some(4321)))
         );
         std::fs::remove_file(&file).ok();
     }

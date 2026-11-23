@@ -139,14 +139,35 @@ pub fn gather() -> Evidence {
         }
     };
     let session = zbus::blocking::Connection::session().ok();
+    let dbus = session
+        .as_ref()
+        .and_then(|conn| zbus::blocking::fdo::DBusProxy::new(conn).ok());
     let has_owner = |name: &str| -> bool {
-        let (Some(conn), Ok(bus_name)) = (&session, BusName::try_from(name)) else {
+        let (Some(proxy), Ok(bus_name)) = (&dbus, BusName::try_from(name)) else {
             return false;
         };
-        zbus::blocking::fdo::DBusProxy::new(conn)
+        proxy.name_has_owner(bus_name).unwrap_or(false)
+    };
+    let owner_pid = |name: &str| -> Option<u32> {
+        let proxy = dbus.as_ref()?;
+        proxy
+            .get_connection_unix_process_id(BusName::try_from(name).ok()?)
             .ok()
-            .and_then(|p| p.name_has_owner(bus_name).ok())
-            .unwrap_or(false)
+    };
+    // fcitx5's IBus frontend owns org.freedesktop.IBus and the portal
+    // name and writes an IBus address file naming its own pid, so IBus
+    // clients reach fcitx5. Only a process other than fcitx5 is a real
+    // ibus-daemon; an unknown pid counts as real.
+    let fcitx5_pid = owner_pid("org.fcitx.Fcitx5");
+    let not_fcitx5 = |pid: Option<u32>| fcitx5_pid.is_none() || pid != fcitx5_pid;
+    let ibus_name_real = |name: &str| has_owner(name) && not_fcitx5(owner_pid(name));
+    // The file outlives its writer (an exited fcitx5 leaves one pointing
+    // at the still-alive session bus), so a named pid must also be alive.
+    let ibus_file_real = |(addr, pid): (String, Option<u32>)| {
+        let writer_ok = pid.is_none_or(|p| {
+            std::path::Path::new(&format!("/proc/{p}")).exists() && not_fcitx5(Some(p))
+        });
+        writer_ok && ibus_socket_alive(&addr)
     };
     Evidence {
         wayland,
@@ -158,16 +179,16 @@ pub fn gather() -> Evidence {
         shell_spawns_ibus: desktops
             .iter()
             .any(|d| d == "gnome" || d == "x-cinnamon" || d == "cinnamon"),
-        // ibus-daemon owns org.freedesktop.IBus (or the portal name); the
-        // address-file fallback catches --no-portal daemons, and requires
-        // the advertised socket to accept a connect — a dead daemon leaves
-        // the file behind.
-        ibus_running: has_owner("org.freedesktop.IBus")
-            || has_owner("org.freedesktop.portal.IBus")
-            || super::ibus_bus::resolve_ibus_address()
+        // ibus-daemon owns org.freedesktop.IBus (ibus-portal the portal
+        // name); the address-file fallback catches --no-portal daemons, and
+        // requires the advertised socket to accept a connect — a dead
+        // daemon leaves the file behind.
+        ibus_running: ibus_name_real("org.freedesktop.IBus")
+            || ibus_name_real("org.freedesktop.portal.IBus")
+            || super::ibus_bus::resolve_ibus_endpoint()
                 .ok()
-                .is_some_and(|addr| ibus_socket_alive(&addr)),
-        fcitx5_running: has_owner("org.fcitx.Fcitx5"),
+                .is_some_and(ibus_file_real),
+        fcitx5_running: fcitx5_pid.is_some() || has_owner("org.fcitx.Fcitx5"),
         fcitx5_addon: fcitx5_addon_installed(),
     }
 }

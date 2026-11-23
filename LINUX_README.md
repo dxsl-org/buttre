@@ -155,7 +155,14 @@ Trên các compositor hỗ trợ `zwp_input_method_v2`, chạy buttre trực ti�
 ```bash
 # Thêm vào config compositor để tự khởi động, ví dụ sway (~/.config/sway/config):
 exec /usr/bin/buttre --ime
+# Tray (đổi kiểu gõ, bật/tắt) — sway/Hyprland không chạy XDG autostart:
+exec /usr/bin/buttre --autostart
 ```
+
+Hyprland: `exec-once = /usr/bin/buttre --ime` và `exec-once = /usr/bin/buttre --autostart`.
+
+`buttre --doctor` in môi trường buttre nhận diện được (IBus, fcitx5, KWin, Wayland-native) và
+lý do. Lúc đăng nhập tray chờ tối đa 30 giây nếu phiên được cấu hình IBus/fcitx5 mà daemon chưa lên.
 
 `--ime` tự dò: dùng Wayland-native nếu compositor hỗ trợ, tự fallback sang IBus nếu không (hoặc nếu một IME khác đã giữ seat).
 
