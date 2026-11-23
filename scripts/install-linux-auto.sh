@@ -124,7 +124,12 @@ case "$SURFACE" in
 ✅ Đã cài. Thêm vào config compositor rồi đăng nhập lại:
      sway (~/.config/sway/config):  exec /usr/bin/buttre --ime
                                     exec /usr/bin/buttre --autostart
-     Hyprland (hyprland.conf):      exec-once = /usr/bin/buttre --ime
+     Hyprland mới (~/.config/hypr/hyprland.lua):
+         hl.on("hyprland.start", function ()
+           hl.exec_cmd("/usr/bin/buttre --ime")
+           hl.exec_cmd("/usr/bin/buttre --autostart")
+         end)
+     Hyprland cũ (hyprland.conf):   exec-once = /usr/bin/buttre --ime
                                     exec-once = /usr/bin/buttre --autostart
 EOF
         fi

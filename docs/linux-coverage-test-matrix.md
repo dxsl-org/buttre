@@ -83,19 +83,23 @@ tắt bàn phím buttre trên Windows (Windows biến đổi phím trước khi 
 | Mint Cinnamon X11 | mặc định (IBus) | Os · `LinuxIbus` | ✅ |
 | Mint Cinnamon X11 | `im-config -n fcitx5`, chưa addon / có addon | `LinuxFcitx5NoAddon` / Os · `LinuxFcitx5` | ✅ |
 | Mint Cinnamon **Wayland** | mặc định (IBus) | Os · `LinuxIbus` | ✅ |
+| Mint **XFCE** X11 | mặc định (IBus do `im-config` chạy, shell không tự chạy) | Os · `LinuxIbus` | ✅ |
 | Fedora / CachyOS KDE Wayland | Virtual Keyboard = buttre | tray · `LinuxWaylandNative` | ✅ |
 | Fedora / CachyOS KDE Wayland | Virtual Keyboard chưa chọn | tray · `LinuxKwinUnconfigured` + thông báo | — |
 | Fedora KDE Wayland | Virtual Keyboard = IBus | Os · `LinuxIbus` (tray đang chạy tự thoát) | — |
 | Fedora / CachyOS KDE Wayland | Virtual Keyboard = Fcitx 5, chưa addon / có addon | `LinuxFcitx5NoAddon` / Os · `LinuxFcitx5` | ✅ |
 | CachyOS KDE Wayland | fcitx5 kiểu Arch wiki (`/etc/environment` + autostart, không chọn Virtual Keyboard) | Os · `LinuxFcitx5` (chờ fcitx5 0,5 s) | — |
 | CachyOS sway | `exec buttre --ime` + `exec buttre --autostart` | tray · `LinuxWaylandNative` (icon trên swaybar) | ✅ |
+| CachyOS **Hyprland 0.57** | `hyprland.lua`: `hl.exec_cmd` buttre `--ime` + `--autostart`, waybar | tray · `LinuxWaylandNative` (icon trên waybar) | ✅ |
 
 Gói `kcm-fcitx5` của Fedora 45 hiện không cài được (`nothing provides libPlasma.so.7`); cấu hình
 fcitx5 bằng `fcitx5-configtool`.
 
 **Chưa kiểm chứng:**
 - Pop!_OS 24.04 dùng COSMIC, compositor riêng — chưa xác minh hỗ trợ `zwp_input_method_v2`.
-- Hyprland (cùng giao thức với sway, đã kiểm).
+- Plasma 5.27 (Kubuntu 24.04), GNOME X11 (Debian 13).
+
+Hyprland bản mới (0.57) đọc `hyprland.lua`; có file này thì `hyprland.conf` (cú pháp `exec-once`) bị bỏ qua.
 
 Thêm máy thứ 5 khi có báo lỗi từ một trong hai.
 

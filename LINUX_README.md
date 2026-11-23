@@ -164,7 +164,17 @@ exec /usr/bin/buttre --ime
 exec /usr/bin/buttre --autostart
 ```
 
-Hyprland: `exec-once = /usr/bin/buttre --ime` và `exec-once = /usr/bin/buttre --autostart`.
+Hyprland bản mới (đã kiểm 0.57) đọc `~/.config/hypr/hyprland.lua` (có file này thì `hyprland.conf` bị bỏ qua):
+
+```lua
+hl.on("hyprland.start", function ()
+  hl.exec_cmd("/usr/bin/buttre --ime")
+  hl.exec_cmd("/usr/bin/buttre --autostart")
+end)
+```
+
+Hyprland bản cũ (`hyprland.conf`): `exec-once = /usr/bin/buttre --ime` và
+`exec-once = /usr/bin/buttre --autostart`. Tray hiện trên waybar (module `tray`).
 
 `buttre --doctor` in môi trường buttre nhận diện được (IBus, fcitx5, KWin, Wayland-native) và
 lý do. Lúc đăng nhập tray chờ tối đa 30 giây nếu phiên được cấu hình IBus/fcitx5 mà daemon chưa lên.
