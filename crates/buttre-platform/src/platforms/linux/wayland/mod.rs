@@ -39,7 +39,10 @@
 mod candidate_panel;
 mod candidate_render;
 mod dispatch;
+mod probe;
 mod v1;
+
+pub use probe::compositor_offers_input_method_v2;
 
 use super::engine_bridge::EngineBridge;
 use super::learning_sync::{self, LearningWiring};

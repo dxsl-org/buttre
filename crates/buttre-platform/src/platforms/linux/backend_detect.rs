@@ -1,63 +1,146 @@
-//! Linux IME-backend detection with a fixed priority: fcitx5 → IBus →
-//! Wayland `--ime` (plan: fcitx-backend-auto-priority, Phase 1).
+//! Which input-method path serves this Linux session — decided from several
+//! independent signals, never one.
 //!
-//! One machine should serve buttre through ONE path at a time — two live
-//! engine registrations would both write the tri-surface sync files
-//! (`~/.config/buttre/method`, `enabled`) and fight each other. This module
-//! is the single source of truth for "which path should this machine use":
-//! the tray logs it, `buttre --doctor` prints it, and the install scripts
-//! mirror the same order.
-//!
-//! Note fcitx5 is detected but not yet SERVED: buttre's fcitx5 addon
-//! (Phase 3 — in-process C++ shim, fcitx5 has no out-of-process engine
-//! protocol) does not exist yet, so a detected fcitx5 currently means
-//! "warn about the conflict", not "register with fcitx5".
+//! Any distro can run GNOME or KDE, X11 or Wayland, IBus or fcitx5, so no
+//! single fact identifies the path. [`Evidence`] collects what the session
+//! is CONFIGURED for (KWin's `InputMethod`, the `XMODIFIERS`/`*_IM_MODULE`
+//! environment, a shell that spawns IBus itself) next to what is RUNNING
+//! (daemons on the session bus, the compositor's input-method protocol), and
+//! [`judge`] weighs them. A path the session expects but whose daemon is not
+//! up yet is [`Judgement::Pending`], not a verdict: at login the tray starts
+//! in the same second as ibus-daemon (observed on Ubuntu GNOME — the tray
+//! probed first, saw no IBus, and put a dead tray on the top bar), so the
+//! caller waits for it instead of concluding.
 
+use crate::shared::method_owner::SurfacePath;
 use zbus::names::BusName;
 
-/// The engine path buttre should use, ordered by priority (top wins).
+/// An input-method framework buttre can be served through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImeBackend {
-    /// fcitx5 is running. buttre's addon is not built yet (Phase 3) —
-    /// today this only drives conflict warnings and installer guidance.
+pub enum Framework {
+    Ibus,
     Fcitx5,
-    /// ibus-daemon is running (or its private-bus address resolves).
-    IBus,
-    /// A Wayland session without either daemon — the compositor-managed
-    /// `buttre --ime` path (KWin spawns it per kwinrc).
-    WaylandIme,
 }
 
-/// Raw probe results, separated from [`pick`] so the priority rule is a
-/// pure function the tests can pin down without a live bus.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Probes {
-    pub fcitx5: bool,
-    pub ibus: bool,
+/// What KWin's `[Wayland] InputMethod=` says (Plasma Wayland only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KwinIm {
+    /// Not a Plasma Wayland session — kwinrc is irrelevant here.
+    NotKwin,
+    /// Plasma Wayland with no input method chosen.
+    Unset,
+    /// KWin spawns `buttre --ime`.
+    Buttre,
+    /// KWin spawns IBus's or fcitx5's Wayland frontend.
+    Framework(Framework),
+    /// Some other input method (an on-screen keyboard, …).
+    Foreign(String),
+}
+
+/// Everything the decision looks at. Plain data, so [`judge`] is testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evidence {
     pub wayland: bool,
+    pub kwin: KwinIm,
+    /// Majority of `XMODIFIERS`, `GTK_IM_MODULE`, `QT_IM_MODULE(S)`,
+    /// `INPUT_METHOD`; `None` when unset or tied.
+    pub env_im: Option<Framework>,
+    /// GNOME Shell and Cinnamon spawn ibus-daemon themselves.
+    pub shell_spawns_ibus: bool,
+    pub ibus_running: bool,
+    pub fcitx5_running: bool,
+    pub fcitx5_addon: bool,
+    /// The compositor offers `zwp_input_method_manager_v2` (sway, Hyprland,
+    /// other wlroots) — `buttre --ime` can serve it directly.
+    pub compositor_im_v2: bool,
 }
 
-/// The fixed priority rule: fcitx5 → IBus → Wayland. `None` = headless /
-/// X11 with no IM daemon; there is nothing for buttre to register with.
-pub fn pick(p: Probes) -> Option<ImeBackend> {
-    if p.fcitx5 {
-        Some(ImeBackend::Fcitx5)
-    } else if p.ibus {
-        Some(ImeBackend::IBus)
-    } else if p.wayland {
-        Some(ImeBackend::WaylandIme)
-    } else {
-        None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Judgement {
+    Settled(SurfacePath),
+    /// The session is configured for this framework but its daemon is not
+    /// running (yet). Ask again later; [`judge`] with `wait_for_expected =
+    /// false` gives the verdict once waiting has run out.
+    Pending(Framework),
+}
+
+impl Evidence {
+    /// The framework the session is set up for, strongest signal first:
+    /// KWin's own choice, then the IM environment, then a shell that
+    /// starts IBus on its own.
+    pub fn expected(&self) -> Option<Framework> {
+        match self.kwin {
+            KwinIm::Framework(f) => Some(f),
+            _ => self
+                .env_im
+                .or(self.shell_spawns_ibus.then_some(Framework::Ibus)),
+        }
+    }
+
+    fn running(&self, f: Framework) -> bool {
+        match f {
+            Framework::Ibus => self.ibus_running,
+            Framework::Fcitx5 => self.fcitx5_running,
+        }
     }
 }
 
-/// Probe the live session. Blocking (session-bus round trips) — call from
-/// startup or `--doctor`, never from a keystroke path.
-pub fn probe() -> Probes {
+/// Weigh the evidence. `wait_for_expected`: report a configured-but-absent
+/// framework as [`Judgement::Pending`] instead of deciding without it.
+pub fn judge(e: &Evidence, wait_for_expected: bool) -> Judgement {
+    // KWin spawns buttre itself: that IS the typing path, even with
+    // ibus-daemon also alive in the session (Plasma often runs it).
+    if e.kwin == KwinIm::Buttre {
+        return Judgement::Settled(SurfacePath::LinuxWaylandNative);
+    }
+    let expected = e.expected();
+    if let Some(f) = expected {
+        if wait_for_expected && !e.running(f) {
+            return Judgement::Pending(f);
+        }
+    }
+    // A running daemon decides; when both run, the one the session is
+    // configured for wins (fcitx5 when nothing says which).
+    let served = match (e.fcitx5_running, e.ibus_running) {
+        (true, true) => Some(expected.unwrap_or(Framework::Fcitx5)),
+        (true, false) => Some(Framework::Fcitx5),
+        (false, true) => Some(Framework::Ibus),
+        (false, false) => None,
+    };
+    let surface = match served {
+        Some(Framework::Fcitx5) if e.fcitx5_addon => SurfacePath::LinuxFcitx5,
+        Some(Framework::Fcitx5) => SurfacePath::LinuxFcitx5NoAddon,
+        Some(Framework::Ibus) => SurfacePath::LinuxIbus,
+        // Plasma Wayland that does not spawn buttre: typing cannot work
+        // until the user picks buttre in Virtual Keyboard.
+        None if e.kwin != KwinIm::NotKwin => SurfacePath::LinuxKwinUnconfigured,
+        None if e.wayland && e.compositor_im_v2 => SurfacePath::LinuxWaylandNative,
+        None => SurfacePath::LinuxUndetected,
+    };
+    Judgement::Settled(surface)
+}
+
+/// Collect [`Evidence`] from the live session. Blocking (session-bus round
+/// trips, one Wayland registry round trip) — startup / doctor / the tray's
+/// slow re-check only, never a keystroke path.
+pub fn gather() -> Evidence {
+    let desktops = current_desktops();
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
+    let kde = desktops.iter().any(|d| d == "kde");
+    let kwin = if !wayland {
+        KwinIm::NotKwin
+    } else {
+        match super::kwin_ime::kwinrc_input_method() {
+            Some(v) if v.contains("buttre") && (kde || desktops.is_empty()) => KwinIm::Buttre,
+            _ if !kde => KwinIm::NotKwin,
+            None => KwinIm::Unset,
+            Some(v) => classify_kwin_im(&v),
+        }
+    };
     let session = zbus::blocking::Connection::session().ok();
     let has_owner = |name: &str| -> bool {
-        let Some(conn) = &session else { return false };
-        let Ok(bus_name) = BusName::try_from(name) else {
+        let (Some(conn), Ok(bus_name)) = (&session, BusName::try_from(name)) else {
             return false;
         };
         zbus::blocking::fdo::DBusProxy::new(conn)
@@ -65,32 +148,78 @@ pub fn probe() -> Probes {
             .and_then(|p| p.name_has_owner(bus_name).ok())
             .unwrap_or(false)
     };
-    Probes {
-        fcitx5: has_owner("org.fcitx.Fcitx5"),
-        // ibus-daemon owns org.freedesktop.IBus on the SESSION bus (the
-        // portal name is the modern spelling); the address-file fallback
-        // catches daemons started with --no-portal or a broken session bus.
-        // The file alone is NOT trusted — a dead daemon leaves it behind
-        // (observed: stale X11-session file on a Wayland login) — so the
-        // fallback also requires the advertised socket to accept a connect.
-        ibus: has_owner("org.freedesktop.IBus")
+    Evidence {
+        wayland,
+        compositor_im_v2: wayland
+            && matches!(kwin, KwinIm::NotKwin)
+            && super::wayland::compositor_offers_input_method_v2(),
+        kwin,
+        env_im: env_im(|key| std::env::var(key).ok()),
+        shell_spawns_ibus: desktops
+            .iter()
+            .any(|d| d == "gnome" || d == "x-cinnamon" || d == "cinnamon"),
+        // ibus-daemon owns org.freedesktop.IBus (or the portal name); the
+        // address-file fallback catches --no-portal daemons, and requires
+        // the advertised socket to accept a connect — a dead daemon leaves
+        // the file behind.
+        ibus_running: has_owner("org.freedesktop.IBus")
             || has_owner("org.freedesktop.portal.IBus")
             || super::ibus_bus::resolve_ibus_address()
                 .ok()
                 .is_some_and(|addr| ibus_socket_alive(&addr)),
-        wayland: std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        fcitx5_running: has_owner("org.fcitx.Fcitx5"),
+        fcitx5_addon: fcitx5_addon_installed(),
     }
 }
 
-/// [`probe`] + [`pick`] in one call — what the tray and doctor use.
-pub fn detect() -> Option<ImeBackend> {
-    pick(probe())
+/// `XDG_CURRENT_DESKTOP`, lowercased, split on `:` (`ubuntu:GNOME`).
+fn current_desktops() -> Vec<String> {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
-/// True when the fcitx5-buttre addon is installed (its addon manifest is
-/// visible in a standard fcitx5 data dir). Distinguishes "fcitx5 running,
-/// buttre integrated" (fine) from "fcitx5 running, no addon" (conflict —
-/// buttre would be serving typing through a competing daemon).
+fn classify_kwin_im(desktop_file: &str) -> KwinIm {
+    let lower = desktop_file.to_lowercase();
+    if lower.contains("fcitx") {
+        KwinIm::Framework(Framework::Fcitx5)
+    } else if lower.contains("ibus") {
+        KwinIm::Framework(Framework::Ibus)
+    } else {
+        KwinIm::Foreign(desktop_file.to_string())
+    }
+}
+
+/// Majority vote of the IM environment variables (`lookup` = env getter).
+fn env_im(lookup: impl Fn(&str) -> Option<String>) -> Option<Framework> {
+    let mut ibus = 0;
+    let mut fcitx = 0;
+    for key in [
+        "XMODIFIERS",
+        "GTK_IM_MODULE",
+        "QT_IM_MODULE",
+        "QT_IM_MODULES",
+        "INPUT_METHOD",
+    ] {
+        let value = lookup(key).unwrap_or_default().to_lowercase();
+        if value.contains("fcitx") {
+            fcitx += 1;
+        } else if value.contains("ibus") {
+            ibus += 1;
+        }
+    }
+    match ibus.cmp(&fcitx) {
+        std::cmp::Ordering::Greater => Some(Framework::Ibus),
+        std::cmp::Ordering::Less => Some(Framework::Fcitx5),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// True when the fcitx5-buttre addon is installed (its manifest is visible
+/// in a standard fcitx5 data dir).
 pub fn fcitx5_addon_installed() -> bool {
     let mut dirs: Vec<std::path::PathBuf> = vec![
         "/usr/share/fcitx5/addon".into(),
@@ -103,9 +232,8 @@ pub fn fcitx5_addon_installed() -> bool {
 }
 
 /// True when an `unix:path=…` IBus address points at a socket that accepts
-/// a connection RIGHT NOW. Non-unix address forms (abstract sockets, TCP)
-/// are rare for IBus; treat them as alive rather than claim the daemon is
-/// down on an address we can't cheaply verify.
+/// a connection RIGHT NOW. Other address forms are rare for IBus; treat
+/// them as alive rather than claim a daemon we can't cheaply verify is down.
 fn ibus_socket_alive(addr: &str) -> bool {
     match addr
         .strip_prefix("unix:path=")
@@ -117,32 +245,5 @@ fn ibus_socket_alive(addr: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn priority_is_fcitx_then_ibus_then_wayland() {
-        let all = Probes {
-            fcitx5: true,
-            ibus: true,
-            wayland: true,
-        };
-        assert_eq!(pick(all), Some(ImeBackend::Fcitx5));
-        assert_eq!(
-            pick(Probes {
-                fcitx5: false,
-                ..all
-            }),
-            Some(ImeBackend::IBus)
-        );
-        assert_eq!(
-            pick(Probes {
-                fcitx5: false,
-                ibus: false,
-                ..all
-            }),
-            Some(ImeBackend::WaylandIme)
-        );
-        assert_eq!(pick(Probes::default()), None);
-    }
-}
+#[path = "backend_detect_tests.rs"]
+mod tests;

@@ -269,12 +269,14 @@ fn init_tracing(args: &[String]) {
 }
 
 /// `buttre --doctor`: one-screen diagnosis of which IME path this machine
-/// should use (priority fcitx5 → IBus → Wayland `--ime`) and where the
-/// tri-surface sync state lives. Read-only; safe to run anytime.
+/// uses — every signal the decision weighs (`backend_detect::Evidence`),
+/// the verdict, and where the tri-surface sync state lives. Read-only;
+/// safe to run anytime. Does not wait for a starting daemon: it reports
+/// "đang chờ" instead.
 #[cfg(platform_linux)]
 fn run_doctor() {
     use buttre_platform::platforms::linux::{backend_detect, kwin_ime, method_sync};
-    let probes = backend_detect::probe();
+    let evidence = backend_detect::gather();
     println!("buttre {} — doctor\n", env!("CARGO_PKG_VERSION"));
     println!(
         "session:  XDG_SESSION_TYPE={} XDG_CURRENT_DESKTOP={}",
@@ -282,38 +284,30 @@ fn run_doctor() {
         std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "?".into()),
     );
     println!(
-        "probes:   fcitx5={} ibus={} wayland={}",
-        probes.fcitx5, probes.ibus, probes.wayland
+        "running:  ibus={} fcitx5={} (addon fcitx5-buttre: {}) wayland={} im-v2={}",
+        evidence.ibus_running,
+        evidence.fcitx5_running,
+        evidence.fcitx5_addon,
+        evidence.wayland,
+        evidence.compositor_im_v2,
     );
-    match backend_detect::pick(probes) {
-        Some(backend_detect::ImeBackend::Fcitx5) => {
-            if backend_detect::fcitx5_addon_installed() {
-                println!(
-                    "backend:  fcitx5 (addon fcitx5-buttre đã cài — chọn \"Buttre\" trong fcitx5)"
-                );
-            } else {
-                println!(
-                    "backend:  fcitx5 (đang chạy) — LƯU Ý: addon fcitx5-buttre CHƯA cài;\n\
-                     \x20         gõ tiếng Việt hiện đi qua ibus/wayland, có thể tranh nguồn gõ với fcitx5"
-                );
-            }
-        }
-        Some(backend_detect::ImeBackend::IBus) => {
-            println!("backend:  ibus (engine: buttre --ibus)")
-        }
-        Some(backend_detect::ImeBackend::WaylandIme) => {
-            println!("backend:  wayland (compositor-managed: buttre --ime)");
-        }
-        None => println!("backend:  không phát hiện được đường IME nào (X11 không daemon?)"),
+    println!(
+        "config:   env IM={:?} shell tự chạy IBus={} kwin={:?} → mong đợi {:?}",
+        evidence.env_im,
+        evidence.shell_spawns_ibus,
+        evidence.kwin,
+        evidence.expected(),
+    );
+    if let backend_detect::Judgement::Pending(f) = backend_detect::judge(&evidence, true) {
+        println!("verdict:  đang chờ {f:?} khởi động (lúc đăng nhập buttre chờ tối đa 30 giây)");
     }
     println!(
         "kwinrc:   [Wayland] InputMethod = {}",
         kwin_ime::kwinrc_input_method().unwrap_or_else(|| "(không đặt)".into())
     );
-    // Mô hình đang hiệu lực (ADR-0003): ai sở hữu lựa chọn kiểu gõ ở đây.
-    // In cả surface vì "backend:" và "owner:" có thể lệch nhau hợp lệ —
-    // Plasma Wayland có ibus-daemon chạy kèm vẫn thuộc nhóm tray (KWin sở
-    // hữu tiến trình IME), và dòng surface là thứ giải thích vì sao.
+    // Verdict without waiting (ADR-0003): who owns method choice here, and
+    // the surface that explains it — Plasma with ibus-daemon also running
+    // is still a tray machine when KWin spawns buttre.
     let surface = method_owner::current_surface();
     match method_owner::owner_of(surface) {
         MethodOwner::Os => {
@@ -322,6 +316,17 @@ fn run_doctor() {
         MethodOwner::Buttre => {
             println!("owner:    buttre sở hữu kiểu gõ — tray ({surface:?})")
         }
+    }
+    match surface {
+        method_owner::SurfacePath::LinuxKwinUnconfigured => println!(
+            "LƯU Ý:    KWin chưa chạy buttre — System Settings → Keyboard → Virtual Keyboard → \
+             chọn \"buttre (Wayland IME)\""
+        ),
+        method_owner::SurfacePath::LinuxFcitx5NoAddon => println!(
+            "LƯU Ý:    fcitx5 đang phục vụ phiên này nhưng addon fcitx5-buttre CHƯA cài — \
+             buttre không gõ được qua fcitx5"
+        ),
+        _ => {}
     }
     println!(
         "state:    method={:?} enabled={} (files trong ~/.config/buttre/)",
@@ -457,7 +462,16 @@ fn main() -> Result<()> {
     // của OS đã là nơi chọn kiểu gõ, tray chỉ là nơi điều khiển thứ hai.
     // `buttre` không tham số ở đó mở cửa sổ Cấu hình: người dùng bấm vào app
     // phải được một thứ hữu ích.
-    let surface = method_owner::current_surface();
+    // Login launch waits for a configured IBus/fcitx5 that is still
+    // starting — nobody types during login, and deciding before the daemon
+    // is up puts a tray on a desktop whose OS owns method choice. A manual
+    // launch waits briefly only.
+    let wait = if args.iter().any(|a| a == "--autostart") {
+        std::time::Duration::from_secs(30)
+    } else {
+        std::time::Duration::from_secs(3)
+    };
+    let surface = method_owner::settled_surface(wait);
     let owner = method_owner::owner_of(surface);
     info!("method owner: {owner:?} (surface: {surface:?})");
     if owner == MethodOwner::Os {

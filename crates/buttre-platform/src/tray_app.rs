@@ -559,24 +559,39 @@ pub(crate) fn run() -> Result<()> {
     #[cfg(platform_linux)]
     buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(true);
 
-    // Log which IME path this machine should be on (fcitx5 → ibus →
-    // wayland) and flag the one conflict we can detect: fcitx5 running
-    // while buttre serves typing through another daemon.
+    // Plasma that does not spawn buttre yet: the tray is the only place to
+    // say how to turn it on. Then keep re-judging the session — a daemon
+    // that started after the login wait, or the user switching KWin to
+    // IBus/fcitx5, hands method choice to the OS and this tray must go
+    // (ADR-0003). Two agreeing looks before leaving: a single probe that
+    // misses the bus must not kill the user's only switch.
     #[cfg(platform_linux)]
-    {
-        use buttre_platform::platforms::linux::backend_detect;
-        let probes = backend_detect::probe();
-        info!(
-            "IME backend probes: {probes:?} -> {:?}",
-            backend_detect::pick(probes)
-        );
-        if probes.fcitx5 && !backend_detect::fcitx5_addon_installed() {
-            warn!(
-                "fcitx5 đang chạy nhưng addon fcitx5-buttre chưa được cài — nguồn gõ \
-                 có thể xung đột; chạy `buttre --doctor` để xem chi tiết"
-            );
+    let os_took_over_rx = {
+        use buttre_platform::shared::method_owner::{self, MethodOwner, SurfacePath};
+        let surface = method_owner::current_surface();
+        info!("IME surface at tray start: {surface:?}");
+        if surface == SurfacePath::LinuxKwinUnconfigured {
+            buttre_platform::platforms::linux::kwin_ime::notify_not_enabled();
         }
-    }
+        let (tx, rx) = mpsc::channel::<SurfacePath>();
+        std::thread::spawn(move || {
+            let mut agreeing = 0;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let surface = method_owner::current_surface();
+                if method_owner::owner_of(surface) == MethodOwner::Os {
+                    agreeing += 1;
+                    if agreeing >= 2 {
+                        let _ = tx.send(surface);
+                        return;
+                    }
+                } else {
+                    agreeing = 0;
+                }
+            }
+        });
+        rx
+    };
 
     let (settings_file_tx, settings_file_rx) = mpsc::channel::<()>();
     watch_settings_file(settings_file_tx);
@@ -1005,6 +1020,15 @@ pub(crate) fn run() -> Result<()> {
                     if run_tray_command(&app_state, command) {
                         elwt.exit();
                     }
+                }
+
+                // The OS menu owns method choice now (see the re-check
+                // thread): leave quietly — no "Thoát" semantics, typing
+                // stays as the user set it.
+                #[cfg(platform_linux)]
+                if let Ok(surface) = os_took_over_rx.try_recv() {
+                    info!("{surface:?} now owns method choice — tray exits");
+                    elwt.exit();
                 }
             }
             _ => {}

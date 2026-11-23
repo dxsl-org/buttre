@@ -5,10 +5,10 @@
 //!
 //! Một hàm duy nhất trả lời câu hỏi đó ([`decide`]) và `main.rs` phân nhánh
 //! theo nó — quyết định không được rải rác thành `#[cfg]` ở nhiều chỗ. Trên
-//! Linux câu trả lời phụ thuộc RUNTIME (fcitx5/ibus/wayland tự phát hiện qua
-//! `backend_detect`), nên nó là hàm chứ không phải hằng số biên dịch; dùng
-//! đúng `backend_detect::detect()` mà engine dùng, để tray và engine không
-//! bao giờ lệch nhau về "đường IME nào đang phục vụ máy này".
+//! Linux câu trả lời phụ thuộc RUNTIME, gộp từ nhiều tín hiệu độc lập
+//! (`backend_detect`: kwinrc, biến môi trường IM, shell tự chạy IBus, daemon
+//! trên D-Bus, giao thức của compositor), nên nó là hàm chứ không phải hằng
+//! số biên dịch.
 
 /// Ai sở hữu lựa chọn kiểu gõ (và kèm theo nó: có dựng tray hay không).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +48,16 @@ pub enum SurfacePath {
     /// ibus-daemon đang chạy — mỗi kiểu gõ là một input source IBus riêng
     /// (`ibus_engines.rs`, ADR-0005).
     LinuxIbus,
-    /// Wayland-native `zwp_input_method_v2`/`v1` — compositor không vẽ menu
-    /// kiểu gõ nào cho ta.
+    /// Wayland-native `zwp_input_method_v2`/`v1`: KWin spawns `buttre --ime`,
+    /// or a wlroots compositor offers the protocol — compositor không vẽ
+    /// menu kiểu gõ nào cho ta.
     LinuxWaylandNative,
-    /// Không phát hiện được đường IME nào (X11 không daemon) — không có menu
-    /// OS, giữ tray như hành vi trước giờ.
+    /// Plasma Wayland mà KWin CHƯA chạy buttre (Virtual Keyboard chưa chọn
+    /// buttre, hoặc đang chọn IME khác không có daemon): chưa gõ được — tray
+    /// vẫn dựng để báo người dùng cách bật (`kwin_ime::notify_not_enabled`).
+    LinuxKwinUnconfigured,
+    /// Không phát hiện được đường IME nào (X11 không daemon, hoặc Wayland
+    /// không có giao thức) — không có menu OS, giữ tray như trước giờ.
     LinuxUndetected,
 }
 
@@ -66,12 +71,42 @@ pub fn owner_of(path: SurfacePath) -> MethodOwner {
         SurfacePath::WindowsHook
         | SurfacePath::LinuxWaylandNative
         | SurfacePath::LinuxFcitx5NoAddon
+        | SurfacePath::LinuxKwinUnconfigured
         | SurfacePath::LinuxUndetected => MethodOwner::Buttre,
     }
 }
 
-/// Bề mặt đang hiệu lực trên máy này. Trên Linux, chặn (blocking) vì probe
-/// D-Bus — gọi lúc khởi động hoặc `--doctor`, không bao giờ trên đường phím.
+/// Bề mặt đang hiệu lực, chờ tối đa `wait` nếu phiên đã cấu hình một
+/// framework (IBus/fcitx5) mà daemon của nó chưa chạy — lúc đăng nhập tray
+/// và ibus-daemon khởi động cùng một giây, kết luận sớm là kết luận sai.
+/// Hết `wait` thì quyết định với những gì đang chạy. Trên Linux, chặn
+/// (blocking) vì probe D-Bus/Wayland — không bao giờ gọi trên đường phím.
+pub fn settled_surface(wait: std::time::Duration) -> SurfacePath {
+    #[cfg(platform_linux)]
+    {
+        use crate::platforms::linux::backend_detect::{self, Judgement};
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let evidence = backend_detect::gather();
+            let waiting = std::time::Instant::now() < deadline;
+            match backend_detect::judge(&evidence, waiting) {
+                Judgement::Settled(surface) => return surface,
+                Judgement::Pending(framework) => {
+                    tracing::info!("waiting for {framework:?} to start ({evidence:?})");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        }
+    }
+    #[cfg(not(platform_linux))]
+    {
+        let _ = wait;
+        current_surface()
+    }
+}
+
+/// Bề mặt đang hiệu lực trên máy này, không chờ (doctor, cửa sổ Cấu hình,
+/// lần kiểm tra lại định kỳ của tray).
 pub fn current_surface() -> SurfacePath {
     #[cfg(platform_windows)]
     {
@@ -95,33 +130,11 @@ pub fn current_surface() -> SurfacePath {
     }
     #[cfg(platform_linux)]
     {
-        use crate::platforms::linux::backend_detect::{self, ImeBackend};
-        use crate::platforms::linux::kwin_ime;
-        // Plasma Wayland: KWin SỞ HỮU tiến trình IME (kwinrc trỏ buttre) —
-        // đường gõ thật là wayland-native dù ibus-daemon vẫn thường chạy
-        // kèm trong session. Hỏi kwinrc TRƯỚC khi hỏi daemon, không thì máy
-        // Plasma bị xếp nhầm vào nhóm IBus/Os và mất tray (mất luôn nút
-        // "Thoát" duy nhất tắt được KWin IME).
-        if kwin_ime::manages_buttre_ime() {
-            return SurfacePath::LinuxWaylandNative;
-        }
-        let probes = backend_detect::probe();
-        match backend_detect::pick(probes) {
-            Some(ImeBackend::Fcitx5) => {
-                if backend_detect::fcitx5_addon_installed() {
-                    SurfacePath::LinuxFcitx5
-                } else {
-                    SurfacePath::LinuxFcitx5NoAddon
-                }
-            }
-            Some(ImeBackend::IBus) => SurfacePath::LinuxIbus,
-            Some(ImeBackend::WaylandIme) => SurfacePath::LinuxWaylandNative,
-            None => SurfacePath::LinuxUndetected,
-        }
+        settled_surface(std::time::Duration::ZERO)
     }
 }
 
-/// [`current_surface`] + [`owner_of`] — cái `main.rs` phân nhánh theo.
+/// [`current_surface`] + [`owner_of`] — no waiting (the config window).
 pub fn decide() -> MethodOwner {
     owner_of(current_surface())
 }
@@ -147,6 +160,11 @@ mod tests {
         assert_eq!(owner_of(SurfacePath::WindowsTsf), MethodOwner::Os);
         assert_eq!(owner_of(SurfacePath::WindowsHook), MethodOwner::Buttre);
         assert_eq!(owner_of(SurfacePath::LinuxUndetected), MethodOwner::Buttre);
+        // Plasma chưa chọn buttre: tray là chỗ duy nhất báo cách bật.
+        assert_eq!(
+            owner_of(SurfacePath::LinuxKwinUnconfigured),
+            MethodOwner::Buttre
+        );
         // fcitx5 sống nhưng addon chưa cài = KHÔNG có menu OS nào vẽ buttre
         // — bỏ tray ở đây là lấy mất công tắc duy nhất của người dùng.
         assert_eq!(

@@ -66,18 +66,10 @@ fn kwinrc_points_at_buttre(content: &str) -> bool {
     kwinrc_value(content).is_some_and(|v| v.contains("buttre"))
 }
 
-/// True when this session can and should drive KWin's IME switch: a
-/// Wayland session whose kwinrc input method is buttre.
-///
-/// `pub` vì `method_owner` cũng cần nó: KWin sở hữu tiến trình IME nghĩa là
-/// đường gõ thật là wayland-native — bất kể ibus-daemon có sống hay không —
-/// nên máy đó thuộc nhóm "buttre sở hữu + tray" (ADR-0003).
-///
-/// CỐ Ý không kiểm KWin có đang chạy: một kwinrc sót lại trên máy GNOME chỉ
-/// gây THỪA một bề mặt (tray + menu top-bar — vô hại, vẫn còn công tắc),
-/// còn một lần probe bus trượt trên Plasma thật sẽ xếp máy đó vào nhóm
-/// IBus/Os và lấy mất tray — nút "Thoát" duy nhất tắt được KWin IME. Sai về
-/// phía an toàn.
+/// True when this session can drive KWin's IME switch: a Wayland session
+/// whose kwinrc input method is buttre. Used by the tray's "Thoát"; the
+/// tray-or-not decision weighs this together with the other signals in
+/// `backend_detect`.
 pub fn manages_buttre_ime() -> bool {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
         || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
@@ -87,6 +79,38 @@ pub fn manages_buttre_ime() -> bool {
     kwinrc_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .is_some_and(|c| kwinrc_points_at_buttre(&c))
+}
+
+/// Tell the user how to turn buttre on in Plasma (shown by the tray when
+/// KWin does not spawn buttre — `SurfacePath::LinuxKwinUnconfigured`).
+/// kwinrc is the user's config; buttre never rewrites it. Best-effort: no
+/// notification daemon only means no bubble.
+pub fn notify_not_enabled() {
+    let result = zbus::blocking::Connection::session().and_then(|conn| {
+        let hints: std::collections::HashMap<&str, zbus::zvariant::Value<'_>> =
+            std::collections::HashMap::new();
+        conn.call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "Notify",
+            &(
+                "buttre",
+                0u32,
+                "buttre",
+                "buttre chưa được bật",
+                "Mở System Settings → Keyboard → Virtual Keyboard và chọn \
+                 \"buttre (Wayland IME)\" để gõ tiếng Việt.",
+                Vec::<&str>::new(),
+                hints,
+                -1i32,
+            ),
+        )
+        .map(|_| ())
+    });
+    if let Err(e) = result {
+        tracing::warn!("kwin_ime: could not show the enable hint: {e}");
+    }
 }
 
 /// Flip KWin's IME process on/off (no-op unless [`manages_buttre_ime`];
