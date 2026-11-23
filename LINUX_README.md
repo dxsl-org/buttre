@@ -70,9 +70,9 @@ Dùng fcitx5 (Kubuntu 24.04 mặc định dùng fcitx5): cài thêm gói addon, 
 sudo apt install ./buttre-*-linux-x86_64.deb ./fcitx5-buttre-*-linux-x86_64.deb
 ```
 
-Gói `.deb` không bắt buộc IBus: máy đã có IBus hoặc fcitx5 thì giữ nguyên framework đó. Gói `.rpm`
-thì bắt buộc IBus (`Requires: ibus`), nên trên openSUSE KDE, IBus được cài kèm và KWin có thể chuyển
-sang IBus; muốn dùng buttre trực tiếp thì chọn "buttre (Wayland IME)" trong Virtual Keyboard.
+Cả `.deb` lẫn `.rpm` đều không bắt buộc IBus: máy đã có IBus hoặc fcitx5 thì giữ nguyên framework đó.
+`.deb` gợi ý cài IBus khi máy chưa có framework nào; `.rpm` không tự cài IBus (`Suggests`), nên trên
+KDE chưa có IBus/fcitx5 (openSUSE) thì chọn "buttre (Wayland IME)" trong Virtual Keyboard.
 
 `ibus-daemon` đang chạy không tự thấy engine mới: **đăng xuất rồi đăng nhập lại** (hoặc
 chạy `ibus restart`) trước khi thêm buttre ở bước [Cấu Hình](#️-cấu-hình). Gói không

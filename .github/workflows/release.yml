@@ -109,7 +109,7 @@ jobs:
       - name: Install packaging tools
         run: |
           cargo install cargo-deb --locked --version "^2.7"
-          cargo install cargo-generate-rpm --locked --version "^0.14"
+          cargo install cargo-generate-rpm --locked --version "^0.21"
 
       - name: Resolve version
         id: ver

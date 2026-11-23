@@ -240,11 +240,17 @@ assets = [
     { source = "../../keyboards/thai.toml",                    dest = "/usr/share/buttre/keyboards/thai.toml",                  mode = "644" },
     { source = "../../README.md",                              dest = "/usr/share/doc/buttre/README.md",                        mode = "644" },
 ]
+# Refresh the IBus engine cache and icon cache, like the deb's postinst/postrm.
+post_install_script = "if command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi; if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true; fi"
+post_uninstall_script = "if [ \"$1\" = \"0\" ] && command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi; if [ \"$1\" = \"0\" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true; fi"
 
 [package.metadata.generate-rpm.requires]
-ibus = ">= 1.5"
 glibc = ">= 2.31"
 
-[package.metadata.generate-rpm.scripts]
-post = "if command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi; if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true; fi"
-postun = "if [ \"$1\" = \"0\" ] && command -v ibus >/dev/null 2>&1; then ibus write-cache --system >/dev/null 2>&1 || true; fi; if [ \"$1\" = \"0\" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true; fi"
+# No hard or auto-installed IBus dependency: an fcitx5 session (with the
+# fcitx5-buttre addon) or a KWin/wlroots Wayland-native one needs no IBus,
+# and GNOME — the desktop that does need it — always ships it. Weak deps
+# cannot express the deb's `ibus | fcitx5` here: zypper satisfies an `or`
+# by installing fcitx5 (no buttre addon in rpm form) and ignores `unless`.
+[package.metadata.generate-rpm.suggests]
+"(ibus >= 1.5 or fcitx5)" = ""

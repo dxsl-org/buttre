@@ -15,14 +15,19 @@ cargo build -p buttre-platform --release
 
 echo "==> Installing packaging tools (skipped if already present)..."
 cargo install cargo-deb --locked --version "^2.7" 2>/dev/null || true
-cargo install cargo-generate-rpm --locked --version "^0.14" 2>/dev/null || true
+cargo install cargo-generate-rpm --locked --version "^0.21" 2>/dev/null || true
+
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+VERSION="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; m=json.load(sys.stdin); print(next(p["version"] for p in m["packages"] if p["name"]=="buttre-platform"))')"
 
 echo "==> Building .deb..."
 # --no-build: binary already compiled above; run from workspace root so relative paths in [package.metadata.deb] resolve.
 cargo deb --package buttre-platform --no-build --output target/debian/
 
 echo "==> Building .rpm..."
-cargo generate-rpm --package crates/buttre-platform
+# RPM versions cannot contain '-'. A SemVer pre-release (0.9.2-beta) maps to
+# RPM's tilde form (0.9.2~beta), which sorts BEFORE the final 0.9.2 as it should.
+cargo generate-rpm --package crates/buttre-platform -s "version = \"${VERSION//-/\~}\""
 
 # ── fcitx5-buttre addon .deb (separate package, like every distro fcitx5
 # addon) ─ built only when the fcitx5 dev stack is present; otherwise the
@@ -41,8 +46,6 @@ if [ -f /usr/lib/x86_64-linux-gnu/cmake/Fcitx5Core/Fcitx5CoreConfig.cmake ] \
     if ! (
         set -e
         cargo build -p buttre-ffi --release
-        TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-        VERSION="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; m=json.load(sys.stdin); print(next(p["version"] for p in m["packages"] if p["name"]=="buttre-platform"))')"
         cmake -S addons/fcitx5-buttre -B "$TARGET_DIR/fcitx5-addon" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
