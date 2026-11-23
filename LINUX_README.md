@@ -93,7 +93,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/dxsl-org/buttre
 cd buttre
 
-# Build và cài đặt (từ thư mục gốc)
+# Build và cài theo môi trường đang dùng (IBus, fcitx5, KDE, sway/Hyprland) —
+# chạy bằng user đang đăng nhập trong phiên đồ hoạ, KHÔNG sudo (script tự gọi sudo).
+# Dùng `buttre --detect` để biết đường gõ; với fcitx5 tự build luôn addon fcitx5-buttre.
+./scripts/install-linux-auto.sh
+
+# Chỉ IBus (cài cổ điển)
 sudo ./scripts/install-ibus.sh
 
 # Hoặc build gói distro (.deb / .rpm)

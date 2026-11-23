@@ -339,6 +339,24 @@ fn run_doctor() {
     }
 }
 
+/// `buttre --detect`: the settled typing path as ONE stable token, for
+/// installers (`scripts/install-linux-auto.sh`). Same verdict the tray acts
+/// on, so no installer re-implements the decision in shell. Waits like a
+/// manual launch for a configured daemon that is still starting.
+#[cfg(platform_linux)]
+fn run_detect() {
+    use method_owner::SurfacePath as S;
+    let token = match method_owner::settled_surface(std::time::Duration::from_secs(3)) {
+        S::LinuxIbus => "ibus",
+        S::LinuxFcitx5 => "fcitx5",
+        S::LinuxFcitx5NoAddon => "fcitx5-no-addon",
+        S::LinuxWaylandNative => "wayland-native",
+        S::LinuxKwinUnconfigured => "kwin-unconfigured",
+        S::LinuxUndetected | S::WindowsTsf | S::WindowsHook | S::MacosImkit => "none",
+    };
+    println!("{token}");
+}
+
 #[cfg(not(platform_linux))]
 fn run_doctor() {
     println!("buttre --doctor hiện chỉ hỗ trợ Linux.");
@@ -387,6 +405,7 @@ fn main() -> Result<()> {
              --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
              --config    Open the settings window\n  \
              --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \
+             --detect    Print the detected typing path as one token (Linux installers)\n  \
              --register-tsf    Register the Windows TSF text service (needs Administrator)\n  \
              --unregister-tsf  Remove that registration (needs Administrator)\n  \
              --tsf-status      Report whether buttre runs as TSF keyboards or the hook tray\n  \
@@ -418,6 +437,11 @@ fn main() -> Result<()> {
     }
     if args.iter().any(|a| a == "--doctor") {
         run_doctor();
+        return Ok(());
+    }
+    #[cfg(platform_linux)]
+    if args.iter().any(|a| a == "--detect") {
+        run_detect();
         return Ok(());
     }
 

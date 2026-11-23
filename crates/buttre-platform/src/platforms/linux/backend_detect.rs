@@ -239,17 +239,20 @@ fn env_im(lookup: impl Fn(&str) -> Option<String>) -> Option<Framework> {
     }
 }
 
-/// True when the fcitx5-buttre addon is installed (its manifest is visible
-/// in a standard fcitx5 data dir).
+/// True when the fcitx5-buttre addon is installed: its manifest is in one of
+/// the XDG data dirs fcitx5 itself searches (`XDG_DATA_HOME`, then
+/// `XDG_DATA_DIRS` — NixOS and other non-FHS layouts live only there), or in
+/// `/usr/share`, the built-in data dir of distro fcitx5 builds.
 pub fn fcitx5_addon_installed() -> bool {
-    let mut dirs: Vec<std::path::PathBuf> = vec![
-        "/usr/share/fcitx5/addon".into(),
-        "/usr/local/share/fcitx5/addon".into(),
-    ];
-    if let Some(data) = dirs::data_dir() {
-        dirs.push(data.join("fcitx5/addon"));
-    }
-    dirs.iter().any(|d| d.join("buttre.conf").is_file())
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    dirs::data_dir()
+        .into_iter()
+        .chain(std::env::split_paths(&data_dirs))
+        .chain(std::iter::once("/usr/share".into()))
+        .any(|d| d.join("fcitx5/addon/buttre.conf").is_file())
 }
 
 /// True when an `unix:path=…` IBus address points at a socket that accepts

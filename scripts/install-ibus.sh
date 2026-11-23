@@ -94,7 +94,7 @@ if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
 Type=Application
 Name=buttre
 Comment=Bộ gõ tiếng Việt
-Exec="$BINDIR/buttre"
+Exec="$BINDIR/buttre" --autostart
 X-GNOME-Autostart-enabled=true
 EOF
         chmod 644 "$AUTOSTART_DIR/buttre.desktop"

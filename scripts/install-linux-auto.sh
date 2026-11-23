@@ -1,80 +1,144 @@
 #!/bin/bash
-# buttre Linux — auto backend picker (plan: fcitx-backend-auto-priority P1).
+# buttre Linux — build from source and install for the typing path this
+# session actually uses.
 #
-# Detects the machine's IME stack and routes to the right install path with
-# the SAME fixed priority the app itself uses (backend_detect.rs):
+# The decision is NOT made here: the freshly built binary answers
+# `buttre --detect` with the same verdict the tray acts on (backend_detect.rs
+# weighs KWin's Virtual Keyboard choice, the IM environment, a shell that
+# starts IBus itself, the daemons on the session bus and the compositor's
+# input-method protocol). This script only installs what that path needs:
 #
-#   fcitx5  →  no addon yet (Phase 3): print guidance, fall through
-#   ibus    →  scripts/install-ibus.sh (component XML + engine)
-#   wayland →  KDE Plasma: point kwinrc [Wayland] InputMethod at buttre-ime
-#              (manual steps printed — kwinrc is user config, never edited
-#              by a root installer)
+#   ibus               files + IBus cache refresh, then add the source
+#   fcitx5 / -no-addon files + fcitx5-buttre addon (built here), restart fcitx5
+#   wayland-native     files; KWin already runs buttre, or sway/Hyprland
+#                      config lines to add
+#   kwin-unconfigured  files; pick buttre in Virtual Keyboard (kwinrc is the
+#                      user's config — never edited here)
+#   none               files; no IBus/fcitx5/Wayland IME — install one first
 #
-# One machine must serve buttre through ONE path: two live registrations
-# would both write ~/.config/buttre/{method,enabled} and fight each other.
-#
-# Run as the DESKTOP USER first (detection needs the session bus); it
-# re-invokes sudo only where installation actually requires root.
+# Run from inside the graphical session as the DESKTOP USER (detection reads
+# the session bus and environment); sudo is used only for system files.
+# Same file layout as the .deb/.rpm ([package.metadata.deb] in
+# crates/buttre-platform/Cargo.toml), so a later package install replaces it.
 
-set -e
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+BIN="$TARGET_DIR/release/buttre"
 
-has_name() {
-    busctl --user list 2>/dev/null | grep -q "^$1 " ||
-        busctl --user status "$1" >/dev/null 2>&1
-}
-
-FCITX5=no
-IBUS=no
-WAYLAND=no
-has_name org.fcitx.Fcitx5 && FCITX5=yes
-if has_name org.freedesktop.IBus || has_name org.freedesktop.portal.IBus || pgrep -x ibus-daemon >/dev/null; then
-    IBUS=yes
-fi
-[ -n "$WAYLAND_DISPLAY" ] && WAYLAND=yes
-
-echo "🔎 probes: fcitx5=$FCITX5 ibus=$IBUS wayland=$WAYLAND"
-
-if [ "$FCITX5" = yes ]; then
-    if [ -f /usr/share/fcitx5/addon/buttre.conf ] ||
-        [ -f /usr/local/share/fcitx5/addon/buttre.conf ]; then
-        echo "✅ fcitx5 đang chạy và addon fcitx5-buttre đã cài."
-        echo "   Thêm \"Buttre\" trong fcitx5-configtool nếu chưa có, xong."
-        exit 0
-    fi
-    cat <<'EOF'
-⚠️  fcitx5 đang chạy nhưng addon fcitx5-buttre CHƯA cài. Ba lựa chọn:
-      1. Build + cài addon (khuyến nghị — cần cmake, ECM, libfcitx5core-dev):
-           cargo build --release -p buttre-ffi
-           cmake -S addons/fcitx5-buttre -B build-fcitx5 \
-                 -DCMAKE_INSTALL_PREFIX=/usr \
-                 -DBUTTRE_FFI_LIB=$PWD/target/release/libbuttre_ffi.so
-           cmake --build build-fcitx5 && sudo cmake --install build-fcitx5
-      2. Tắt fcitx5 rồi chạy lại script này (sẽ dùng ibus hoặc wayland), hoặc
-      3. Giữ fcitx5 và KHÔNG cài buttre song song (tránh tranh nguồn gõ).
-EOF
+if [ "$EUID" -eq 0 ]; then
+    echo "❌ Chạy bằng user đang đăng nhập, không dùng sudo — script tự gọi sudo khi cần."
     exit 1
 fi
 
-if [ "$IBUS" = yes ]; then
-    echo "➡️  Dùng đường IBus: scripts/install-ibus.sh (cần sudo)"
-    exec sudo "$SCRIPT_DIR/install-ibus.sh"
-fi
+echo "📦 Build buttre..."
+cargo build --release -p buttre-platform
 
-if [ "$WAYLAND" = yes ]; then
-    cat <<EOF
-➡️  Không có daemon IME nào chạy — dùng đường Wayland (compositor quản lý).
-    Trên KDE Plasma:
-      1. sudo install -m755 <binary> /usr/bin/buttre
-      2. Cài desktop file buttre-ime (xem installers/linux/README.md, mục KWin)
-      3. System Settings → Virtual Keyboard → chọn "buttre", hoặc thêm vào
-         ~/.config/kwinrc:  [Wayland]\nInputMethod=<đường dẫn buttre-ime.desktop>
-      4. Kiểm tra: buttre --doctor
+SURFACE="$("$BIN" --detect)"
+echo "🔎 Đường gõ của phiên này: $SURFACE   (chi tiết: $BIN --doctor)"
+
+install_files() {
+    echo "📥 Cài file vào /usr (cần sudo)..."
+    sudo install -Dm755 "$BIN" /usr/bin/buttre
+    if [ -f "$TARGET_DIR/release/buttre_nom.db" ]; then
+        sudo install -Dm644 "$TARGET_DIR/release/buttre_nom.db" /usr/share/buttre/buttre_nom.db
+    else
+        echo "⚠️  Thiếu $TARGET_DIR/release/buttre_nom.db — chế độ Nôm sẽ không có dữ liệu."
+    fi
+    sudo install -Dm644 -t /usr/share/buttre/keyboards keyboards/*.toml
+    sudo install -Dm644 installers/linux/buttre.xml /usr/share/ibus/component/buttre.xml
+    sudo install -Dm644 -t /usr/share/applications \
+        installers/linux/buttre.desktop installers/linux/buttre-ime.desktop
+    sudo install -Dm644 installers/linux/buttre-autostart.desktop /etc/xdg/autostart/buttre.desktop
+    local icons=/usr/share/icons/hicolor/128x128/apps
+    sudo install -Dm644 crates/buttre-platform/icons/vietnamese.png "$icons/buttre.png"
+    for m in telex vni nom custom; do
+        sudo install -Dm644 "crates/buttre-platform/icons/$m.png" "$icons/buttre-$m.png"
+    done
+    if command -v gtk-update-icon-cache >/dev/null; then
+        sudo gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    fi
+    if command -v ibus >/dev/null; then
+        sudo ibus write-cache --system >/dev/null 2>&1 || true
+    fi
+}
+
+desktop_is() {
+    case ":${XDG_CURRENT_DESKTOP:-}:" in
+        *":$1:"*) return 0 ;;
+    esac
+    return 1
+}
+
+install_fcitx5_addon() {
+    if ! command -v cmake >/dev/null || ! pkg-config --exists Fcitx5Core 2>/dev/null; then
+        cat <<'EOF'
+❌ Build addon fcitx5-buttre cần cmake, extra-cmake-modules, g++ và header fcitx5:
+     Debian/Ubuntu/Mint: sudo apt install cmake extra-cmake-modules g++ libfcitx5core-dev
+     Fedora:             sudo dnf install cmake extra-cmake-modules gcc-c++ fcitx5-devel
+     Arch/CachyOS:       sudo pacman -S cmake extra-cmake-modules gcc fcitx5
+   Cài xong chạy lại script này.
 EOF
-    exit 0
-fi
+        exit 1
+    fi
+    echo "🔧 Build addon fcitx5-buttre..."
+    cargo build --release -p buttre-ffi
+    local build="$TARGET_DIR/fcitx5-buttre-build"
+    cmake -S addons/fcitx5-buttre -B "$build" -DCMAKE_INSTALL_PREFIX=/usr \
+        -DBUTTRE_PACKAGED=ON -DBUTTRE_FFI_LIB="$(realpath "$TARGET_DIR/release/libbuttre_ffi.so")" >/dev/null
+    cmake --build "$build" -j"$(nproc)"
+    sudo cmake --install "$build" >/dev/null
+}
 
-echo "❌ Không phát hiện fcitx5/ibus/wayland — session X11 không có daemon IME?"
-echo "   Cài ibus trước (vd: sudo apt install ibus) rồi chạy lại."
-exit 1
+install_files
+
+case "$SURFACE" in
+    ibus)
+        if command -v ibus >/dev/null; then
+            ibus restart >/dev/null 2>&1 || true
+        fi
+        echo "✅ Xong (IBus). Thêm bộ gõ:"
+        if desktop_is GNOME; then
+            echo "   Settings → Keyboard → Input Sources → (+) → Vietnamese → buttre Telex/VNI/Chữ Nôm"
+        elif desktop_is X-Cinnamon; then
+            echo "   System Settings → Keyboard → Layouts → (+) → buttre Telex/VNI/Chữ Nôm"
+        elif desktop_is KDE; then
+            echo "   KWin đang dùng IBus: thêm buttre bằng ibus-setup → Input Method,"
+            echo "   hoặc chọn \"buttre (Wayland IME)\" trong Virtual Keyboard để KWin chạy buttre trực tiếp."
+        else
+            echo "   ibus-setup → Input Method → Add → Vietnamese → buttre"
+        fi
+        echo "   Đổi kiểu gõ bằng Super+Space."
+        ;;
+    fcitx5 | fcitx5-no-addon)
+        install_fcitx5_addon
+        echo "✅ Xong (fcitx5). Đăng xuất/đăng nhập lại để fcitx5 nạp addon, rồi mở fcitx5-configtool → thêm"
+        echo "   \"Buttre\" (bỏ chọn \"Only Show Current Language\" nếu không thấy)."
+        ;;
+    wayland-native)
+        if desktop_is KDE; then
+            echo "✅ Xong. KWin đang chạy buttre (Virtual Keyboard). Đăng xuất/đăng nhập lại để dùng bản vừa cài."
+        else
+            cat <<'EOF'
+✅ Đã cài. Thêm vào config compositor rồi đăng nhập lại:
+     sway (~/.config/sway/config):  exec /usr/bin/buttre --ime
+                                    exec /usr/bin/buttre --autostart
+     Hyprland (hyprland.conf):      exec-once = /usr/bin/buttre --ime
+                                    exec-once = /usr/bin/buttre --autostart
+EOF
+        fi
+        ;;
+    kwin-unconfigured)
+        echo "✅ Đã cài. System Settings → Keyboard → Virtual Keyboard → chọn \"buttre (Wayland IME)\" → Apply."
+        ;;
+    none)
+        echo "⚠️  Đã cài, nhưng phiên này chưa có IBus/fcitx5 và compositor không hỗ trợ input-method Wayland."
+        echo "   Cài IBus (vd: sudo apt install ibus), đăng nhập lại, rồi chạy lại script này."
+        exit 1
+        ;;
+    *)
+        echo "❌ buttre --detect trả về \"$SURFACE\" — không biết đường cài này."
+        exit 1
+        ;;
+esac
