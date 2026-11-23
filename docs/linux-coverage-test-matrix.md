@@ -104,6 +104,9 @@ tắt bàn phím buttre trên Windows (Windows biến đổi phím trước khi 
 | **Pop!_OS 24.04 COSMIC** | mặc định (`GTK_IM_MODULE=ibus` nhưng ibus-daemon không chạy) + `buttre` .deb | chờ IBus 30 s → tray · `LinuxWaylandNative`, nhưng không ai chạy `buttre --ime` → không gõ được | ❌ |
 | Pop!_OS 24.04 COSMIC | tự chạy ibus-daemon | Os · `LinuxIbus` — app GTK gõ được, app COSMIC (cosmic-edit) không nhận IBus | ⚠️ |
 | Pop!_OS 24.04 COSMIC | `im-config -n none` + autostart `buttre --ime` (theo LINUX_README) | tray · `LinuxWaylandNative` ngay | ✅ (GTK: Telex/VNI/Nôm và phím tắt Ctrl+Shift; cosmic-edit: Telex) |
+| Fedora 45 KDE 6.8.1 Wayland | Virtual Keyboard = buttre, bản có phím tắt trong `--ime` | tray · `LinuxWaylandNative` | ✅ 8/8 (phím tắt Ctrl+Shift vẫn qua tray, không bị chạy hai lần) |
+| **openSUSE Tumbleweed** KDE 6.8.3 Wayland | cài mới (không IBus/fcitx5) + `buttre` .rpm — rpm `Requires: ibus` kéo IBus về, lần đăng nhập sau kwinrc đã thành IBus Wayland panel | Os · `LinuxIbus` | ✅ (sau khi thêm buttre vào preload-engines của IBus) |
+| openSUSE Tumbleweed KDE 6.8.3 Wayland | Virtual Keyboard = buttre (IBus vẫn chạy) | tray · `LinuxWaylandNative` | ✅ 8/8 (phím tắt, Nôm) |
 
 Gói `kcm-fcitx5` của Fedora 45 hiện không cài được (`nothing provides libPlasma.so.7`); cấu hình
 fcitx5 bằng `fcitx5-configtool`.

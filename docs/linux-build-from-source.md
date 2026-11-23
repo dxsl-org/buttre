@@ -1,7 +1,7 @@
 # Build và cài buttre từ mã nguồn trên Linux
 
-Dành cho distro không có gói `.deb`/`.rpm` của buttre (Arch, CachyOS, Manjaro, openSUSE,
-Void, Gentoo, Alpine, NixOS…), cho người dùng fcitx5 trên Fedora, và cho ai muốn chạy bản
+Dành cho distro không có gói `.deb`/`.rpm` của buttre (Arch, CachyOS, Manjaro, Void, Gentoo,
+Alpine, NixOS…), cho người dùng fcitx5 trên Fedora và openSUSE (chưa có gói addon `.rpm`), và cho ai muốn chạy bản
 mới nhất trên nhánh `main`.
 
 - [1. Cài công cụ build](#1-cài-công-cụ-build)

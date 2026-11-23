@@ -90,6 +90,7 @@ source trong System Settings → Keyboard → Input Sources. Xem [MACOS_README.m
 ```bash
 sudo apt install ./buttre-*-linux-x86_64.deb     # Debian, Ubuntu, Linux Mint, Pop!_OS
 sudo dnf install ./buttre-*-linux-x86_64.rpm     # Fedora
+sudo zypper install --allow-unsigned-rpm ./buttre-*-linux-x86_64.rpm   # openSUSE Tumbleweed
 ```
 
 Đăng xuất rồi đăng nhập lại, sau đó bật buttre theo desktop đang dùng:
@@ -101,9 +102,10 @@ sudo dnf install ./buttre-*-linux-x86_64.rpm     # Fedora
 | KDE Plasma (Wayland) | System Settings → Keyboard → Virtual Keyboard → "buttre (Wayland IME)" |
 | XFCE, MATE và desktop dùng IBus khác | `ibus-setup` → Input Method → Add → buttre |
 | sway, Hyprland | Thêm `buttre --ime` và `buttre --autostart` vào config compositor |
+| COSMIC (Pop!_OS) | `im-config -n none` và autostart `buttre --ime` — xem [LINUX_README.md](LINUX_README.md) |
 | Dùng fcitx5 | Cài thêm `fcitx5-buttre-*.deb`, rồi thêm "Buttre" trong `fcitx5-configtool` |
 
-Distro khác (Arch, openSUSE, Void, NixOS, Alpine…) và fcitx5 trên Fedora:
+Distro khác (Arch, Void, NixOS, Alpine…) và fcitx5 trên Fedora/openSUSE:
 [build từ mã nguồn](docs/linux-build-from-source.md). Hướng dẫn đầy đủ và xử lý sự cố:
 [LINUX_README.md](LINUX_README.md). Lệnh `buttre --doctor` in môi trường buttre nhận diện được.
 

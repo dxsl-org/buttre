@@ -61,6 +61,7 @@ Tải từ [Releases](https://github.com/dxsl-org/buttre/releases):
 ```bash
 sudo apt install ./buttre-*-linux-x86_64.deb       # Debian/Ubuntu/Mint/Pop!_OS
 sudo dnf install ./buttre-*-linux-x86_64.rpm       # Fedora/RHEL
+sudo zypper install --allow-unsigned-rpm ./buttre-*-linux-x86_64.rpm   # openSUSE
 ```
 
 Dùng fcitx5 (Kubuntu 24.04 mặc định dùng fcitx5): cài thêm gói addon, cùng lúc với gói chính:
@@ -69,7 +70,9 @@ Dùng fcitx5 (Kubuntu 24.04 mặc định dùng fcitx5): cài thêm gói addon, 
 sudo apt install ./buttre-*-linux-x86_64.deb ./fcitx5-buttre-*-linux-x86_64.deb
 ```
 
-Gói `.deb` không bắt buộc IBus: máy đã có IBus hoặc fcitx5 thì giữ nguyên framework đó.
+Gói `.deb` không bắt buộc IBus: máy đã có IBus hoặc fcitx5 thì giữ nguyên framework đó. Gói `.rpm`
+thì bắt buộc IBus (`Requires: ibus`), nên trên openSUSE KDE, IBus được cài kèm và KWin có thể chuyển
+sang IBus; muốn dùng buttre trực tiếp thì chọn "buttre (Wayland IME)" trong Virtual Keyboard.
 
 `ibus-daemon` đang chạy không tự thấy engine mới: **đăng xuất rồi đăng nhập lại** (hoặc
 chạy `ibus restart`) trước khi thêm buttre ở bước [Cấu Hình](#️-cấu-hình). Gói không
