@@ -8,6 +8,7 @@
 //! first in the app.
 
 use super::super::engine_bridge::{is_break_keysym, is_modifier_keysym, keysym_to_char};
+use super::candidate_render::PAGE_SIZE as CANDIDATE_PAGE_SIZE;
 use super::ImeState;
 use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
@@ -231,13 +232,26 @@ impl ImeState {
             return;
         }
 
+        let mod_on = |name: &str| {
+            self.xkb_state
+                .as_ref()
+                .is_some_and(|s| s.mod_name_is_active(name, xkb::STATE_MODS_EFFECTIVE))
+        };
+        let (ctrl, shift) = (mod_on(xkb::MOD_NAME_CTRL), mod_on(xkb::MOD_NAME_SHIFT));
+        let (alt, logo) = (mod_on(xkb::MOD_NAME_ALT), mod_on(xkb::MOD_NAME_LOGO));
+
+        // buttre's own chords: commit the pending word, run the chord, and
+        // keep the key from the app (as the tray's global grab would).
+        if let Some(action) = super::hotkeys::chord_for(key, ctrl, shift, alt || logo) {
+            let outcome = self.bridge.flush_pending();
+            self.commit_ops(outcome.ops);
+            self.run_chord(action);
+            self.swallowed.insert(key);
+            return;
+        }
+
         // Shortcuts: commit the pending word, then let the combo through.
-        let combo = self.xkb_state.as_ref().is_some_and(|s| {
-            s.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE)
-                || s.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE)
-                || s.mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE)
-        });
-        if combo {
+        if ctrl || alt || logo {
             let outcome = self.bridge.flush_pending();
             self.commit_ops(outcome.ops);
             self.forward_key(time, key, true);
@@ -246,6 +260,16 @@ impl ImeState {
 
         if is_modifier_keysym(keysym) {
             self.forward_key(time, key, true);
+            return;
+        }
+
+        // Nôm list open: selection/cancel keys belong to it, BEFORE the
+        // break-keysym flush — same contract as the IBus and v1 backends.
+        // No popup on this protocol yet; Space still picks the first
+        // candidate and 1–9 pick by number.
+        if let Some(outcome) = self.bridge.candidate_key(keysym, CANDIDATE_PAGE_SIZE) {
+            self.commit_ops(outcome.ops);
+            self.swallowed.insert(key);
             return;
         }
 

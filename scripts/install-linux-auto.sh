@@ -119,6 +119,14 @@ case "$SURFACE" in
     wayland-native)
         if desktop_is KDE; then
             echo "✅ Xong. KWin đang chạy buttre (Virtual Keyboard). Đăng xuất/đăng nhập lại để dùng bản vừa cài."
+        elif desktop_is COSMIC; then
+            cat <<'EOF'
+✅ Đã cài. COSMIC: bỏ cấu hình IBus của im-config, cho phiên tự chạy buttre --ime, rồi đăng nhập lại:
+     im-config -n none
+     mkdir -p ~/.config/autostart
+     printf '[Desktop Entry]\nType=Application\nName=buttre IME\nExec=/usr/bin/buttre --ime\nNoDisplay=true\n' \
+       > ~/.config/autostart/buttre-ime.desktop
+EOF
         else
             cat <<'EOF'
 ✅ Đã cài. Thêm vào config compositor rồi đăng nhập lại:

@@ -100,12 +100,15 @@ tắt bàn phím buttre trên Windows (Windows biến đổi phím trước khi 
 | Debian 13 GNOME 48 **X11** (`gnome-xorg`) | mặc định (IBus) | Os · `LinuxIbus` | ✅ |
 | Debian 13 GNOME 48 X11 | `im-config -n fcitx5` + `fcitx5-buttre` .deb (fcitx5 5.1.12) | Os · `LinuxFcitx5` | ✅ |
 | Debian 13 **XFCE** 4.20 X11 | IBus do `im-config` chạy | Os · `LinuxIbus` | ✅ |
+| Debian 13 **sway 1.10** | `exec buttre --ime` + `exec buttre --autostart` | tray · `LinuxWaylandNative` | ✅ (phím tắt Ctrl+Shift qua `--ime`, Nôm chọn bằng Space/số) |
+| **Pop!_OS 24.04 COSMIC** | mặc định (`GTK_IM_MODULE=ibus` nhưng ibus-daemon không chạy) + `buttre` .deb | chờ IBus 30 s → tray · `LinuxWaylandNative`, nhưng không ai chạy `buttre --ime` → không gõ được | ❌ |
+| Pop!_OS 24.04 COSMIC | tự chạy ibus-daemon | Os · `LinuxIbus` — app GTK gõ được, app COSMIC (cosmic-edit) không nhận IBus | ⚠️ |
+| Pop!_OS 24.04 COSMIC | `im-config -n none` + autostart `buttre --ime` (theo LINUX_README) | tray · `LinuxWaylandNative` ngay | ✅ (GTK: Telex/VNI/Nôm và phím tắt Ctrl+Shift; cosmic-edit: Telex) |
 
 Gói `kcm-fcitx5` của Fedora 45 hiện không cài được (`nothing provides libPlasma.so.7`); cấu hình
 fcitx5 bằng `fcitx5-configtool`.
 
 **Chưa kiểm chứng:**
-- Pop!_OS 24.04 dùng COSMIC, compositor riêng — chưa xác minh hỗ trợ `zwp_input_method_v2`.
 - Plasma 5.27 **Wayland** (Kubuntu 24.04, không phải phiên mặc định): phiên không khởi động
   được trong VM Hyper-V không GPU kể cả khi không chọn buttre — lỗi môi trường test, chưa
   kiểm được buttre trên đó.

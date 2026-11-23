@@ -39,6 +39,7 @@
 mod candidate_panel;
 mod candidate_render;
 mod dispatch;
+mod hotkeys;
 mod probe;
 mod v1;
 

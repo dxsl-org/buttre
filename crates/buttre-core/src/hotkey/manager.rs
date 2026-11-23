@@ -2,6 +2,7 @@
 //!
 //! **Tests**: Integration tests for this module are located in `crates/buttre-core/tests/hotkey_tests.rs`.
 
+use crate::hotkey::chords::{CUSTOM_CHORD_KEYS, FIXED_CHORDS};
 use crate::hotkey::error::{HotkeyError, Result};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -84,51 +85,8 @@ impl ButtreHotkeyManager {
 
         let mut hotkeys = HashMap::new();
 
-        // Register default hotkeys
-        let hotkey_configs = vec![
-            // Toggle: Ctrl+Shift+Space (closest to Unikey's Ctrl+Shift)
-            // Note: Can't register pure Ctrl+Shift (no key), so we use Space
-            (
-                Modifiers::CONTROL | Modifiers::SHIFT,
-                Code::Space,
-                HotkeyAction::Toggle,
-            ),
-            // Telex: Ctrl+Shift+F1 or Ctrl+Shift+1
-            (
-                Modifiers::CONTROL | Modifiers::SHIFT,
-                Code::F1,
-                HotkeyAction::Telex,
-            ),
-            (
-                Modifiers::CONTROL | Modifiers::SHIFT,
-                Code::Digit1,
-                HotkeyAction::Telex,
-            ),
-            // VNI: Ctrl+Shift+F2 or Ctrl+Shift+2
-            (
-                Modifiers::CONTROL | Modifiers::SHIFT,
-                Code::F2,
-                HotkeyAction::Vni,
-            ),
-            (
-                Modifiers::CONTROL | Modifiers::SHIFT,
-                Code::Digit2,
-                HotkeyAction::Vni,
-            ),
-            // Chữ Nôm: Ctrl+Shift+F3 or Ctrl+Shift+3
-            (
-                Modifiers::CONTROL | Modifiers::SHIFT,
-                Code::F3,
-                HotkeyAction::Nom,
-            ),
-            (
-                Modifiers::CONTROL | Modifiers::SHIFT,
-                Code::Digit3,
-                HotkeyAction::Nom,
-            ),
-        ];
-
-        for (mods, code, action) in hotkey_configs {
+        let mods = Modifiers::CONTROL | Modifiers::SHIFT;
+        for (code, action) in FIXED_CHORDS {
             let hotkey = HotKey::new(Some(mods), code);
 
             manager
@@ -186,24 +144,9 @@ impl ButtreHotkeyManager {
         Ok(Self { manager, hotkeys })
     }
 
-    /// Register custom method hotkeys (Digit 4-9, 0)
-    ///
-    /// Custom 1 -> Ctrl+Shift+4
-    /// Custom 2 -> Ctrl+Shift+5
-    /// ...
-    /// Custom 7 -> Ctrl+Shift+0
+    /// Register the custom keyboards' chords ([`CUSTOM_CHORD_KEYS`]).
     pub fn register_custom_methods(&mut self, count: usize) -> Result<()> {
-        let digit_keys = [
-            Code::Digit4,
-            Code::Digit5,
-            Code::Digit6,
-            Code::Digit7,
-            Code::Digit8,
-            Code::Digit9,
-            Code::Digit0,
-        ];
-
-        for (i, code) in digit_keys.iter().take(count).enumerate() {
+        for (i, code) in CUSTOM_CHORD_KEYS.iter().take(count).enumerate() {
             let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), *code);
             let action = HotkeyAction::Custom(i);
 

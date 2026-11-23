@@ -15,7 +15,7 @@
 - ✅ **Dấu câu/space** — commit từ rồi cho ký tự đi qua
 - ✅ **Wayland-native** — `zwp_input_method_v2` cho sway/Hyprland/KDE; tự fallback IBus cho GNOME/X11
 - ✅ **Ô mật khẩu** — bypass engine (không lọt vào composition/learning)
-- ✅ **Chế độ Nôm** — cửa sổ chọn chữ (candidate) qua IBus (GNOME…) và KDE Plasma: Space/Enter chọn chữ đang sáng, 1–9 chọn theo số, ↑↓/PgUp/PgDn chuyển, Esc huỷ. sway/Hyprland chưa có cửa sổ candidate
+- ✅ **Chế độ Nôm** — cửa sổ chọn chữ (candidate) qua IBus (GNOME…) và KDE Plasma: Space/Enter chọn chữ đang sáng, 1–9 chọn theo số, ↑↓/PgUp/PgDn chuyển, Esc huỷ. sway/Hyprland/COSMIC chưa có cửa sổ candidate, nhưng các phím chọn vẫn chạy (Space ra chữ đầu danh sách)
 
 > **Không tap phím toàn cục:** cả hai backend đều để OS/compositor định tuyến phím tới bộ gõ đang chọn — không theo dõi bàn phím toàn hệ thống, nên không bị nghi là keylogger.
 
@@ -124,7 +124,7 @@ Cinnamon quản input source giống GNOME (không dùng `ibus-setup`):
 
 `ibus-setup` chỉ dùng trên các desktop không tự quản input source (XFCE, MATE…) hoặc khi chạy IBus độc lập.
 
-### sway / Hyprland / KDE — Wayland-native (không cần IBus)
+### sway / Hyprland / KDE / COSMIC — Wayland-native (không cần IBus)
 
 Trên các compositor hỗ trợ `zwp_input_method_v2`, chạy buttre trực tiếp làm input method — không cần ibus-daemon:
 
@@ -157,6 +157,19 @@ Virtual Keyboard → "buttre (Wayland IME)"). "Thoát" trên tray tắt gõ ti�
 = tắt): từ Plasma 6.7 KWin không còn cách tắt tiến trình IME qua D-Bus nên engine vẫn chạy nền, chỉ
 không gõ dấu. Mở lại tray rồi bấm "Bật bộ gõ" (hoặc Ctrl+Shift+Space) để gõ lại.
 
+**COSMIC (Pop!_OS 24.04):** dùng Wayland-native. Pop!_OS đặt sẵn `GTK_IM_MODULE=ibus` nhưng
+ibus-daemon không tự chạy trong phiên COSMIC, và app riêng của COSMIC (cosmic-edit…) không nhận
+IBus. Bỏ cấu hình IBus của im-config và cho phiên tự chạy `buttre --ime`, rồi đăng nhập lại:
+
+```bash
+im-config -n none
+mkdir -p ~/.config/autostart
+printf '[Desktop Entry]\nType=Application\nName=buttre IME\nExec=/usr/bin/buttre --ime\nNoDisplay=true\n' \
+  > ~/.config/autostart/buttre-ime.desktop
+```
+
+Tray do autostart của gói chạy. Phím tắt Ctrl+Shift+… hoạt động khi đang gõ trong một ô nhập.
+
 ### Các chế độ chạy (flags)
 
 | Lệnh | Vai trò |
@@ -172,7 +185,7 @@ source của OS), đổi kiểu gõ trong app tray tự áp dụng vào engine �
 
 ### Wayland cho app không-native
 
-App GTK/Qt chạy trên Wayland thường nhận IME tự động. App chạy qua XWayland hoặc không hỗ trợ text-input-v3 cần biến môi trường (đặt trong `~/.profile`):
+App GTK/Qt chạy trên Wayland thường nhận IME tự động. App chạy qua XWayland hoặc không hỗ trợ text-input-v3 cần biến môi trường (đặt trong `~/.profile`) — chỉ khi ibus-daemon có chạy; ở Wayland-native không có IBus, các biến này làm app GTK/Qt bỏ qua buttre:
 
 ```bash
 export GTK_IM_MODULE=ibus
