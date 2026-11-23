@@ -82,10 +82,12 @@ impl CandidatePanel {
         // SAFETY: hwnd is valid; the pointer stored here is owned by `shared`,
         // which outlives the window (Drop destroys the window first).
         unsafe {
+            // `as _`: the value is pointer-sized — `isize` on x64, `i32` on
+            // the 32-bit build that serves 32-bit hosts.
             SetWindowLongPtrW(
                 hwnd,
                 GWLP_USERDATA,
-                shared.as_ref() as *const PanelShared as isize,
+                shared.as_ref() as *const PanelShared as _,
             );
         }
 
@@ -143,7 +145,7 @@ impl CandidatePanel {
         // SWP_NOACTIVATE keeps the host application's focus intact.
         unsafe {
             if let Some(owner) = owner {
-                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner.0 as _);
             }
             let _ = SetWindowPos(
                 self.hwnd,

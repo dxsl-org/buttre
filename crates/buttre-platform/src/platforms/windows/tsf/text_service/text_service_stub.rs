@@ -12,7 +12,7 @@ use super::display_attribute::{
     GUID_DISPLAY_ATTRIBUTE_INPUT,
 };
 use super::edit_session::{
-    EndComposition, InsertText, QueryTextExt, SetCompositionString, PANEL_GAP,
+    CommitMode, CommitText, EndComposition, QueryTextExt, SetCompositionString, PANEL_GAP,
 };
 use super::langbar::ModeButton;
 use super::switching::{self, SwitchCommand};
@@ -311,24 +311,54 @@ impl TextService {
         self.request_session(context, &session_interface, sync)
     }
 
-    /// Insert finished text straight into the document, with no composition.
+    /// Commit finished text — a confirmed word, a separator, a chosen
+    /// candidate — and close the composition it went through.
     ///
-    /// The right shape for `Action::Commit` — a separator or a passthrough
-    /// character is FINISHED text, not something the user is still editing.
+    /// One edit session does it all ([`CommitText`]): text always arrives as
+    /// a composition result, which IMM32-layer applications (Telegram) need.
     ///
-    /// Routing it through [`Self::write_text`] instead was a race: that starts
-    /// a composition, and the caller then had to end it by testing
-    /// `composition.is_started()` on the very next line. When TSF ran the
-    /// composition's edit session synchronously the test passed; when TSF
-    /// DEFERRED it — measured at ~800 µs on Word against ~4 µs when inline —
-    /// the test ran first, saw no composition, and skipped the end. The space
-    /// was then left as an open composition, and the next keystroke's
-    /// `SetText` overwrote it: the space visibly disappeared as the next word
-    /// began.
-    pub fn insert_text(&self, context: &ITfContext, text: &str) -> Result<()> {
-        debug!("TextService::insert_text: {} char(s)", text.chars().count());
+    /// Starting a composition and ending it from separate calls was a race:
+    /// the end had to test `composition.is_started()` right after requesting
+    /// the start, and when TSF DEFERRED that session — measured at ~800 µs on
+    /// Word against ~4 µs when inline — the test ran first, saw no
+    /// composition, and skipped the end. The space was then left as an open
+    /// composition, and the next keystroke's `SetText` overwrote it.
+    pub fn commit_text(
+        &self,
+        context: &ITfContext,
+        text: &str,
+        mode: CommitMode,
+        sink: ITfCompositionSink,
+    ) -> Result<()> {
+        debug!(
+            "TextService::commit_text: {} char(s), {:?}",
+            text.chars().count(),
+            mode
+        );
+        // Same bookkeeping as `end_composition`: the next write targets a NEW
+        // composition, and the open one is this session's to end.
+        let write_queued = self.pending_edit.borrow().upgrade().is_some();
+        *self.pending_edit.borrow_mut() = Weak::new();
+        let captured = self.composition.take();
+        // Characters a silently-dead composition left committed. Only when no
+        // composition is open AND no queued write is about to start one: that
+        // write carries its own recovery, and its length is not committed text.
+        let recover = if captured.is_none() && !write_queued {
+            self.last_text_len.get()
+        } else {
+            0
+        };
+        self.last_text_len.set(0);
 
-        let session = InsertText::new(context.clone(), HSTRING::from(text));
+        let session = CommitText::new(
+            context.clone(),
+            self.composition.clone(),
+            captured,
+            sink,
+            HSTRING::from(text),
+            mode,
+            recover,
+        );
         let session_interface: ITfEditSession = session.into();
         self.request_session(context, &session_interface, false)
     }
@@ -411,6 +441,12 @@ impl TextService {
                     TF_ES_ASYNC | TF_ES_READ,
                 );
                 return None;
+            }
+            // The session's OWN result: the request succeeding says nothing
+            // about whether the extent was read. Unlogged, a failure here once
+            // pinned the panel to its fallback position in every application.
+            if granted.is_err() {
+                debug!("Text extent session failed: {:?}", granted);
             }
             let rect = out.get()?;
             Some((rect.left, rect.bottom + PANEL_GAP))
@@ -507,8 +543,7 @@ impl TextService {
         text: &str,
         sink: ITfCompositionSink,
     ) -> Result<()> {
-        self.write_text(context, text, text.chars().count(), sink)?;
-        self.end_composition(context)?;
+        self.commit_text(context, text, CommitMode::Replace, sink)?;
         self.hide_candidates();
         Ok(())
     }
@@ -1908,7 +1943,21 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 // action's outcome: once any action is handled, TSF must not
                 // let the raw key fall through to the app too.
                 let mut handled = BOOL(0);
+                let commit = |text: &str, mode: CommitMode| {
+                    if let Err(e) = self.this.commit_text(&context, text, mode, sink.clone()) {
+                        debug!("Failed to commit text: {:?}", e);
+                    }
+                };
+                // A confirmed word waits for the action after it: a separator
+                // is committed TOGETHER with it, as one composition result.
+                // Any other action commits the word alone first.
+                let mut confirmed: Option<String> = None;
                 for action in actions {
+                    if !matches!(action, Action::Commit(_)) {
+                        if let Some(word) = confirmed.take() {
+                            commit(&word, CommitMode::Replace);
+                        }
+                    }
                     match action {
                         Action::Replace {
                             backspace_count,
@@ -1943,37 +1992,18 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                         }
                         Action::ConfirmComposition(text) => {
                             debug!("ConfirmComposition: text={}", text);
-                            if let Err(e) = self.this.write_text(
-                                &context,
-                                &text,
-                                text.chars().count(),
-                                sink.clone(),
-                            ) {
-                                debug!("Failed to write final text: {:?}", e);
-                            }
-                            if let Err(e) = self.this.end_composition(&context) {
-                                debug!("Failed to end composition: {:?}", e);
-                            }
-
-                            // Reset engine
+                            confirmed = Some(text);
                             self.this.vietnamese_engine.borrow_mut().reset();
                             self.this.hide_candidates();
-
                             handled = BOOL(1);
                         }
                         Action::Commit(text) => {
                             debug!("Commit: {} char(s)", text.chars().count());
-                            // Close any composition FIRST — inserting at the
-                            // selection while one is open would land inside it.
-                            if self.this.composition.is_started() {
-                                if let Err(e) = self.this.end_composition(&context) {
-                                    debug!("Failed to end composition: {:?}", e);
-                                }
-                            }
-                            // Insert directly, never as a composition: see
-                            // `insert_text` for the race this avoids.
-                            if let Err(e) = self.this.insert_text(&context, &text) {
-                                debug!("Failed to insert committed text: {:?}", e);
+                            match confirmed.take() {
+                                Some(word) => commit(&(word + &text), CommitMode::Replace),
+                                // An open composition keeps its text and is
+                                // committed with this one after it.
+                                None => commit(&text, CommitMode::Append),
                             }
                             self.this.vietnamese_engine.borrow_mut().reset();
                             self.this.hide_candidates();
@@ -2011,6 +2041,9 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                         }
                     }
                 }
+                if let Some(word) = confirmed.take() {
+                    commit(&word, CommitMode::Replace);
+                }
                 // The key was claimed, so the application will never see it:
                 // if no action used it, type it ourselves rather than lose it.
                 if handled == BOOL(0) {
@@ -2019,9 +2052,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                         ch
                     );
                     self.finalize_composition(&context, false);
-                    if let Err(e) = self.this.insert_text(&context, ch.encode_utf8(&mut [0; 4])) {
-                        debug!("Failed to insert declined key: {:?}", e);
-                    }
+                    commit(ch.encode_utf8(&mut [0; 4]), CommitMode::Append);
                     handled = BOOL(1);
                 }
                 Ok(handled)

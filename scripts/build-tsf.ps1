@@ -93,6 +93,7 @@ $CLSID      = "{E6B8A6C0-1234-5678-9ABC-DEF012345678}"
 # Profile GUIDs (one per input method) live in profiles.rs; the post-install
 # check below enumerates whatever was registered instead of naming one.
 $ClsidKey   = "HKLM:\SOFTWARE\Classes\CLSID\$CLSID"
+$ClsidKeyX86 = "HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID\$CLSID"
 $TipKey     = "HKLM:\SOFTWARE\Microsoft\CTF\TIP\$CLSID"
 
 function Assert-Admin {
@@ -133,6 +134,7 @@ function Stop-TsfHosts {
 function Remove-Registration {
     Remove-Item $TipKey   -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $ClsidKey -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $ClsidKeyX86 -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 <# Register the way the MSI does: run the product's own registration code.
@@ -274,14 +276,21 @@ try {
             Write-Host "       old one loaded — close Word/VS Code/browsers and retry." -ForegroundColor Gray
             exit 1
         }
+        # The 32-bit text service the MSI also ships (for 32-bit apps, e.g. Zalo).
+        & cargo @buildArgs --lib --target i686-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: i686 build failed - rustup target add i686-pc-windows-msvc" -ForegroundColor Red
+            exit 1
+        }
         $sw.Stop()
         Write-Host "      OK ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)" -ForegroundColor Green
     }
 
     $targetDir = Join-Path $repoRoot "target\$profileDir"
     $dllSource = Join-Path $targetDir "buttre_platform.dll"
+    $dllX86Source = Join-Path $repoRoot "target\i686-pc-windows-msvc\$profileDir\buttre_platform.dll"
     $exeSource = Join-Path $targetDir "buttre.exe"
-    foreach ($required in @($dllSource, $exeSource)) {
+    foreach ($required in @($dllSource, $dllX86Source, $exeSource)) {
         if (-not (Test-Path $required)) {
             Write-Host "ERROR: missing $required — build first (drop -NoBuild)." -ForegroundColor Red
             exit 1
@@ -298,6 +307,7 @@ try {
     # ── Report the payload ───────────────────────────────────────────────
     Write-Host "[2/$steps] Payload the MSI would ship:" -ForegroundColor Yellow
     Write-Host "      buttre_platform.dll ($([math]::Round((Get-Item $dllSource).Length / 1MB, 1)) MB)" -ForegroundColor Gray
+    Write-Host "      buttre_platform_x86.dll ($([math]::Round((Get-Item $dllX86Source).Length / 1MB, 1)) MB)" -ForegroundColor Gray
     Write-Host "      buttre.exe          ($([math]::Round((Get-Item $exeSource).Length / 1MB, 1)) MB)" -ForegroundColor Gray
     if (Test-Path $kbSource) {
         Write-Host "      keyboards\          ($((Get-ChildItem "$kbSource\*.toml").Count) layouts)" -ForegroundColor Gray
@@ -340,6 +350,7 @@ try {
     Write-Host "[4/$steps] Installing files..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Force $InstallDir | Out-Null
 
+    Copy-OverLockedFile $dllX86Source (Join-Path $InstallDir "buttre_platform_x86.dll")
     Copy-OverLockedFile $dllSource (Join-Path $InstallDir "buttre_platform.dll")
     Copy-OverLockedFile $exeSource (Join-Path $InstallDir "buttre.exe")
 

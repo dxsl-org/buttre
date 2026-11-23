@@ -46,6 +46,7 @@
              Description="Bộ gõ buttre (bắt buộc).">
       <ComponentRef Id="CoreBinary" />
       <ComponentRef Id="TsfDll" />
+      <ComponentRef Id="TsfDllX86" />
       <ComponentRef Id="StartMenuShortcuts" />
       <ComponentGroupRef Id="KeyboardConfigs" />
       <?ifdef IncludeNomDb ?>
@@ -137,6 +138,19 @@
           <Component Id="TsfDll" Guid="*">
             <File Id="ButtrePlatformDll"
                   Source="$(var.CargoTargetBinDir)\buttre_platform.dll"
+                  KeyPath="yes" />
+          </Component>
+
+          <!--
+            The 32-bit text service, for 32-bit applications (Zalo): TSF loads
+            the DLL into the application, so those cannot use the 64-bit one.
+            `--register-tsf` registers it in the 32-bit registry view
+            (registration::X86_DLL_NAME). Same folder as the 64-bit DLL so it
+            finds the keyboards and the Nôm database the same way.
+          -->
+          <Component Id="TsfDllX86" Guid="*">
+            <File Id="ButtrePlatformDllX86"
+                  Source="$(var.CargoTargetBinDir)\buttre_platform_x86.dll"
                   KeyPath="yes" />
           </Component>
 

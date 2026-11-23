@@ -24,13 +24,25 @@ pub fn is_tsf_registered() -> bool {
     hklm.open_subkey(&clsid_path).is_ok()
 }
 
-/// Register COM server
-pub fn register_com_server(dll_path: &Path) -> Result<()> {
+/// File name of the 32-bit text service, installed next to the 64-bit one.
+///
+/// TSF loads the text service INTO each application, so a 32-bit application
+/// (Zalo is one) can only load a 32-bit DLL — and it finds it through the
+/// 32-bit registry view's CLSID. Without it, Windows would not even let the
+/// user pick buttre in such an application. The `CTF\TIP` keys (profiles,
+/// categories) are shared by both views and need no second copy.
+pub const X86_DLL_NAME: &str = "buttre_platform_x86.dll";
+
+const CLSID_ROOT: &str = "SOFTWARE\\Classes\\CLSID";
+
+/// Register the COM server in one registry view: `0` for this process's own,
+/// `KEY_WOW64_32KEY` for the 32-bit one.
+fn register_com_server(dll_path: &Path, view: u32) -> Result<()> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let clsid_path = format!("SOFTWARE\\Classes\\CLSID\\{}", CLSID_BUTTRE_TEXT_SERVICE);
+    let clsid_path = format!("{CLSID_ROOT}\\{CLSID_BUTTRE_TEXT_SERVICE}");
 
     let (clsid_key, _) = hklm
-        .create_subkey(&clsid_path)
+        .create_subkey_with_flags(&clsid_path, KEY_ALL_ACCESS | view)
         .context("Failed to create CLSID key")?;
 
     clsid_key
@@ -39,7 +51,7 @@ pub fn register_com_server(dll_path: &Path) -> Result<()> {
 
     // InprocServer32
     let (inproc_key, _) = clsid_key
-        .create_subkey("InprocServer32")
+        .create_subkey_with_flags("InprocServer32", KEY_ALL_ACCESS | view)
         .context("Failed to create InprocServer32 key")?;
 
     let dll_path_str = dll_path.to_string_lossy().to_string();
@@ -54,15 +66,33 @@ pub fn register_com_server(dll_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Unregister COM server
-pub fn unregister_com_server() -> Result<()> {
+/// Remove the COM server from one registry view (see [`register_com_server`]).
+/// A key that does not exist is not an error.
+fn unregister_com_server(view: u32) {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let clsid_path = format!("SOFTWARE\\Classes\\CLSID\\{}", CLSID_BUTTRE_TEXT_SERVICE);
-
-    match hklm.delete_subkey_all(&clsid_path) {
-        Ok(_) => Ok(()),
-        Err(_) => Ok(()), // Key might not exist, that's ok
+    if let Ok(root) = hklm.open_subkey_with_flags(CLSID_ROOT, KEY_ALL_ACCESS | view) {
+        let _ = root.delete_subkey_all(CLSID_BUTTRE_TEXT_SERVICE);
     }
+}
+
+/// Register the 64-bit server and, beside it, the 32-bit one for 32-bit
+/// applications — or remove a 32-bit registration whose DLL is gone, so no
+/// 32-bit application is pointed at a missing file.
+///
+/// Only a 64-bit build does this: in a 32-bit process the native view IS the
+/// 32-bit one, already written by [`register_com_server`].
+fn register_com_servers(dll_path: &Path) -> Result<()> {
+    register_com_server(dll_path, 0)?;
+    if cfg!(target_pointer_width = "64") {
+        let x86 = dll_path.with_file_name(X86_DLL_NAME);
+        if x86.exists() {
+            register_com_server(&x86, KEY_WOW64_32KEY)
+                .context("Failed to register the 32-bit text service")?;
+        } else {
+            unregister_com_server(KEY_WOW64_32KEY);
+        }
+    }
+    Ok(())
 }
 
 /// Register every input-method profile under one language, and drop profiles
@@ -407,7 +437,7 @@ pub fn register_server(dll_path: &Path) -> Result<()> {
     let we_inited = co_hr == S_OK;
 
     let result = (|| {
-        register_com_server(dll_path)?;
+        register_com_servers(dll_path)?;
         register_tsf_service(dll_path)?;
         register_categories()?;
         Ok(())
@@ -436,7 +466,8 @@ pub fn unregister_server() -> Result<()> {
     let result = (|| {
         unregister_categories()?;
         unregister_tsf_service()?;
-        unregister_com_server()?;
+        unregister_com_server(0);
+        unregister_com_server(KEY_WOW64_32KEY);
         Ok(())
     })();
 

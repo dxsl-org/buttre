@@ -44,9 +44,22 @@ Push-Location $repoRoot
 try {
     Write-Host "==> Building buttre-platform release..."
     cargo build -p buttre-platform --release
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
 
     $targetDir = Join-Path $repoRoot "target\release"
     $nomDb     = Join-Path $targetDir "buttre_nom.db"
+
+    # The 32-bit text service, for 32-bit applications (Zalo) - TSF loads the
+    # DLL into the application, so they cannot use the 64-bit one. Staged
+    # beside the 64-bit build under the name the MSI and `--register-tsf`
+    # expect (registration::X86_DLL_NAME).
+    Write-Host "==> Building the 32-bit text service (i686)..."
+    cargo build -p buttre-platform --release --lib --target i686-pc-windows-msvc
+    if ($LASTEXITCODE -ne 0) {
+        throw "i686 build failed (exit $LASTEXITCODE) - run: rustup target add i686-pc-windows-msvc"
+    }
+    Copy-Item (Join-Path $repoRoot "target\i686-pc-windows-msvc\release\buttre_platform.dll") `
+              (Join-Path $targetDir "buttre_platform_x86.dll") -Force
 
     # cargo-wix only forwards preprocessor defines to candle via -C/--compiler-arg;
     # args after `--` are NOT passed through.

@@ -109,7 +109,10 @@ impl ITfEditSession_Impl for QueryTextExt_Impl {
                     }
                 }
             };
-            let view: ITfContextView = self.this.context.cast()?;
+            // The view comes from `GetActiveView`: an `ITfContext` is not an
+            // `ITfContextView`, and querying it for one fails in every host —
+            // which is what kept the panel at its fallback position.
+            let view = self.this.context.GetActiveView()?;
             let mut rect = RECT::default();
             let mut clipped = BOOL(0);
             view.GetTextExt(ec, &range, &mut rect, &mut clipped)?;
@@ -142,52 +145,137 @@ impl ITfEditSession_Impl for QueryTextExt_Impl {
 /// Pixels between the measured text and the candidate panel below it.
 pub const PANEL_GAP: i32 = 2;
 
-/// Edit Session 1: Insert Text at Selection
-///
-/// Simple text insertion without composition
-#[implement(ITfEditSession)]
-pub struct InsertText {
-    context: ITfContext,
-    text: HSTRING,
+/// How [`CommitText`] combines its text with an open composition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitMode {
+    /// The composition's text becomes the committed text — a confirmed word
+    /// (possibly with its separator) supersedes whatever was on screen.
+    Replace,
+    /// The committed text goes after what the composition already shows.
+    Append,
 }
 
-impl InsertText {
-    pub fn new(context: ITfContext, text: HSTRING) -> Self {
-        debug!("Creating InsertText edit session: text={}", text);
-        Self { context, text }
+/// Edit Session 1: Commit finished text through a composition.
+///
+/// Committed text — a confirmed word, a separator, a chosen Nôm character —
+/// always reaches the document as a composition that is ended, never as a
+/// bare `InsertTextAtSelection`. Applications on the IMM32 compatibility
+/// layer (Qt, so Telegram) only receive text as a composition RESULT: ending
+/// the word and then inserting the space outside any composition, within one
+/// document lock, made them drop the word — it vanished on every space.
+///
+/// Done in ONE session so that starting, writing and ending cannot be split
+/// apart: with separate sessions, a deferred start left the caller unable to
+/// tell whether there was a composition to end (see `TextService::commit_text`).
+#[implement(ITfEditSession)]
+pub struct CommitText {
+    context: ITfContext,
+    /// The shared slot, read when the session RUNS: a composition started by
+    /// a still-queued `SetCompositionString` is only there by then.
+    slot: Composition,
+    /// The composition open when the session was requested, already taken out
+    /// of the slot by the caller.
+    captured: Option<ITfComposition>,
+    composition_sink: ITfCompositionSink,
+    text: HSTRING,
+    mode: CommitMode,
+    /// UTF-16 units the application already committed from a composition
+    /// that died without telling us — the recovery case of
+    /// [`SetCompositionString`]. A [`CommitMode::Replace`] with no open
+    /// composition overwrites them instead of repeating the word after them.
+    recover: usize,
+}
+
+impl CommitText {
+    pub fn new(
+        context: ITfContext,
+        slot: Composition,
+        captured: Option<ITfComposition>,
+        composition_sink: ITfCompositionSink,
+        text: HSTRING,
+        mode: CommitMode,
+        recover: usize,
+    ) -> Self {
+        Self {
+            context,
+            slot,
+            captured,
+            composition_sink,
+            text,
+            mode,
+            recover,
+        }
     }
 }
 
-impl ITfEditSession_Impl for InsertText_Impl {
+impl ITfEditSession_Impl for CommitText_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
-        debug!("InsertText::DoEditSession - ec={}", ec);
+        debug!(
+            "CommitText::DoEditSession - ec={}, mode={:?}",
+            ec, self.this.mode
+        );
+        let open = self.this.captured.clone().or_else(|| self.this.slot.take());
 
-        // SAFETY:
-        // 1. Called by TSF framework with valid edit cookie (ec)
-        // 2. context is a valid ITfContext interface
-        // 3. cast() to ITfInsertAtSelection is safe - same COM object
-        // 4. InsertTextAtSelection is a COM method with proper error handling
-        // 5. ec is the edit cookie provided by TSF - valid for this edit session
-        // 6. All COM methods check for errors with ?
+        // SAFETY: `ec` is the read/write cookie TSF granted for this session;
+        // every interface was handed to the constructor by the text service.
         unsafe {
-            let insert_at_selection: ITfInsertAtSelection = self.this.context.cast()?;
+            let composition = match open {
+                Some(composition) => composition,
+                None => {
+                    let insert_at_selection: ITfInsertAtSelection = self.this.context.cast()?;
+                    let range =
+                        insert_at_selection.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &[])?;
+                    if self.this.mode == CommitMode::Replace && self.this.recover > 0 {
+                        let mut moved = 0;
+                        range.ShiftStart(
+                            ec,
+                            -(self.this.recover as i32),
+                            &mut moved,
+                            ptr::null(),
+                        )?;
+                    }
+                    let context_composition: ITfContextComposition = self.this.context.cast()?;
+                    context_composition.StartComposition(ec, &range, &self.this.composition_sink)?
+                }
+            };
 
-            // Insert text at current selection
-            let range = insert_at_selection.InsertTextAtSelection(
-                ec,
-                INSERT_TEXT_AT_SELECTION_FLAGS(0),
-                &self.this.text,
-            )?;
+            // Written as one fallible step so the composition is ended on
+            // every path: one left open after a failed write would swallow the
+            // next word into it.
+            let write = || -> Result<()> {
+                let range = composition.GetRange()?;
+                match self.this.mode {
+                    CommitMode::Replace => range.SetText(ec, 0, &self.this.text)?,
+                    CommitMode::Append => {
+                        let tail = range.Clone()?;
+                        tail.Collapse(ec, TF_ANCHOR_END)?;
+                        tail.SetText(ec, 0, &self.this.text)?;
+                        // Keep the appended text INSIDE the composition, so it
+                        // is part of the result the application receives.
+                        composition.ShiftEnd(ec, &tail)?;
+                    }
+                }
 
-            // Collapse range to end (move cursor after inserted text)
-            range.Collapse(ec, TF_ANCHOR_END)?;
+                let range = composition.GetRange()?;
+                match self.this.context.GetProperty(&GUID_PROP_ATTRIBUTE) {
+                    Ok(attribute) => {
+                        if let Err(error) = attribute.Clear(ec, &range) {
+                            error!("Failed to clear display attribute: {}", error);
+                        }
+                    }
+                    Err(error) => error!("Failed to get display-attribute property: {}", error),
+                }
 
-            // Set selection at end
-            set_selection(&self.this.context, ec, range, TF_AE_END)?;
-
-            debug!("InsertText::DoEditSession - completed");
+                let end = range.Clone()?;
+                end.Collapse(ec, TF_ANCHOR_END)?;
+                composition.ShiftStart(ec, &end)?;
+                set_selection(&self.this.context, ec, end, TF_AE_END)
+            };
+            let written = write();
+            composition.EndComposition(ec)?;
+            written?;
         }
-
+        debug!("CommitText::DoEditSession - completed");
         Ok(())
     }
 }
@@ -462,79 +550,6 @@ impl ITfEditSession_Impl for EndComposition_Impl {
 
             debug!("Composition ended successfully");
         }
-
-        Ok(())
-    }
-}
-
-/// Edit Session 4: Get Selection Rectangle
-///
-/// Gets the screen position of the current selection (for candidate window positioning)
-#[implement(ITfEditSession)]
-pub struct SelectionRect {
-    context: ITfContext,
-    rect: Cell<RECT>,
-}
-
-impl SelectionRect {
-    pub fn new(context: ITfContext) -> Self {
-        debug!("Creating SelectionRect edit session");
-        Self {
-            context,
-            rect: Cell::default(),
-        }
-    }
-
-    /// Get the rectangle after DoEditSession completes
-    pub fn rect(&self) -> RECT {
-        self.rect.get()
-    }
-}
-
-impl ITfEditSession_Impl for SelectionRect_Impl {
-    fn DoEditSession(&self, ec: u32) -> Result<()> {
-        debug!("SelectionRect::DoEditSession - ec={}", ec);
-
-        let mut selection = [TF_SELECTION::default(); 1];
-        let mut selection_len = 0;
-
-        // SAFETY:
-        // 1. Called by TSF framework with valid edit cookie (ec)
-        // 2. selection is a valid array on the stack
-        // 3. GetSelection fills the array with current selection
-        // 4. TF_DEFAULT_SELECTION is a valid constant
-        // 5. GetActiveView returns the active view for the context
-        // 6. RECT and BOOL are POD types - default() creates valid instances
-        // 7. GetTextExt writes to rc and clipped - we provide valid mutable references
-        // 8. ManuallyDrop::into_inner properly releases the COM interface
-        unsafe {
-            self.this.context.GetSelection(
-                ec,
-                TF_DEFAULT_SELECTION,
-                &mut selection,
-                &mut selection_len,
-            )?;
-
-            if let Some(sel_range) = &selection[0].range.deref() {
-                let view = self.this.context.GetActiveView()?;
-                let mut rc = RECT::default();
-                let mut clipped = BOOL::default();
-
-                if let Ok(()) = view.GetTextExt(ec, sel_range, &mut rc, &mut clipped) {
-                    self.this.rect.set(rc);
-                    debug!(
-                        "Got selection rect: ({}, {}, {}, {})",
-                        rc.left, rc.top, rc.right, rc.bottom
-                    );
-                } else {
-                    error!("Failed to get text extent");
-                }
-            }
-        }
-
-        // Cleanup
-        let [TF_SELECTION { range, .. }] = selection;
-        let _ = ManuallyDrop::into_inner(range);
 
         Ok(())
     }

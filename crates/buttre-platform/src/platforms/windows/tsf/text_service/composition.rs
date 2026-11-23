@@ -40,6 +40,11 @@ impl Composition {
         self.0.replace(None);
     }
 
+    /// Remove and return the current composition, leaving the slot empty.
+    pub fn take(&self) -> Option<ITfComposition> {
+        self.0.borrow_mut().take()
+    }
+
     /// Access the inner Rc/RefCell (for edit sessions)
     /// This exposes the internal implementation to allow edit sessions to modify it directly
     pub fn inner(&self) -> &Rc<RefCell<Option<ITfComposition>>> {
