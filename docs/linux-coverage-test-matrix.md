@@ -96,13 +96,16 @@ tắt bàn phím buttre trên Windows (Windows biến đổi phím trước khi 
 | **Kubuntu 26.04** Plasma 6.6.6 Wayland | cài mới (không IBus/fcitx5) + `buttre` .deb, chưa chọn Virtual Keyboard | tray · `LinuxKwinUnconfigured` (apt tự cài IBus theo `Recommends`) | — |
 | Kubuntu 26.04 Plasma 6.6.6 Wayland | Virtual Keyboard = buttre | tray · `LinuxWaylandNative`; tray "Thoát" tắt `VirtualKeyboard.enabled` → KWin dừng `buttre --ime`, mở lại tray thì bật lại | ✅ (cả cửa sổ chọn chữ Nôm) |
 | Kubuntu 26.04 Plasma 6.6.6 Wayland | Virtual Keyboard = Fcitx 5 + `fcitx5-buttre` .deb build trên Ubuntu 24.04 (fcitx5 5.1.7 → chạy trên 5.1.19) | Os · `LinuxFcitx5` | ✅ |
+| **Debian 13** GNOME 48 Wayland | mặc định (IBus 1.5.32) + `buttre` .deb | Os · `LinuxIbus` | ✅ (Telex, VNI, Nôm, tắt bằng bàn phím US) |
+| Debian 13 GNOME 48 **X11** (`gnome-xorg`) | mặc định (IBus) | Os · `LinuxIbus` | ✅ |
+| Debian 13 GNOME 48 X11 | `im-config -n fcitx5` + `fcitx5-buttre` .deb (fcitx5 5.1.12) | Os · `LinuxFcitx5` | ✅ |
+| Debian 13 **XFCE** 4.20 X11 | IBus do `im-config` chạy | Os · `LinuxIbus` | ✅ |
 
 Gói `kcm-fcitx5` của Fedora 45 hiện không cài được (`nothing provides libPlasma.so.7`); cấu hình
 fcitx5 bằng `fcitx5-configtool`.
 
 **Chưa kiểm chứng:**
 - Pop!_OS 24.04 dùng COSMIC, compositor riêng — chưa xác minh hỗ trợ `zwp_input_method_v2`.
-- GNOME X11 (Debian 13).
 - Plasma 5.27 **Wayland** (Kubuntu 24.04, không phải phiên mặc định): phiên không khởi động
   được trong VM Hyper-V không GPU kể cả khi không chọn buttre — lỗi môi trường test, chưa
   kiểm được buttre trên đó.

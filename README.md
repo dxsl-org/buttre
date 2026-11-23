@@ -117,8 +117,9 @@ Distro khác (Arch, openSUSE, Void, NixOS, Alpine…) và fcitx5 trên Fedora:
 | `đường` | `dduowngf` | `d9uong72` |
 | `hòa` | `hoaf` | `hoa2` |
 
-- **Chọn kiểu gõ:** phím đổi bàn phím của hệ điều hành, hoặc `Ctrl+Shift+1` Telex,
-  `Ctrl+Shift+2` VNI, `Ctrl+Shift+3` Chữ Nôm, `Ctrl+Shift+4…9` các bàn phím khác.
+- **Chọn kiểu gõ:** phím đổi bàn phím của hệ điều hành (Win+Space, Super+Space…). Trên Windows
+  và Linux Wayland-native còn có `Ctrl+Shift+1` Telex, `Ctrl+Shift+2` VNI, `Ctrl+Shift+3` Chữ Nôm,
+  `Ctrl+Shift+4…9` các bàn phím khác; dưới IBus/fcitx5 thì chọn trong menu bộ gõ của hệ thống.
 - **Bật/tắt nhanh:** `` Ctrl+Shift+` `` trên Windows, `Ctrl+Shift+Space` trên Linux
   (Wayland-native).
 - **Cấu hình:** mở ứng dụng **buttre** từ menu ứng dụng, hoặc menu chuột phải của icon buttre.
