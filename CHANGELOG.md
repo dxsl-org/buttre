@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.9.2-beta] — 2026-11-23
+
 - windows (TSF): sửa gõ trong Telegram (và app Qt/IMM32 khác) — chữ gạch chân biến mất khi gõ Space. Từ được chốt rồi dấu cách được chèn riêng bằng `InsertTextAtSelection` ngoài composition, trong cùng một lần khoá văn bản; lớp tương thích IMM32 chỉ giao chữ cho app dưới dạng kết quả composition nên làm rơi cả từ. Giờ mọi chữ chốt (từ + dấu phân cách, ký tự Nôm đã chọn, phím engine trả lại) đi qua một composition được đóng ngay trong MỘT edit session (`CommitText`), như SampleIME của Microsoft; bỏ edit session `InsertText`
 - windows (TSF): cửa sổ ứng viên Nôm hiện ở góc màn hình (100, 100) trên Chrome, Signal, Windows Terminal — `QueryTextExt` lấy `ITfContextView` bằng QueryInterface trên `ITfContext` (không bao giờ thành công) thay vì `GetActiveView`, nên chưa lần đo nào thành công ở bất kỳ app nào; app có caret Win32 (Notepad, Telegram) chỉ đúng nhờ fallback caret hệ thống. Lỗi của chính edit session giờ được ghi log. Bỏ edit session `SelectionRect` không dùng
 - windows (TSF): chọn được buttre trong app 32-bit (Zalo) — TSF nạp DLL vào chính app nên app 32-bit cần DLL 32-bit, đăng ký CLSID ở registry view 32-bit. MSI giờ kèm `buttre_platform_x86.dll` (build `i686-pc-windows-msvc`) cạnh DLL 64-bit; `--register-tsf` đăng ký nó vào view 32-bit (gỡ đăng ký khi không có file), `--unregister-tsf` gỡ cả hai view. Build cần `rustup target add i686-pc-windows-msvc`
