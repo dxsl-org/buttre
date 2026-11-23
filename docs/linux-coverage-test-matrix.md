@@ -93,6 +93,9 @@ tắt bàn phím buttre trên Windows (Windows biến đổi phím trước khi 
 | CachyOS **Hyprland 0.57** | `hyprland.lua`: `hl.exec_cmd` buttre `--ime` + `--autostart`, waybar | tray · `LinuxWaylandNative` (icon trên waybar) | ✅ |
 | **Kubuntu 24.04** Plasma 5.27 X11 | mặc định (fcitx5) + `buttre` và `fcitx5-buttre` .deb | Os · `LinuxFcitx5` (IBus không bị kéo vào) | ✅ |
 | Kubuntu 24.04 Plasma 5.27 X11 | chuyển sang IBus (`im-config`) | Os · `LinuxIbus` | ✅ |
+| **Kubuntu 26.04** Plasma 6.6.6 Wayland | cài mới (không IBus/fcitx5) + `buttre` .deb, chưa chọn Virtual Keyboard | tray · `LinuxKwinUnconfigured` (apt tự cài IBus theo `Recommends`) | — |
+| Kubuntu 26.04 Plasma 6.6.6 Wayland | Virtual Keyboard = buttre | tray · `LinuxWaylandNative`; tray "Thoát" tắt `VirtualKeyboard.enabled` → KWin dừng `buttre --ime`, mở lại tray thì bật lại | ✅ (cả cửa sổ chọn chữ Nôm) |
+| Kubuntu 26.04 Plasma 6.6.6 Wayland | Virtual Keyboard = Fcitx 5 + `fcitx5-buttre` .deb build trên Ubuntu 24.04 (fcitx5 5.1.7 → chạy trên 5.1.19) | Os · `LinuxFcitx5` | ✅ |
 
 Gói `kcm-fcitx5` của Fedora 45 hiện không cài được (`nothing provides libPlasma.so.7`); cấu hình
 fcitx5 bằng `fcitx5-configtool`.
