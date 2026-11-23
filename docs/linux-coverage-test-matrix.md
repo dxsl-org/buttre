@@ -16,7 +16,8 @@ desktop chỉ ở bước bật sau khi cài:
 | Môi trường | Cài | Bật |
 |---|---|---|
 | GNOME | gói chính | Settings → Keyboard → Input Sources → thêm buttre; Super+Space |
-| XFCE, MATE, Cinnamon… (IBus) | gói chính | `ibus-setup` → thêm buttre |
+| Cinnamon (Linux Mint) | gói chính | System Settings → Keyboard → Layouts → thêm buttre; Super+Space |
+| XFCE, MATE… (IBus) | gói chính | `ibus-setup` → thêm buttre |
 | KDE Plasma Wayland | gói chính | System Settings → Virtual Keyboard → "buttre (Wayland IME)" |
 | sway / Hyprland | gói chính | `exec buttre --ime` trong config compositor |
 | Người dùng **fcitx5** | gói chính **+ `fcitx5-buttre`** | thêm buttre trong cấu hình fcitx5 |

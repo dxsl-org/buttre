@@ -135,7 +135,18 @@ Bản 0.9.2-beta trở về trước chỉ có một input source `buttre` với
 `buttre` trở thành "buttre Telex", VNI/Nôm cần thêm một lần. Bàn phím TOML thêm sau khi cài chỉ
 hiện sau khi IBus dựng lại cache: `ibus write-cache && ibus restart` (hoặc đăng nhập lại).
 
-`ibus-setup` chỉ dùng trên các desktop không-GNOME (XFCE, MATE…) hoặc khi chạy IBus độc lập.
+### Cinnamon (Linux Mint) — qua IBus
+
+Cinnamon quản input source giống GNOME (không dùng `ibus-setup`):
+
+1. **System Settings → Keyboard → Layouts → (+)** → chọn **buttre Telex**, **buttre VNI**,
+   **buttre Chữ Nôm** hoặc bàn phím dân tộc. CLI: thêm `('ibus', 'buttre')`, `('ibus', 'buttre-vni')`…
+   vào `gsettings get org.cinnamon.desktop.input-sources sources`.
+2. Đổi kiểu gõ: **Super+Space**, hoặc applet bàn phím trên panel (hiện TELEX / VNI / NÔM). Chọn
+   "English (US)" là tắt.
+3. "Cấu hình buttre…" nằm trong menu của applet bàn phím.
+
+`ibus-setup` chỉ dùng trên các desktop không tự quản input source (XFCE, MATE…) hoặc khi chạy IBus độc lập.
 
 ### sway / Hyprland / KDE — Wayland-native (không cần IBus)
 
