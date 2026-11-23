@@ -48,7 +48,7 @@ install -m 644 installers/linux/buttre.xml "$COMPONENTDIR/buttre.xml"
 echo "🎨 Installing icons..."
 install -m 644 crates/buttre-platform/icons/vietnamese.png "$ICONDIR/buttre.png"
 install -m 644 crates/buttre-platform/icons/vietnamese.png "$PIXMAPDIR/buttre.png"
-for m in telex vni nom custom; do
+for m in english telex vni nom custom; do
     install -m 644 "crates/buttre-platform/icons/$m.png" "$ICONDIR/buttre-$m.png"
 done
 gtk-update-icon-cache -f "$PREFIX/share/icons/hicolor" 2>/dev/null || true

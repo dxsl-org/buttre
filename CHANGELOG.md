@@ -19,6 +19,10 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 - linux: `scripts/install-linux-auto.sh` viết lại — không tự đoán môi trường bằng thứ tự cố định nữa mà hỏi chính binary vừa build qua cờ mới `buttre --detect` (in một từ: `ibus`, `fcitx5`, `fcitx5-no-addon`, `wayland-native`, `kwin-unconfigured`, `none` — cùng kết luận tray dùng). Cài đủ bộ file như gói .deb/.rpm (bàn phím dân tộc, dữ liệu Nôm, `buttre-ime.desktop`, autostart), với fcitx5 tự build và cài addon `fcitx5-buttre`, rồi in đúng bước bật cho GNOME/Cinnamon/KDE/sway/Hyprland
 - linux: addon fcitx5-buttre giờ được tìm trong mọi thư mục `XDG_DATA_DIRS` như fcitx5 (trước chỉ `/usr/share`, `/usr/local/share`, `~/.local/share` — NixOS bị báo nhầm "chưa cài addon")
 - linux: `scripts/install-ibus.sh` ghi entry autostart chạy `buttre --autostart` (trước là `buttre` trần: lần đăng nhập đầu sau khi cài mở cửa sổ Cấu hình và không chờ IBus khởi động)
+- linux: cài gói `.deb` lên máy dùng fcitx5 (Kubuntu 24.04 mặc định) không còn kéo IBus vào và làm `im-config` chuyển cả phiên sang IBus — gói chỉ còn `Recommends: ibus | fcitx5` thay vì bắt buộc IBus (KDE/sway/Hyprland gõ qua Wayland-native, không cần framework nào)
+- linux: gói `fcitx5-buttre` không cài được cùng gói `buttre` (`trying to overwrite '/usr/share/icons/hicolor/128x128/apps/buttre-nom.png'`) — icon menu giờ chỉ nằm trong gói `buttre` (thêm `buttre-english.png`), `fcitx5-buttre` phụ thuộc `buttre` (cần từ điển Nôm và bàn phím trong `/usr/share/buttre`)
+- `Cargo.lock` được commit để build từ mã nguồn tái lập được (trước đây bị gitignore: mỗi lần build lấy dependency mới nhất, đòi Rust 1.95 thay vì 1.90)
+- docs: hướng dẫn build và cài từ mã nguồn cho mọi distro Linux (`docs/linux-build-from-source.md`; lệnh cài gói đã kiểm bằng build sạch trong container Debian 13, Ubuntu 24.04, Fedora, Arch, openSUSE Tumbleweed, Void, Alpine, NixOS); viết lại `README.md`
 
 ## [0.9.2-beta] — 2026-11-23
 

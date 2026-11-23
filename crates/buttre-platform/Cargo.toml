@@ -161,7 +161,12 @@ Telex, VNI, and Nôm typing modes via the IBus framework."""
 section = "x11"
 priority = "optional"
 # libpangocairo: the KDE (Wayland v1) Nôm candidate popup draws with it.
-depends = "ibus (>= 1.5), libc6 (>= 2.31), libpangocairo-1.0-0"
+# No hard IBus dependency: KDE/sway/Hyprland type through Wayland-native, and
+# pulling ibus into a fcitx5 system (Kubuntu's default) made im-config's
+# "default" mode switch the whole session to IBus. A Recommends OR-group is
+# already satisfied by whichever framework is installed.
+depends = "libc6 (>= 2.31), libpangocairo-1.0-0"
+recommends = "ibus (>= 1.5) | fcitx5"
 maintainer-scripts = "../../installers/linux/debian/"
 # NOTE: `target/release/buttre_nom.db` is required for Nôm input mode in production.
 # It is staged by `crates/buttre-platform/build.rs` from one of:
@@ -187,13 +192,16 @@ assets = [
     # this basename and overrides it, so the two never double-launch.
     ["../../installers/linux/buttre-autostart.desktop",        "etc/xdg/autostart/buttre.desktop",      "644"],
     # App icon (launchers), plus one icon per IBus engine — `<icon>` in the
-    # `buttre --ibus-engines` list (ibus_engines.rs); without them the
-    # input-source switcher shows text only.
+    # `buttre --ibus-engines` list (ibus_engines.rs) — and per entry of the
+    # fcitx5-buttre addon's panel menu (english/telex/vni/nom); without them
+    # the switchers show text only. Shipped HERE only: the addon package
+    # depends on this one, two packages owning one file block installation.
     ["icons/vietnamese.png",                                   "usr/share/icons/hicolor/128x128/apps/buttre.png", "644"],
     ["icons/telex.png",                                        "usr/share/icons/hicolor/128x128/apps/buttre-telex.png", "644"],
     ["icons/vni.png",                                          "usr/share/icons/hicolor/128x128/apps/buttre-vni.png", "644"],
     ["icons/nom.png",                                          "usr/share/icons/hicolor/128x128/apps/buttre-nom.png", "644"],
     ["icons/custom.png",                                       "usr/share/icons/hicolor/128x128/apps/buttre-custom.png", "644"],
+    ["icons/english.png",                                      "usr/share/icons/hicolor/128x128/apps/buttre-english.png", "644"],
     ["../../keyboards/cham.toml",                              "usr/share/buttre/keyboards/",           "644"],
     ["../../keyboards/cham_akhar_thrah.toml",                  "usr/share/buttre/keyboards/",           "644"],
     ["../../keyboards/hmong.toml",                             "usr/share/buttre/keyboards/",           "644"],
@@ -222,6 +230,7 @@ assets = [
     { source = "icons/vni.png",                                dest = "/usr/share/icons/hicolor/128x128/apps/buttre-vni.png",   mode = "644" },
     { source = "icons/nom.png",                                dest = "/usr/share/icons/hicolor/128x128/apps/buttre-nom.png",   mode = "644" },
     { source = "icons/custom.png",                             dest = "/usr/share/icons/hicolor/128x128/apps/buttre-custom.png", mode = "644" },
+    { source = "icons/english.png",                            dest = "/usr/share/icons/hicolor/128x128/apps/buttre-english.png", mode = "644" },
     { source = "../../keyboards/cham.toml",                    dest = "/usr/share/buttre/keyboards/cham.toml",                  mode = "644" },
     { source = "../../keyboards/cham_akhar_thrah.toml",        dest = "/usr/share/buttre/keyboards/cham_akhar_thrah.toml",      mode = "644" },
     { source = "../../keyboards/hmong.toml",                   dest = "/usr/share/buttre/keyboards/hmong.toml",                 mode = "644" },

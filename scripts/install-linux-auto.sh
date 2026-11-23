@@ -53,7 +53,7 @@ install_files() {
     sudo install -Dm644 installers/linux/buttre-autostart.desktop /etc/xdg/autostart/buttre.desktop
     local icons=/usr/share/icons/hicolor/128x128/apps
     sudo install -Dm644 crates/buttre-platform/icons/vietnamese.png "$icons/buttre.png"
-    for m in telex vni nom custom; do
+    for m in english telex vni nom custom; do
         sudo install -Dm644 "crates/buttre-platform/icons/$m.png" "$icons/buttre-$m.png"
     done
     if command -v gtk-update-icon-cache >/dev/null; then

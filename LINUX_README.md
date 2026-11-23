@@ -1,7 +1,7 @@
 # 🐧 buttre Linux — Bộ Gõ Tiếng Việt
 
-**Phiên bản**: 0.7.0-beta
-**Framework**: IBus (GNOME/X11) + Wayland-native `zwp_input_method_v2` (sway/KDE/Hyprland)
+**Phiên bản**: 0.9.2-beta
+**Framework**: IBus, fcitx5 (addon) và Wayland-native `zwp_input_method_v2` (KDE Plasma/sway/Hyprland) — buttre tự nhận diện (`buttre --doctor`)
 **Trạng thái**: ✅ Hoạt động — verify tự động trên CI (ibus-daemon thật + headless sway)
 
 ---
@@ -59,65 +59,36 @@
 Tải từ [Releases](https://github.com/dxsl-org/buttre/releases):
 
 ```bash
-sudo apt install ./buttre-*-linux-x86_64.deb       # Debian/Ubuntu
+sudo apt install ./buttre-*-linux-x86_64.deb       # Debian/Ubuntu/Mint/Pop!_OS
 sudo dnf install ./buttre-*-linux-x86_64.rpm       # Fedora/RHEL
 ```
+
+Dùng fcitx5 (Kubuntu 24.04 mặc định dùng fcitx5): cài thêm gói addon, cùng lúc với gói chính:
+
+```bash
+sudo apt install ./buttre-*-linux-x86_64.deb ./fcitx5-buttre-*-linux-x86_64.deb
+```
+
+Gói `.deb` không bắt buộc IBus: máy đã có IBus hoặc fcitx5 thì giữ nguyên framework đó.
 
 `ibus-daemon` đang chạy không tự thấy engine mới: **đăng xuất rồi đăng nhập lại** (hoặc
 chạy `ibus restart`) trước khi thêm buttre ở bước [Cấu Hình](#️-cấu-hình). Gói không
 cài tray trên GNOME/IBus — mỗi kiểu gõ là một input source của hệ thống; chạy `buttre`
 (menu ứng dụng) để mở cửa sổ Cấu hình.
 
-Build từ source thì làm theo các mục dưới.
+### Build từ mã nguồn
 
-### Yêu Cầu
-
-```bash
-# Debian/Ubuntu
-sudo apt install ibus libibus-1.0-dev build-essential
-
-# Fedora/RHEL
-sudo dnf install ibus ibus-devel gcc
-
-# Arch
-sudo pacman -S ibus base-devel
-
-# Rust (nếu chưa cài)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-### Build & Cài Đặt
+Distro không có gói sẵn (Arch, openSUSE, Void, Alpine, NixOS…) hoặc muốn bản mới nhất:
 
 ```bash
-# Clone repository
 git clone https://github.com/dxsl-org/buttre
 cd buttre
-
-# Build và cài theo môi trường đang dùng (IBus, fcitx5, KDE, sway/Hyprland) —
-# chạy bằng user đang đăng nhập trong phiên đồ hoạ, KHÔNG sudo (script tự gọi sudo).
-# Dùng `buttre --detect` để biết đường gõ; với fcitx5 tự build luôn addon fcitx5-buttre.
-./scripts/install-linux-auto.sh
-
-# Chỉ IBus (cài cổ điển)
-sudo ./scripts/install-ibus.sh
-
-# Hoặc build gói distro (.deb / .rpm)
-./installers/linux/build_packages.sh
+./scripts/install-linux-auto.sh   # chạy bằng user đang đăng nhập, không sudo
 ```
 
-### Build Thủ Công
-
-```bash
-# Chỉ build
-cargo build --release -p buttre-platform
-
-# Cài đặt thủ công
-sudo install -m 755 target/release/buttre /usr/bin/
-sudo install -m 644 installers/linux/buttre.xml /usr/share/ibus/component/buttre.xml
-
-# Khởi động lại IBus
-ibus restart
-```
+Gói cần cài trước cho từng distro, cách cài thủ công, gỡ cài đặt:
+[docs/linux-build-from-source.md](docs/linux-build-from-source.md). Tự đóng gói `.deb`/`.rpm`:
+`./installers/linux/build_packages.sh`.
 
 ---
 

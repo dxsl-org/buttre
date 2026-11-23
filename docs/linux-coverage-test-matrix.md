@@ -91,13 +91,18 @@ tắt bàn phím buttre trên Windows (Windows biến đổi phím trước khi 
 | CachyOS KDE Wayland | fcitx5 kiểu Arch wiki (`/etc/environment` + autostart, không chọn Virtual Keyboard) | Os · `LinuxFcitx5` (chờ fcitx5 0,5 s) | — |
 | CachyOS sway | `exec buttre --ime` + `exec buttre --autostart` | tray · `LinuxWaylandNative` (icon trên swaybar) | ✅ |
 | CachyOS **Hyprland 0.57** | `hyprland.lua`: `hl.exec_cmd` buttre `--ime` + `--autostart`, waybar | tray · `LinuxWaylandNative` (icon trên waybar) | ✅ |
+| **Kubuntu 24.04** Plasma 5.27 X11 | mặc định (fcitx5) + `buttre` và `fcitx5-buttre` .deb | Os · `LinuxFcitx5` (IBus không bị kéo vào) | ✅ |
+| Kubuntu 24.04 Plasma 5.27 X11 | chuyển sang IBus (`im-config`) | Os · `LinuxIbus` | ✅ |
 
 Gói `kcm-fcitx5` của Fedora 45 hiện không cài được (`nothing provides libPlasma.so.7`); cấu hình
 fcitx5 bằng `fcitx5-configtool`.
 
 **Chưa kiểm chứng:**
 - Pop!_OS 24.04 dùng COSMIC, compositor riêng — chưa xác minh hỗ trợ `zwp_input_method_v2`.
-- Plasma 5.27 (Kubuntu 24.04), GNOME X11 (Debian 13).
+- GNOME X11 (Debian 13).
+- Plasma 5.27 **Wayland** (Kubuntu 24.04, không phải phiên mặc định): phiên không khởi động
+  được trong VM Hyper-V không GPU kể cả khi không chọn buttre — lỗi môi trường test, chưa
+  kiểm được buttre trên đó.
 
 Hyprland bản mới (0.57) đọc `hyprland.lua`; có file này thì `hyprland.conf` (cú pháp `exec-once`) bị bỏ qua.
 

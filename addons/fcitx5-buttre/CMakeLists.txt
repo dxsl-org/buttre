@@ -65,14 +65,19 @@ install(FILES buttre-addon.conf
 install(FILES buttre-im.conf
         DESTINATION "${CMAKE_INSTALL_DATADIR}/fcitx5/inputmethod" RENAME buttre.conf)
 
-# Per-method icons for the panel menu (the same PNGs the tray uses),
-# published into the icon theme as buttre-<method>.
-set(BUTTRE_ICON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/buttre-platform/icons")
-foreach(method english telex vni nom)
-    install(FILES "${BUTTRE_ICON_SRC}/${method}.png"
-            DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps"
-            RENAME "buttre-${method}.png")
-endforeach()
+# Per-method icons for the panel menu (the same PNGs the tray uses), named
+# buttre-<method> in the icon theme. Packaged layout: the main `buttre`
+# package ships them (this addon depends on it) — two packages owning one
+# file make dpkg refuse the second. A dev install from a checkout has no
+# main package, so it installs them itself.
+if(NOT BUTTRE_PACKAGED)
+    set(BUTTRE_ICON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/buttre-platform/icons")
+    foreach(method english telex vni nom)
+        install(FILES "${BUTTRE_ICON_SRC}/${method}.png"
+                DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps"
+                RENAME "buttre-${method}.png")
+    endforeach()
+endif()
 
 # ── Packaging (CPack, gated on BUTTRE_PACKAGED) ─────────────────────────────
 # One separate `fcitx5-buttre` .deb, the same shape every fcitx5 addon in
@@ -93,10 +98,11 @@ if(BUTTRE_PACKAGED)
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Vietnamese input method engine (buttre) addon for fcitx5")
     # dpkg-shlibdeps derives the real libFcitx5Core/libc dependency set from
     # the compiled .so — hand-written Depends would go stale on the next
-    # toolchain bump. `fcitx5` itself is the one dependency shlibdeps cannot
-    # see (the daemon, not a linked lib).
+    # toolchain bump. `fcitx5` (the daemon) and `buttre` (the Nôm
+    # dictionary, bundled keyboards and menu icons under /usr/share) are
+    # what shlibdeps cannot see.
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "fcitx5")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "fcitx5, buttre")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
     include(CPack)
 endif()
