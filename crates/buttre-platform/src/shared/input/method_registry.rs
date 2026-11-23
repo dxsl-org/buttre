@@ -72,40 +72,24 @@ impl MethodRegistry {
         });
     }
 
-    /// Scan keyboards/ directory for custom methods
+    /// Register every keyboard TOML across the keyboard dirs (user copies
+    /// shadow shipped ones — `keyboard_files`).
     fn scan_custom_methods(&mut self) -> anyhow::Result<()> {
-        let custom_dir = buttre_core::vietnamese::get_custom_dir();
+        for path in buttre_core::vietnamese::keyboard_files() {
+            // Skip built-in methods (they're already registered)
+            let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(file_stem, "telex" | "vni" | "nom") {
+                continue;
+            }
 
-        if !custom_dir.exists() {
-            tracing::debug!(
-                "Custom keyboards directory does not exist: {:?}",
-                custom_dir
-            );
-            return Ok(());
-        }
-
-        // Scan for .toml files
-        for entry in std::fs::read_dir(&custom_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                // Skip built-in methods (they're already registered)
-                let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
-                if matches!(file_stem, "telex" | "vni" | "nom") {
-                    continue;
+            // Try to load config to get metadata
+            match self.load_custom_method_info(&path) {
+                Ok(info) => {
+                    tracing::info!("Registered custom method: {} from {:?}", info.name, path);
+                    self.methods.push(info);
                 }
-
-                // Try to load config to get metadata
-                match self.load_custom_method_info(&path) {
-                    Ok(info) => {
-                        tracing::info!("Registered custom method: {} from {:?}", info.name, path);
-                        self.methods.push(info);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to load custom method from {:?}: {}", path, e);
-                    }
+                Err(e) => {
+                    tracing::warn!("Failed to load custom method from {:?}: {}", path, e);
                 }
             }
         }

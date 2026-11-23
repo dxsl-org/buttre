@@ -42,11 +42,15 @@ install -m 755 "$TARGET_DIR/release/buttre" "$BINDIR/"
 echo "📄 Installing component..."
 install -m 644 installers/linux/buttre.xml "$COMPONENTDIR/buttre.xml"
 
-# Install engine icon: hicolor for GNOME/IBus, pixmaps as a legacy fallback.
-# Resolves <icon>buttre</icon> in buttre.xml (else the switcher shows only text).
-echo "🎨 Installing icon..."
+# Install icons: hicolor for GNOME/IBus, pixmaps as a legacy fallback. `buttre`
+# is the app icon; `buttre-<method>` back each engine's <icon> in the list
+# `buttre --ibus-engines` prints (else the switcher shows only text).
+echo "🎨 Installing icons..."
 install -m 644 crates/buttre-platform/icons/vietnamese.png "$ICONDIR/buttre.png"
 install -m 644 crates/buttre-platform/icons/vietnamese.png "$PIXMAPDIR/buttre.png"
+for m in telex vni nom custom; do
+    install -m 644 "crates/buttre-platform/icons/$m.png" "$ICONDIR/buttre-$m.png"
+done
 gtk-update-icon-cache -f "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 
 # Install a system-wide launcher so the tray/config app is reachable from the

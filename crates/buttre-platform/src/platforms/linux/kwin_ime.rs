@@ -5,14 +5,19 @@
 //! spawns/respawns `buttre --ime` itself. Quitting the tray therefore does
 //! NOT stop typing — KWin keeps (re)starting the engine in the background.
 //!
-//! The supported off switch is the same one the "Virtual Keyboard" KCM
-//! uses: the writable `enabled` property on `org.kde.kwin.VirtualKeyboard`
-//! at `/VirtualKeyboard`. Verified live on Plasma 6: `enabled=false` makes
-//! KWin terminate the IME process and stop respawning it; `enabled=true`
-//! respawns it immediately.
+//! The off switch the "Virtual Keyboard" KCM used up to Plasma 6.6 is the
+//! writable `enabled` property on `org.kde.kwin.VirtualKeyboard` at
+//! `/VirtualKeyboard`: `enabled=false` makes KWin terminate the IME process
+//! and stop respawning it; `enabled=true` respawns it immediately.
+//!
+//! Plasma 6.7 removed that property (replaced by the on-screen-keyboard
+//! visibility `mode`, which never stops the process); the only remaining
+//! stop is clearing kwinrc's `InputMethod`, which is the user's config. So
+//! on those versions the tray's "Thoát" turns `Settings::enabled` off
+//! instead — the running engine obeys it live (see `tray_app`).
 //!
 //! Everything here is best-effort: any failure only means the background
-//! engine keeps running (the pre-existing behaviour), never a tray fault.
+//! engine keeps running, never a tray fault.
 
 use std::path::PathBuf;
 
@@ -84,13 +89,14 @@ pub fn manages_buttre_ime() -> bool {
         .is_some_and(|c| kwinrc_points_at_buttre(&c))
 }
 
-/// Flip KWin's IME on/off (no-op unless [`manages_buttre_ime`]).
+/// Flip KWin's IME process on/off (no-op unless [`manages_buttre_ime`];
+/// Plasma ≤ 6.6 only — see module docs).
 ///
-/// `false`: KWin terminates `buttre --ime` and stops respawning it — the
-/// tray's "Thoát" uses this so quit really quits. `true`: KWin starts the
-/// engine again — tray startup uses this so relaunching the tray restores
-/// typing after a previous quit. Blocking (one session-bus round trip);
-/// call from the tray's event loop only, never from a keystroke path.
+/// `false`: KWin terminates `buttre --ime` and stops respawning it — part of
+/// the tray's "Thoát". `true`: KWin starts the engine again — tray startup
+/// uses this so relaunching the tray brings the process back after a quit.
+/// Blocking (one session-bus round trip); call from the tray's event loop
+/// only, never from a keystroke path.
 pub fn set_kwin_ime_enabled(enabled: bool) {
     if !manages_buttre_ime() {
         return;
@@ -111,6 +117,12 @@ pub fn set_kwin_ime_enabled(enabled: bool) {
     });
     match result {
         Ok(()) => tracing::info!("kwin_ime: set VirtualKeyboard.enabled = {enabled}"),
+        // Plasma ≥ 6.7: the property is gone — expected, see module docs.
+        Err(zbus::Error::MethodError(name, _, _))
+            if name.as_str() == "org.freedesktop.DBus.Error.UnknownProperty" =>
+        {
+            tracing::info!("kwin_ime: KWin has no IME on/off switch (Plasma ≥ 6.7)");
+        }
         // KWin absent (not Plasma, X11 session) or interface changed —
         // background engine just keeps its previous state.
         Err(e) => tracing::warn!("kwin_ime: could not set enabled={enabled}: {e}"),

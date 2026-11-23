@@ -8,14 +8,14 @@
 
 ## 📦 Tính Năng
 
-- ✅ **Telex + VNI** — chuyển kiểu gõ từ tray áp dụng ngay vào engine đang chạy (không cần restart)
+- ✅ **Mỗi kiểu gõ một input source** — "buttre Telex", "buttre VNI", "buttre Chữ Nôm" và từng bàn phím TOML, đổi bằng Super+Space như macOS và Windows (IBus; ADR-0005)
 - ✅ **Composition thời gian thực** — preedit có gạch chân, dựng dần theo từng phím
 - ✅ **Backspace thông minh** — thu gọn từ đang gõ theo raw key
 - ✅ **Hỗ trợ Shift/CapsLock** — chữ hoa/thường (XKB xử lý trước khi tới engine)
 - ✅ **Dấu câu/space** — commit từ rồi cho ký tự đi qua
 - ✅ **Wayland-native** — `zwp_input_method_v2` cho sway/Hyprland/KDE; tự fallback IBus cho GNOME/X11
 - ✅ **Ô mật khẩu** — bypass engine (không lọt vào composition/learning)
-- ⏳ **Chế độ Nôm** — chạy được nhưng chưa có cửa sổ candidate qua IBus (đang phát triển)
+- ✅ **Chế độ Nôm** — cửa sổ chọn chữ (candidate) qua IBus (GNOME…) và KDE Plasma: Space/Enter chọn chữ đang sáng, 1–9 chọn theo số, ↑↓/PgUp/PgDn chuyển, Esc huỷ. sway/Hyprland chưa có cửa sổ candidate
 
 > **Không tap phím toàn cục:** cả hai backend đều để OS/compositor định tuyến phím tới bộ gõ đang chọn — không theo dõi bàn phím toàn hệ thống, nên không bị nghi là keylogger.
 
@@ -53,6 +53,22 @@
 ---
 
 ## 🚀 Cài Đặt
+
+### Gói cài sẵn (.deb / .rpm)
+
+Tải từ [Releases](https://github.com/dxsl-org/buttre/releases):
+
+```bash
+sudo apt install ./buttre-*-linux-x86_64.deb       # Debian/Ubuntu
+sudo dnf install ./buttre-*-linux-x86_64.rpm       # Fedora/RHEL
+```
+
+`ibus-daemon` đang chạy không tự thấy engine mới: **đăng xuất rồi đăng nhập lại** (hoặc
+chạy `ibus restart`) trước khi thêm buttre ở bước [Cấu Hình](#️-cấu-hình). Gói không
+cài tray trên GNOME/IBus — mỗi kiểu gõ là một input source của hệ thống; chạy `buttre`
+(menu ứng dụng) để mở cửa sổ Cấu hình.
+
+Build từ source thì làm theo các mục dưới.
 
 ### Yêu Cầu
 
@@ -108,9 +124,16 @@ Chọn theo môi trường desktop của bạn.
 
 GNOME **không** dùng `ibus-setup` để thêm engine; nó quản input source qua Settings:
 
-1. **Settings → Keyboard → Input Sources → (+)** → **Vietnamese** → **buttre Vietnamese**.
-   - Hoặc qua CLI: `gsettings get org.gnome.desktop.input-sources sources` rồi thêm `('ibus', 'buttre')`.
-2. Chuyển bộ gõ: **Super+Space** (mặc định của GNOME).
+1. **Settings → Keyboard → Input Sources → (+)** → **Vietnamese** → chọn kiểu gõ: **buttre Telex**,
+   **buttre VNI**, **buttre Chữ Nôm** hoặc một bàn phím TOML. Thêm bao nhiêu kiểu tuỳ ý.
+   - Hoặc qua CLI: thêm `('ibus', 'buttre')` (Telex), `('ibus', 'buttre-vni')`, `('ibus', 'buttre-nom')`
+     vào `gsettings get org.gnome.desktop.input-sources sources`.
+2. Đổi kiểu gõ / tắt tiếng Việt: **Super+Space** (mặc định của GNOME) — chọn bàn phím thường là tắt.
+3. "Cấu hình buttre…" nằm trong menu input source trên thanh trên cùng.
+
+Bản 0.9.2-beta trở về trước chỉ có một input source `buttre` với radio kiểu gõ trong menu; khi nâng cấp,
+`buttre` trở thành "buttre Telex", VNI/Nôm cần thêm một lần. Bàn phím TOML thêm sau khi cài chỉ
+hiện sau khi IBus dựng lại cache: `ibus write-cache && ibus restart` (hoặc đăng nhập lại).
 
 `ibus-setup` chỉ dùng trên các desktop không-GNOME (XFCE, MATE…) hoặc khi chạy IBus độc lập.
 
@@ -125,15 +148,23 @@ exec /usr/bin/buttre --ime
 
 `--ime` tự dò: dùng Wayland-native nếu compositor hỗ trợ, tự fallback sang IBus nếu không (hoặc nếu một IME khác đã giữ seat).
 
+**KDE Plasma:** KWin tự chạy `buttre --ime` theo `~/.config/kwinrc` (System Settings → Keyboard →
+Virtual Keyboard → "buttre (Wayland IME)"). "Thoát" trên tray tắt gõ tiếng Việt (`Settings::enabled`
+= tắt): từ Plasma 6.7 KWin không còn cách tắt tiến trình IME qua D-Bus nên engine vẫn chạy nền, chỉ
+không gõ dấu. Mở lại tray rồi bấm "Bật bộ gõ" (hoặc Ctrl+Shift+Space) để gõ lại.
+
 ### Các chế độ chạy (flags)
 
 | Lệnh | Vai trò |
 |------|---------|
-| `buttre` | App khay hệ thống (tray) — chọn Telex/VNI/Nôm |
+| `buttre` | Tray (Wayland-native) — hoặc cửa sổ Cấu hình trên IBus/fcitx5 |
 | `buttre --ibus` | Engine IBus, do `ibus-daemon` tự spawn theo component XML (không chạy tay) |
+| `buttre --ibus-engines` | In danh sách engine IBus (mỗi kiểu gõ một engine) — `ibus-daemon` đọc khi dựng cache |
 | `buttre --ime` | Engine tự-dò backend (Wayland-native → IBus) cho sway/Hyprland/KDE |
 
-Đổi kiểu gõ trong app tray sẽ tự áp dụng vào engine đang chạy (qua `~/.config/buttre/method`) — không cần restart. Bật/tắt tiếng Việt dùng bộ chuyển input source của OS (Super+Space), không phải app tray.
+Trên IBus, kiểu gõ là input source đang chọn. Trên Wayland-native (không có danh sách input
+source của OS), đổi kiểu gõ trong app tray tự áp dụng vào engine đang chạy (qua
+`~/.config/buttre/method`) — không cần restart.
 
 ### Wayland cho app không-native
 

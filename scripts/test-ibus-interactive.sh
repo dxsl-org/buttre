@@ -12,7 +12,7 @@ BIN="${BUTTRE_BIN:-target/debug/buttre}"
 # --- register the component (user level, no sudo) ---
 COMP_DIR="$HOME/.local/share/ibus/component"
 mkdir -p "$COMP_DIR"
-sed "s|<exec>/usr/bin/buttre --ibus</exec>|<exec>$PWD/$BIN --ibus</exec>|" \
+sed "s|/usr/bin/buttre|$PWD/$BIN|g" \
     installers/linux/buttre.xml > "$COMP_DIR/buttre.xml"
 rm -f ~/.cache/ibus/bus/registry*   # cache must be invalidated to see XML changes
 export IBUS_COMPONENT_PATH=/usr/share/ibus/component:$COMP_DIR

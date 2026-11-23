@@ -370,7 +370,8 @@ language = \"xx\"
 ";
 
 /// `keyboards/bridge-e2e-custom.toml` next to the TEST EXECUTABLE —
-/// `get_custom_dir()`'s highest-priority location, so the ambient lookup in
+/// the exe-side keyboard dir, which outranks the user/package dirs in
+/// `keyboard_dirs()`, so the ambient lookup in
 /// `build_keyboard` resolves here deterministically, whatever the machine's
 /// XDG data dir contains.
 fn e2e_keyboard_path() -> std::path::PathBuf {

@@ -36,6 +36,8 @@ use super::super::engine_bridge::{
 use super::super::learning_sync::{self, LearningWiring};
 use super::super::macro_sync;
 use super::super::method_sync::{self, MethodState};
+use super::candidate_panel::CandidatePanel;
+use super::candidate_render::PAGE_SIZE as CANDIDATE_PAGE_SIZE;
 use super::Unavailable;
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
@@ -113,6 +115,11 @@ pub(crate) struct ImeV1State {
     /// Personal-learning handles (`learning_sync`) — consulted per key
     /// (`sync_learning`) so the "Học thông minh" toggle applies live.
     learning: LearningWiring,
+    /// Nôm candidate popup (KWin input-panel overlay).
+    panel: CandidatePanel,
+    /// Needed to create popup objects from `commit_ops`; set on the first
+    /// registry event (the state is built before its queue exists).
+    qh: Option<QueueHandle<ImeV1State>>,
 }
 
 impl ImeV1State {
@@ -155,6 +162,8 @@ impl ImeV1State {
             seen_generation,
             enabled,
             learning,
+            panel: CandidatePanel::default(),
+            qh: None,
         }
     }
 
@@ -230,7 +239,13 @@ impl ImeV1State {
                         delete_pending = true;
                     }
                 }
-                ImeOp::Preedit(_) | ImeOp::Candidates { .. } | ImeOp::HideCandidates => {}
+                ImeOp::Candidates { items, cursor } => {
+                    if let Some(qh) = &self.qh {
+                        self.panel.show(items, *cursor, qh);
+                    }
+                }
+                ImeOp::HideCandidates => self.panel.hide(),
+                ImeOp::Preedit(_) => {}
             }
         }
         if delete_pending {
@@ -356,6 +371,15 @@ impl ImeV1State {
             return;
         }
 
+        // Nôm list open: selection/cancel keys belong to it, BEFORE the
+        // break-keysym flush (Escape/arrows are break keys; Space/digits
+        // would otherwise be composed).
+        if let Some(outcome) = self.bridge.candidate_key(keysym, CANDIDATE_PAGE_SIZE) {
+            self.commit_ops(outcome.ops);
+            self.swallowed.insert(key);
+            return;
+        }
+
         if is_break_keysym(keysym) {
             let outcome = self.bridge.flush_pending();
             self.commit_ops(outcome.ops);
@@ -406,13 +430,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ImeV1State {
         qh: &QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
-            name, interface, ..
+            name,
+            interface,
+            version,
         } = event
         {
+            state.qh.get_or_insert_with(|| qh.clone());
             if interface == "zwp_input_method_v1" {
                 state.im = Some(
                     registry.bind::<zwp_input_method_v1::ZwpInputMethodV1, _, _>(name, 1, qh, ()),
                 );
+            } else {
+                state
+                    .panel
+                    .bind_global(registry, name, &interface, version, qh);
             }
         }
     }
@@ -445,6 +476,7 @@ impl Dispatch<zwp_input_method_v1::ZwpInputMethodV1, ()> for ImeV1State {
                 state.saw_surrounding = false;
                 state.committed_word.clear();
                 state.bridge.discard();
+                state.panel.hide();
                 tracing::debug!("text input activated (v1 context created)");
             }
             Event::Deactivate { context } => {
@@ -460,6 +492,7 @@ impl Dispatch<zwp_input_method_v1::ZwpInputMethodV1, ()> for ImeV1State {
                     // `commit` argument of preedit_string); only reset OUR
                     // side, emitting nothing.
                     state.bridge.discard();
+                    state.panel.hide();
                     state.swallowed.clear();
                     state.committed_word.clear();
                 }
@@ -499,6 +532,7 @@ impl Dispatch<zwp_input_method_context_v1::ZwpInputMethodContextV1, ()> for ImeV
             // on the client side.
             Event::Reset => {
                 state.bridge.discard();
+                state.panel.hide();
                 state.swallowed.clear();
                 state.committed_word.clear();
             }

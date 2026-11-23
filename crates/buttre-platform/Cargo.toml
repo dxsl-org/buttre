@@ -38,8 +38,6 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
-tray-icon = "0.19"
-muda = "0.15"
 image = { version = "0.24", default-features = false, features = ["png"] }
 single-instance = "0.3"
 bincode = "1.3"
@@ -52,6 +50,13 @@ notify = "6.1"
 # (ADR-0003), and winit 0.29's objc2 0.4 does not build on Rust ≥ 1.100.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 winit = "0.29"
+
+# The Windows tray (`shared/ui/{tray,menu}.rs`). Not on Linux: its tray is a
+# StatusNotifierItem (`ksni`, below) — tray-icon's Linux backend never
+# reports clicks. Not needed by macOS either, but harmless there.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.19", default-features = false }
+muda = { version = "0.15", default-features = false }
 
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -104,10 +109,12 @@ objc = "0.2"
 
 # Linux-specific dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
-# GTK is pulled in transitively by tray-icon/muda's Linux backend; declared
-# directly so `main` can call `gtk::init()` before building the tray menu.
-# Pinned to 0.18 to unify with the exact gtk already in the dependency tree.
-gtk = "0.18"
+# The Linux tray: a StatusNotifierItem of our own (shared/ui/sni_tray.rs).
+# tray-icon's Linux backend (libappindicator) never reports clicks — hosts
+# open its menu on EVERY button — so left-click could not toggle the IME.
+# `blocking`: the tray runs on ksni's own thread; the winit loop only
+# exchanges commands/state with it.
+ksni = { version = "0.3", features = ["blocking"] }
 zbus = "3.0"
 tokio = { version = "1.0", features = ["full"] }
 x11 = { version = "2.21", features = ["xlib", "xtest"] }
@@ -117,6 +124,12 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.8"
+# Nôm candidate popup of the KWin backend (wayland/candidate_panel.rs):
+# drawn with Pango (fontconfig fallback finds a Han/Nôm font) on cairo, both
+# already loaded by GTK; 0.18 unifies with the gtk-rs crates in the tree.
+pangocairo = "0.18"
+# Unlinked temp file backing the popup's wl_shm buffer — no unsafe memfd.
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Endianness marker for `zvariant::to_bytes` in the IBus property wire-format
@@ -147,7 +160,8 @@ buttre is a Vietnamese input method for Linux, providing \
 Telex, VNI, and Nôm typing modes via the IBus framework."""
 section = "x11"
 priority = "optional"
-depends = "ibus (>= 1.5), libc6 (>= 2.31)"
+# libpangocairo: the KDE (Wayland v1) Nôm candidate popup draws with it.
+depends = "ibus (>= 1.5), libc6 (>= 2.31), libpangocairo-1.0-0"
 maintainer-scripts = "../../installers/linux/debian/"
 # NOTE: `target/release/buttre_nom.db` is required for Nôm input mode in production.
 # It is staged by `crates/buttre-platform/build.rs` from one of:
@@ -172,8 +186,14 @@ assets = [
     # ~/.config/autostart/buttre.desktop, if the tray ever writes one, shares
     # this basename and overrides it, so the two never double-launch.
     ["../../installers/linux/buttre-autostart.desktop",        "etc/xdg/autostart/buttre.desktop",      "644"],
-    # Backs <icon>buttre</icon> in buttre.xml — without it the input-source switcher shows text only.
+    # App icon (launchers), plus one icon per IBus engine — `<icon>` in the
+    # `buttre --ibus-engines` list (ibus_engines.rs); without them the
+    # input-source switcher shows text only.
     ["icons/vietnamese.png",                                   "usr/share/icons/hicolor/128x128/apps/buttre.png", "644"],
+    ["icons/telex.png",                                        "usr/share/icons/hicolor/128x128/apps/buttre-telex.png", "644"],
+    ["icons/vni.png",                                          "usr/share/icons/hicolor/128x128/apps/buttre-vni.png", "644"],
+    ["icons/nom.png",                                          "usr/share/icons/hicolor/128x128/apps/buttre-nom.png", "644"],
+    ["icons/custom.png",                                       "usr/share/icons/hicolor/128x128/apps/buttre-custom.png", "644"],
     ["../../keyboards/cham.toml",                              "usr/share/buttre/keyboards/",           "644"],
     ["../../keyboards/cham_akhar_thrah.toml",                  "usr/share/buttre/keyboards/",           "644"],
     ["../../keyboards/hmong.toml",                             "usr/share/buttre/keyboards/",           "644"],
@@ -198,6 +218,10 @@ assets = [
     { source = "../../installers/linux/buttre-ime.desktop",    dest = "/usr/share/applications/buttre-ime.desktop",             mode = "644" },
     { source = "../../installers/linux/buttre-autostart.desktop", dest = "/etc/xdg/autostart/buttre.desktop",                   mode = "644" },
     { source = "icons/vietnamese.png",                         dest = "/usr/share/icons/hicolor/128x128/apps/buttre.png",       mode = "644" },
+    { source = "icons/telex.png",                              dest = "/usr/share/icons/hicolor/128x128/apps/buttre-telex.png", mode = "644" },
+    { source = "icons/vni.png",                                dest = "/usr/share/icons/hicolor/128x128/apps/buttre-vni.png",   mode = "644" },
+    { source = "icons/nom.png",                                dest = "/usr/share/icons/hicolor/128x128/apps/buttre-nom.png",   mode = "644" },
+    { source = "icons/custom.png",                             dest = "/usr/share/icons/hicolor/128x128/apps/buttre-custom.png", mode = "644" },
     { source = "../../keyboards/cham.toml",                    dest = "/usr/share/buttre/keyboards/cham.toml",                  mode = "644" },
     { source = "../../keyboards/cham_akhar_thrah.toml",        dest = "/usr/share/buttre/keyboards/cham_akhar_thrah.toml",      mode = "644" },
     { source = "../../keyboards/hmong.toml",                   dest = "/usr/share/buttre/keyboards/hmong.toml",                 mode = "644" },

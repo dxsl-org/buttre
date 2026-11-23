@@ -93,7 +93,7 @@ pub mod services; // Services Layer
 pub mod state; // Settings, AppState // Keyboard core (from buttre-keyboard)
 
 // Compatibility stubs (will be refactored in Phase 4)
-pub mod vietnamese; // Only ConfigLoader for UI (MethodMetadata, get_custom_dir)
+pub mod vietnamese; // MethodMetadata + resource lookup (keyboard_dirs, Nôm db) for UI
 
 // Re-exports from buttre_engine (types only)
 pub use buttre_engine::InputBuffer;

@@ -1,6 +1,7 @@
 //! Icon loading utilities for tray and menu icons
 
 use anyhow::Result;
+#[cfg(not(target_os = "linux"))]
 use tray_icon::Icon as TrayIcon;
 
 /// Embedded icon bytes
@@ -15,6 +16,7 @@ pub const VNI_ICON_BYTES: &[u8] = include_bytes!("../../../icons/vni.png");
 pub const NOM_ICON_BYTES: &[u8] = include_bytes!("../../../icons/nom.png");
 
 /// Load a tray icon from embedded bytes
+#[cfg(not(target_os = "linux"))]
 pub fn load_icon_from_bytes(bytes: &[u8]) -> Result<TrayIcon> {
     let (icon_rgba, icon_width, icon_height) = decode_rgba(bytes)?;
     Ok(TrayIcon::from_rgba(icon_rgba, icon_width, icon_height)?)
@@ -25,12 +27,14 @@ pub fn load_icon_from_bytes(bytes: &[u8]) -> Result<TrayIcon> {
 /// Both variants are built once at startup from the same source bytes — the
 /// OFF variant must always derive from the ORIGINAL pixels, never from an
 /// already-processed icon, or repeated toggles would compound the transform.
+#[cfg(not(target_os = "linux"))]
 #[derive(Clone)]
 pub struct IconSet {
     pub color: TrayIcon,
     pub grey: TrayIcon,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl IconSet {
     /// Build both variants from embedded PNG bytes, with a 1×1 transparent
     /// fallback on decode failure (same degradation `create_tray_icon` used
@@ -67,7 +71,7 @@ impl IconSet {
 /// faded icon all but disappears — indistinguishable from a dead tray — while
 /// greyscale keeps full contrast and still reads instantly as "not active".
 /// This is the only place that knows how the OFF variant is produced.
-fn greyscale_rgba(rgba: &[u8]) -> Vec<u8> {
+pub(crate) fn greyscale_rgba(rgba: &[u8]) -> Vec<u8> {
     let mut out = rgba.to_vec();
     for px in out.as_chunks_mut::<4>().0 {
         let y = (299 * px[0] as u32 + 587 * px[1] as u32 + 114 * px[2] as u32) / 1000;
@@ -81,18 +85,20 @@ fn greyscale_rgba(rgba: &[u8]) -> Vec<u8> {
 }
 
 /// 1×1 transparent icon — the never-fails fallback.
+#[cfg(not(target_os = "linux"))]
 fn blank_icon() -> TrayIcon {
     TrayIcon::from_rgba(vec![0, 0, 0, 0], 1, 1).expect("a 1x1 RGBA buffer is always valid")
 }
 
 /// Decode embedded PNG bytes to raw RGBA.
-fn decode_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
+pub(crate) fn decode_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
     let image = image::load_from_memory(bytes)?.into_rgba8();
     let (width, height) = image.dimensions();
     Ok((image.into_raw(), width, height))
 }
 
 /// Load a menu icon from embedded bytes
+#[cfg(not(target_os = "linux"))]
 pub fn load_menu_icon(bytes: &[u8]) -> Option<muda::Icon> {
     let image = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (width, height) = image.dimensions();

@@ -1,12 +1,12 @@
-//! IBus property-menu wire format — `IBusPropList` / `IBusProperty`.
+//! IBus wire formats the engine publishes to the panel — the property menu
+//! (`IBusPropList` / `IBusProperty`) and the Nôm candidate popup
+//! (`IBusLookupTable`).
 //!
-//! The IBus panel renders an engine's properties as a menu; under GNOME the
-//! Shell IS that panel, so this is how buttre's method switcher reaches the
-//! top-bar input-source menu (the same mechanism ibus-bamboo / ibus-unikey
-//! use). The radio list is DYNAMIC: the four built-ins plus every custom
-//! keyboard TOML found in the custom dir at build time (see
-//! [`method_items`]) — mind the first-register freeze below when reasoning
-//! about customs added mid-session.
+//! The property menu holds ONE item, "Cấu hình buttre…": the method is the
+//! input source itself (one engine per method, `ibus_engines`, ADR-0005), so
+//! the menu no longer carries method radios — "off" is picking another source.
+//! Under GNOME the Shell is the panel and lists these items in the top-bar
+//! input-source menu below the sources.
 //!
 //! ## Serialization contract
 //!
@@ -17,65 +17,25 @@
 //! fields (`s`, `u`, `b`, `a{sv}`) keep their natural signatures. The daemon
 //! subscribes by signature and silently drops a mismatch, so the field ORDER
 //! and types below must match libibus's `ibus_property_serialize` /
-//! `ibus_prop_list_serialize` byte for byte.
-//!
-//! ## Panel repaint contract (GNOME Shell) — DO NOT BREAK THIS FLOW
-//!
-//! GNOME Shell consumes an engine's `RegisterProperties` exactly ONCE per
-//! global-engine activation: `ibusManager.js` (`_engineChanged`) installs a
-//! one-shot `register-properties` handler and DISCONNECTS it after the first
-//! non-empty list. Every wholesale re-register after that is delivered by the
-//! daemon but silently ignored by the Shell — the top-bar radio never
-//! repaints. Radio-state changes only reach the menu through per-property
-//! `UpdateProperty` signals (`keyboard.js::_ibusPropertyUpdated` matches
-//! key + prop type, then rebuilds the section). Verified on GNOME Shell 50.1
-//! (Ubuntu 26.04) with dbus-monitor: the old register-only approach arrived
-//! on the bus with correct checked-states and still never repainted.
-//!
-//! Therefore EVERY method switch must go through
-//! `ButtreEngine::publish_method_props` (full register for the daemon's
-//! cache + one [`method_prop_updates`] `UpdateProperty` per radio), from all
-//! three trigger paths: the external-change refresh task (`ibus_bus`), the
-//! per-keystroke `sync_method`, and `PropertyActivate`. Do not "simplify"
-//! any of them back to a bare `RegisterProperties` — it will look correct in
-//! a bus trace and still leave the GNOME menu stale.
+//! `ibus_prop_list_serialize` / `ibus_lookup_table_serialize` byte for byte.
 
 use super::ibus::build_ibus_text;
 use std::collections::HashMap;
 use zbus::zvariant::{StructureBuilder, Value};
 
-/// `IBusPropType` values (ibusproperty.h) used by the menu.
+/// `IBusPropType::PROP_TYPE_NORMAL` (ibusproperty.h).
 const PROP_TYPE_NORMAL: u32 = 0;
-const PROP_TYPE_RADIO: u32 = 2;
-const PROP_TYPE_SEPARATOR: u32 = 4;
-/// `IBusPropState` — a radio is drawn checked (`1`) or unchecked (`0`). The
-/// checked value is also what `PropertyActivate` carries for the radio the user
-/// just selected; the engine keys off it to ignore the group's de-select
-/// notifications (see `ibus::ButtreEngine::property_activate`).
+/// `IBusPropState` — meaningless for a NORMAL item; sent unchecked.
 const PROP_STATE_UNCHECKED: u32 = 0;
-pub(crate) const PROP_STATE_CHECKED: u32 = 1;
 
-#[cfg(test)]
-use crate::shared::method_menu::BUILTIN_METHOD_ITEMS;
 /// Property key of the "Cấu hình" (settings) item, echoed back in
-/// `PropertyActivate`. Distinct from any method id so the engine opens the
-/// config window instead of switching method.
+/// `PropertyActivate`.
 pub(crate) use crate::shared::method_menu::CONFIG_KEY;
-
-/// The radio list (`shared::method_menu`). Rebuilt on every
-/// publish, but note the GNOME first-register freeze (module docs): the panel
-/// renders the radio SET it saw on the engine's first `RegisterProperties`,
-/// so a custom TOML added mid-session appears only after an engine restart
-/// (`ibus restart`).
-fn method_items() -> Vec<(String, String)> {
-    crate::shared::method_menu::method_items()
-}
 
 /// One `IBusProperty`. Wire: `(sa{sv} s u v s v b b u v v)` = name, attachments,
 /// key, type, label, icon, tooltip, sensitive, visible, state, sub_props,
 /// symbol. A field typed as `Value` serializes as the `v` variant libibus
-/// expects (see the module contract). `state` is ignored by the panel for
-/// non-radio types, so NORMAL/SEPARATOR items pass `PROP_STATE_UNCHECKED`.
+/// expects (see the module contract).
 fn build_property(key: &str, prop_type: u32, label: &str, state: u32) -> Value<'static> {
     let attachments: HashMap<String, Value<'static>> = HashMap::new();
     let structure = StructureBuilder::new()
@@ -100,96 +60,22 @@ fn empty_prop_list() -> Value<'static> {
     prop_list(Vec::new())
 }
 
-/// Wrap radios in an `IBusPropList`. Wire: `(sa{sv} av)` = name, attachments,
-/// array-of-variant (each an `IBusProperty`).
+/// Wrap properties in an `IBusPropList`. Wire: `(sa{sv} av)` = name,
+/// attachments, array-of-variant (each an `IBusProperty`).
 fn prop_list(props: Vec<Value<'static>>) -> Value<'static> {
     let attachments: HashMap<String, Value<'static>> = HashMap::new();
     Value::from(("IBusPropList".to_string(), attachments, props))
 }
 
-/// The menu property list: one radio per method (with `current` checked), a
-/// separator, then the "Cấu hình" launcher. Pass the result to the engine's
-/// `RegisterProperties` signal.
-///
-/// `current` is a method id (`"telex"`/`"vni"`/`"nom"`); an unknown value simply
-/// leaves every radio unchecked rather than failing.
-pub(crate) fn method_prop_list(current: &str) -> Value<'static> {
-    let mut props = method_prop_updates(current);
-    // Divider, then the settings launcher. The launcher is a NORMAL item, not
-    // part of the radio group, so its click is routed by key (not check-state).
-    props.push(build_property(
-        "-",
-        PROP_TYPE_SEPARATOR,
-        "",
-        PROP_STATE_UNCHECKED,
-    ));
-    props.push(build_property(
+/// The engine's property menu: the "Cấu hình buttre…" launcher. Pass the
+/// result to the engine's `RegisterProperties` signal.
+pub(crate) fn config_prop_list() -> Value<'static> {
+    prop_list(vec![build_property(
         CONFIG_KEY,
         PROP_TYPE_NORMAL,
-        "Cấu hình Buttre...",
+        "Cấu hình buttre…",
         PROP_STATE_UNCHECKED,
-    ));
-    prop_list(props)
-}
-
-/// One `UpdateProperty` payload per method radio, with `current` checked.
-///
-/// Why per-property updates exist alongside [`method_prop_list`]: GNOME Shell
-/// consumes an engine's `RegisterProperties` ONCE per global-engine change —
-/// `ibusManager.js` disconnects its `register-properties` handler after the
-/// first non-empty list — so a later wholesale re-register never repaints the
-/// top-bar radio. Per-property `UpdateProperty` signals are the channel the
-/// Shell keeps open permanently (`_ibusPropertyUpdated` matches key + type and
-/// repaints). Verified against GNOME Shell 50.1 sources on Ubuntu.
-///
-/// The whole radio group is emitted (checked AND unchecked) so the panel never
-/// shows two checked radios, whatever state it held before.
-pub(crate) fn method_prop_updates(current: &str) -> Vec<Value<'static>> {
-    method_prop_updates_with(current, &method_items())
-}
-
-/// [`method_prop_updates`] over an explicit item list (testable core).
-fn method_prop_updates_with(current: &str, items: &[(String, String)]) -> Vec<Value<'static>> {
-    items
-        .iter()
-        .map(|(key, label)| {
-            let state = if key == current {
-                PROP_STATE_CHECKED
-            } else {
-                PROP_STATE_UNCHECKED
-            };
-            build_property(key, PROP_TYPE_RADIO, label, state)
-        })
-        .collect()
-}
-
-/// Resolve a `PropertyActivate(name, state)` from the panel to the method the
-/// engine should switch to, or `None` to ignore the event.
-///
-/// A radio-group click arrives as MULTIPLE activations: the selected radio with
-/// `state == PROP_STATE_CHECKED`, plus every other radio with an UNCHECKED
-/// state. Only the checked one — and only if its key is a method the engine
-/// can build (built-in or present custom TOML, the same
-/// `method_sync::is_engine_method_in` rule the sync channel enforces) — is a
-/// real switch; acting on the unchecked de-selects would overwrite the user's
-/// actual choice with whichever notification arrives last.
-pub(crate) fn method_for_activation(name: &str, state: u32) -> Option<&str> {
-    method_for_activation_in(name, state, &buttre_core::vietnamese::get_custom_dir())
-}
-
-/// [`method_for_activation`] against an explicit custom dir (testable core).
-/// The activation `name` is attacker-influenceable panel input interpolated
-/// into a path downstream — `is_engine_method_in` carries the traversal guard.
-fn method_for_activation_in<'a>(
-    name: &'a str,
-    state: u32,
-    custom_dir: &std::path::Path,
-) -> Option<&'a str> {
-    if state == PROP_STATE_CHECKED && super::method_sync::is_engine_method_in(name, custom_dir) {
-        Some(name)
-    } else {
-        None
-    }
+    )])
 }
 
 /// `IBusOrientation::IBUS_ORIENTATION_SYSTEM` — let the panel pick
@@ -234,158 +120,16 @@ mod tests {
     use super::*;
     use zbus::zvariant::{to_bytes, EncodingContext};
 
-    #[test]
-    fn activation_honors_only_a_checked_known_radio() {
-        // The newly-selected radio switches methods...
-        assert_eq!(
-            method_for_activation("telex", PROP_STATE_CHECKED),
-            Some("telex")
-        );
-        assert_eq!(
-            method_for_activation("vni", PROP_STATE_CHECKED),
-            Some("vni")
-        );
-        assert_eq!(
-            method_for_activation("nom", PROP_STATE_CHECKED),
-            Some("nom")
-        );
-        // ...but the de-select half of the same click MUST be ignored, else it
-        // overwrites the selection (the original "always lands on VNI" bug).
-        assert_eq!(method_for_activation("vni", PROP_STATE_UNCHECKED), None);
-        assert_eq!(method_for_activation("telex", PROP_STATE_UNCHECKED), None);
-        // English is a real radio (passthrough method) since the tri-surface
-        // sync — a checked click switches to it like any other method.
-        assert_eq!(
-            method_for_activation("english", PROP_STATE_CHECKED),
-            Some("english")
-        );
-        assert_eq!(method_for_activation("english", PROP_STATE_UNCHECKED), None);
-        // Non-method keys are ignored: the settings launcher is handled by the
-        // engine as a config-open, never as a method switch.
-        assert_eq!(method_for_activation(CONFIG_KEY, PROP_STATE_CHECKED), None);
-        assert_eq!(method_for_activation("french", PROP_STATE_CHECKED), None);
-    }
-
     /// libibus subscribes to the property signal BY SIGNATURE and silently
     /// drops a mismatch (GNOME then shows nothing) — so a drift in the outer
     /// `IBusPropList` shape must fail loudly here. `(sa{sv}av)` = type-name,
     /// attachments, array-of-variant properties.
     #[test]
-    fn method_prop_list_has_ibus_proplist_signature() {
+    fn config_prop_list_has_ibus_proplist_signature() {
         assert_eq!(
-            method_prop_list("telex").value_signature().to_string(),
+            config_prop_list().value_signature().to_string(),
             "(sa{sv}av)"
         );
-    }
-
-    /// An owned item list: the four built-ins plus one custom entry — the
-    /// shape `method_items()` produces with one custom TOML present. Injected
-    /// so tests stay hermetic whatever the machine's real custom dir holds.
-    fn items_with_custom() -> Vec<(String, String)> {
-        let mut items: Vec<(String, String)> = BUILTIN_METHOD_ITEMS
-            .iter()
-            .map(|(k, l)| (k.to_string(), l.to_string()))
-            .collect();
-        items.push(("cham".to_string(), "Cham".to_string()));
-        items
-    }
-
-    /// `UpdateProperty` carries ONE `IBusProperty` — same 12-field shape as the
-    /// list elements. The daemon subscribes by signature and silently drops a
-    /// mismatch, so drift must fail loudly here. `(sa{sv}suvsvbbuvv)`.
-    #[test]
-    fn method_prop_updates_have_ibus_property_signature() {
-        let items = items_with_custom();
-        let updates = method_prop_updates_with("vni", &items);
-        assert_eq!(updates.len(), items.len(), "one update per method radio");
-        for prop in &updates {
-            assert_eq!(prop.value_signature().to_string(), "(sa{sv}suvsvbbuvv)");
-        }
-    }
-
-    /// Exactly the `current` radio is checked — including a CUSTOM current —
-    /// the rest explicitly unchecked so the panel can never end up with two
-    /// checked radios.
-    #[test]
-    fn method_prop_updates_check_only_current() {
-        let items = items_with_custom();
-        for (current, expect_idx) in [
-            ("english", 0usize),
-            ("telex", 1),
-            ("vni", 2),
-            ("nom", 3),
-            ("cham", 4),
-        ] {
-            let updates = method_prop_updates_with(current, &items);
-            for (i, prop) in updates.iter().enumerate() {
-                let Value::Structure(s) = prop else {
-                    panic!("IBusProperty must be a structure")
-                };
-                let state = state_field(s);
-                let expected = if i == expect_idx {
-                    PROP_STATE_CHECKED
-                } else {
-                    PROP_STATE_UNCHECKED
-                };
-                assert_eq!(state, expected, "radio {i} state for current={current}");
-            }
-        }
-    }
-
-    /// A minimal keyboard TOML `Config::load` accepts (`[rules]` has no serde
-    /// default on the field, so the empty table must be present).
-    const MINIMAL_KEYBOARD_TOML: &str = "\
-[metadata]
-id = \"cham\"
-name = \"Cham Keyboard\"
-language = \"cja\"
-
-[transformations]
-
-[tones]
-
-[rules]
-";
-
-    /// A throwaway custom dir for the scan tests.
-    fn tmp_custom_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("buttre-ibus-props-{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// A checked activation for a custom key switches only when its TOML
-    /// exists; traversal keys never resolve (panel names are untrusted).
-    #[test]
-    fn activation_admits_custom_ids_with_guard() {
-        let dir = tmp_custom_dir("activate");
-        std::fs::write(dir.join("cham.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
-        assert_eq!(
-            method_for_activation_in("cham", PROP_STATE_CHECKED, &dir),
-            Some("cham")
-        );
-        assert_eq!(
-            method_for_activation_in("cham", PROP_STATE_UNCHECKED, &dir),
-            None
-        );
-        assert_eq!(
-            method_for_activation_in("khmer", PROP_STATE_CHECKED, &dir),
-            None
-        );
-        assert_eq!(
-            method_for_activation_in("../cham", PROP_STATE_CHECKED, &dir),
-            None
-        );
-    }
-
-    /// Field 9 of the 12-field IBusProperty struct is `state` (see
-    /// `build_property`'s field order).
-    fn state_field(s: &zbus::zvariant::Structure<'_>) -> u32 {
-        match s.fields()[9] {
-            Value::U32(state) => state,
-            ref other => panic!("state field must be u32, got {other:?}"),
-        }
     }
 
     /// The lookup table has its own libibus signature that must not drift, or
@@ -411,16 +155,13 @@ language = \"cja\"
     }
 
     /// The whole nested tree — the 12-field `IBusProperty` (`suvsvbbuvv` after
-    /// the serializable header) inside each `av` element — must encode to
-    /// D-Bus bytes without error. A wrong field type or count in
-    /// `build_property` surfaces here rather than as an invisible empty menu.
+    /// the serializable header) inside the `av` — must encode to D-Bus bytes.
+    /// A wrong field type or count in `build_property` surfaces here rather
+    /// than as an invisible empty menu.
     #[test]
-    fn method_prop_list_encodes_for_every_current() {
+    fn config_prop_list_encodes() {
         let ctxt = EncodingContext::<byteorder::LE>::new_dbus(0);
-        for current in ["telex", "vni", "nom", "english", ""] {
-            let props = method_prop_list(current);
-            let bytes = to_bytes(ctxt, &props).expect("IBusPropList must encode as valid D-Bus");
-            assert!(!bytes.is_empty(), "encoded property list must not be empty");
-        }
+        let bytes = to_bytes(ctxt, &config_prop_list()).expect("IBusPropList must encode");
+        assert!(!bytes.is_empty());
     }
 }

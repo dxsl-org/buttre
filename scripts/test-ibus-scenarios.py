@@ -144,26 +144,30 @@ h_enter = key(0xFF0D)
 ok = commits() == ["chào"] and h_enter is False
 results.append(("F Enter commits 'chào' + passes", ok, commits(), h_enter))
 
-# --- Scenario G (B5): tray-side method switch applies to the live engine ---
-import pathlib
-method_file = pathlib.Path(os.path.expanduser("~/.config/buttre/method"))
-method_file.parent.mkdir(parents=True, exist_ok=True)
+# --- Scenario G: each method is its own engine (ADR-0005) ---
+def switch_engine(name):
+    # Global switch = what Super+Space does; GNOME Shell overrides a bare
+    # per-context set_engine back to the global engine.
+    bus.set_global_engine(name)
+    ic.set_engine(name)
+    pump(1200)  # the daemon creates (or re-attaches) that engine instance
 
-def set_method(name):
-    tmp = method_file.parent / ".method.tmp"
-    tmp.write_text(name)
-    tmp.rename(method_file)  # atomic, same as the tray writer
-    pump(1200)  # give the watcher time to fire
-
-original = method_file.read_text().strip() if method_file.exists() else "telex"
-set_method("vni")
+switch_engine("buttre-vni")
 events.clear()
 type_str("viet65")
 key(0x20)
 vni_commits = commits()
-set_method(original if original in ("telex", "vni", "nom") else "telex")
-ok = vni_commits == ["việt"]
-results.append(("G live method switch telex->vni (viet65 -> việt)", ok, vni_commits))
+results.append(("G engine buttre-vni types VNI (viet65 -> việt)", vni_commits == ["việt"], vni_commits))
+
+# --- Scenario H: the engine name, not the method file, picks the method ---
+# Switching to buttre-vni recorded "vni" in the method file; the Telex engine
+# must still type Telex.
+switch_engine("buttre")
+events.clear()
+type_str("vieejt")
+key(0x20)
+telex_commits = commits()
+results.append(("H engine buttre stays Telex after VNI was chosen", telex_commits == ["việt"], telex_commits))
 
 print("--- scenarios ---")
 fails = 0

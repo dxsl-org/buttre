@@ -36,6 +36,8 @@
 //! - Focus loss (Deactivate) discards an uncommitted preedit — text-input-v3
 //!   has no IBus-style "commit preedit on focus change" mode.
 
+mod candidate_panel;
+mod candidate_render;
 mod dispatch;
 mod v1;
 

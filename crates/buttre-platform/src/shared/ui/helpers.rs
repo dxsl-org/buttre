@@ -4,7 +4,8 @@
 //! to avoid code duplication in the main event loop.
 
 use crate::shared::ui::menu::{set_method_checked, MethodMenuItem};
-use crate::shared::ui::tray::{get_tooltip, TrayIcons};
+use crate::shared::ui::tooltip::get_tooltip;
+use crate::shared::ui::tray::{custom_name, TrayIcons};
 use buttre_core::vietnamese::config_loader::MethodMetadata;
 use muda::Submenu;
 use tray_icon::TrayIcon as TrayIconType;
@@ -64,5 +65,9 @@ pub fn update_tray_icon(
         .variant(enabled)
         .clone();
     let _ = tray_icon.set_icon(Some(icon));
-    let _ = tray_icon.set_tooltip(Some(get_tooltip(method, enabled, custom_items)));
+    let _ = tray_icon.set_tooltip(Some(get_tooltip(
+        method,
+        enabled,
+        custom_name(method, custom_items),
+    )));
 }

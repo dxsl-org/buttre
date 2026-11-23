@@ -171,7 +171,7 @@ const BUILTIN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 /// (unknown → telex fallback), so bogus ids must be rejected HERE for
 /// `bt_engine_set_method` to honestly report failure — `build_keyboard`
 /// joins the id straight into a path (`engine_bridge.rs`'s
-/// `get_custom_dir().join(format!("{id}.toml"))`) with no guard of its own,
+/// `find_keyboard(id)` → `{dir}/{id}.toml`) with no guard of its own,
 /// so this is the only checkpoint before a `..`/separator id ever reaches
 /// that join.
 ///
@@ -180,7 +180,7 @@ const BUILTIN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 /// and its tests still run in CI) the same rule is reconstructed from
 /// `buttre-core` directly: a built-in, or a syntactically-safe id
 /// (non-empty, no path separator, no `..`, lowercase) whose `{id}.toml`
-/// actually exists in the custom keyboards dir.
+/// actually exists in one of the keyboard dirs.
 fn method_is_known(id: &str) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -193,9 +193,7 @@ fn method_is_known(id: &str) -> bool {
                 && !id.contains(['/', '\\'])
                 && !id.contains("..")
                 && id == id.to_lowercase()
-                && buttre_core::vietnamese::get_custom_dir()
-                    .join(format!("{id}.toml"))
-                    .is_file())
+                && buttre_core::vietnamese::find_keyboard(id).is_some())
     }
 }
 

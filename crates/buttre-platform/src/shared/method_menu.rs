@@ -1,10 +1,12 @@
-//! Method choice on OS-owned surfaces (ADR-0003 `MethodOwner::Os`).
+//! Method list and method-choice persistence for OS-owned surfaces
+//! (ADR-0003 `MethodOwner::Os`).
 //!
-//! [`method_items`] is the IBus panel's radio list; [`persist_command`] is the
-//! settings write behind every OS-surface switch — an IBus radio click and a
-//! macOS input-mode selection record the same COMMAND ("English" turns the
-//! IME off via `Settings::enabled`; a method writes the method file and turns
-//! it on), so the surfaces cannot drift.
+//! [`method_items`] is the one method list every surface derives from — the
+//! tray menu, the TSF profiles, the IBus engines (`ibus_engines`), the macOS
+//! input modes. [`persist_command`] is the settings write behind an OS-surface
+//! switch — an IBus engine becoming active and a macOS input-mode selection
+//! record the same COMMAND (a method writes the method file and turns the IME
+//! on), so the surfaces cannot drift.
 
 use std::path::Path;
 
@@ -37,24 +39,18 @@ pub const BUILTIN_METHOD_ITEMS: [(&str, &str); 4] = [
 /// `metadata.name` (a TOML that fails to parse is excluded — its item could
 /// only ever fall back to Telex).
 pub fn method_items() -> Vec<(String, String)> {
-    method_items_in(&buttre_core::vietnamese::get_custom_dir())
+    method_items_in(&buttre_core::vietnamese::keyboard_dirs())
 }
 
-/// [`method_items`] against an explicit custom dir (testable core —
-/// `get_custom_dir()` is ambient: resource dir / exe dir / cwd / data dir).
-pub fn method_items_in(custom_dir: &Path) -> Vec<(String, String)> {
+/// [`method_items`] against explicit keyboard dirs, highest priority first
+/// (testable core — `keyboard_dirs()` is ambient). One item per stem; the
+/// first dir holding it wins, like `find_keyboard_in`.
+pub fn method_items_in<P: AsRef<Path>>(keyboard_dirs: &[P]) -> Vec<(String, String)> {
     let mut items: Vec<(String, String)> = BUILTIN_METHOD_ITEMS
         .iter()
         .map(|(key, label)| (key.to_string(), label.to_string()))
         .collect();
-    let Ok(entries) = std::fs::read_dir(custom_dir) else {
-        return items; // no custom dir — built-ins only
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
+    for path in buttre_core::vietnamese::keyboard_files_in(keyboard_dirs) {
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -161,7 +157,7 @@ language = \"cja\"
         std::fs::write(dir.join("config.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
         std::fs::write(dir.join("Upper.toml"), MINIMAL_KEYBOARD_TOML).unwrap();
 
-        let items = method_items_in(&dir);
+        let items = method_items_in(&[&dir]);
         let builtin_count = BUILTIN_METHOD_ITEMS.len();
         assert_eq!(
             items.len(),
@@ -180,7 +176,7 @@ language = \"cja\"
     /// Missing custom dir degrades to built-ins only — never an error.
     #[test]
     fn method_items_without_custom_dir_is_builtins_only() {
-        let items = method_items_in(Path::new("/nonexistent/keyboards"));
+        let items = method_items_in(&[Path::new("/nonexistent/keyboards")]);
         assert_eq!(items.len(), BUILTIN_METHOD_ITEMS.len());
     }
 }

@@ -6,7 +6,8 @@
 //! Thin D-Bus adapter over [`EngineBridge`] — ALL composition semantics live
 //! in `engine_bridge.rs`, shared with the Wayland-native backend so the two
 //! cannot drift. The component lifecycle (private-bus connection, Factory,
-//! name request) lives in `ibus_bus.rs`; method-file sync in `method_sync.rs`.
+//! name request) lives in `ibus_bus.rs`; the engine-name ↔ method table in
+//! `ibus_engines.rs`.
 //!
 //! Protocol notes (learned against a live ibus-daemon 1.5.29):
 //! - Signal signatures MUST match libibus's engine introspection XML — the
@@ -21,7 +22,7 @@
 use super::engine_bridge::{is_break_keysym, is_modifier_keysym, keysym_to_char, EngineBridge};
 use super::ibus_props;
 use super::learning_sync::LearningWiring;
-use super::method_sync::{self, MethodState};
+use super::method_sync;
 use buttre_core::state::macros::MacroStore;
 use std::sync::{Arc, Mutex};
 use zbus::zvariant;
@@ -37,19 +38,6 @@ const IBUS_SUPER_MASK: u32 = 0x40;
 /// Key-release events carry this bit; engines act on presses only —
 /// processing releases would double every keystroke.
 const IBUS_RELEASE_MASK: u32 = 1 << 30;
-
-// Keyvals used to drive the Nôm candidate popup (X11 keysyms).
-const KEY_SPACE: u32 = 0x20;
-const KEY_RETURN: u32 = 0xFF0D;
-const KEY_ESCAPE: u32 = 0xFF1B;
-const KEY_1: u32 = 0x31;
-const KEY_9: u32 = 0x39;
-const KEY_LEFT: u32 = 0xFF51;
-const KEY_UP: u32 = 0xFF52;
-const KEY_RIGHT: u32 = 0xFF53;
-const KEY_DOWN: u32 = 0xFF54;
-const KEY_PAGE_UP: u32 = 0xFF55;
-const KEY_PAGE_DOWN: u32 = 0xFF56;
 
 /// `IBusCapabilite::IBUS_CAP_SURROUNDING_TEXT` = `1 << 5` — the client can
 /// report and delete text around the cursor. Preferred delete primitive for the
@@ -67,27 +55,20 @@ const PREEDIT_FOCUS_COMMIT: u32 = 1;
 // IBus Engine
 // ============================================================================
 
-/// IBus Engine for Vietnamese input — one instance per input context,
-/// created by the Factory in `ibus_bus.rs`.
+/// IBus Engine for Vietnamese input — one instance per (input context,
+/// engine name), created by the Factory in `ibus_bus.rs`. The engine name
+/// fixes the method for the instance's whole life (`ibus_engines`,
+/// ADR-0005): switching method means the user picks another input source,
+/// which makes the daemon talk to a different engine instance.
 #[derive(Clone)]
 pub struct ButtreEngine {
     bridge: Arc<Mutex<EngineBridge>>,
-    /// Shared with the method-file watcher (B5). `None` in standalone
-    /// construction (tests) — no live method switching there.
-    method_state: Option<Arc<MethodState>>,
-    /// Last [`MethodState::generation`] this engine applied; compared per
-    /// keystroke (one atomic load) for lazy keyboard rebuild on switch.
-    seen_generation: u64,
+    /// Method id this engine types (`telex`, `vni`, `nom`, keyboard stem).
+    method: String,
     /// Shared `Settings::use_preedit` mirror (`macro_sync`). `None` in
     /// standalone construction (tests). `true` = preedit/underline model,
     /// `false` = commit-as-you-go. Consulted per keystroke.
     use_preedit: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// Shared `Settings::enabled` mirror (`macro_sync`). `None` in
-    /// standalone construction (tests) — treated as always-on. Consulted per
-    /// keystroke (`sync_enabled`): with no tray on IBus, this is how a
-    /// toggle written to `settings.toml` (config window, hand-edit, or this
-    /// engine's own English radio) reaches the bridge's passthrough.
-    enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Personal-learning handles (`learning_sync`). `None` in standalone
     /// construction (tests). Consulted per keystroke (`sync_learning`) so
     /// the "Học thông minh" toggle applies without a restart.
@@ -101,15 +82,9 @@ pub struct ButtreEngine {
     /// keystroke against the desired state so a setting/capability change flips
     /// the model exactly once. `false` = preedit (the safe startup default).
     applied_no_preedit: bool,
-    /// This engine object's D-Bus path (assigned by the factory). `None` in
-    /// standalone construction (tests). Published into [`Self::focused`] on
-    /// `focus_in` so the async property-refresh task knows where to emit.
+    /// This engine object's D-Bus path (assigned by the factory), for logs.
+    /// `None` in standalone construction (tests).
     path: Option<zvariant::OwnedObjectPath>,
-    /// Shared "currently focused engine path" — the async property-refresh
-    /// task (see `ibus_bus::run_engine`) emits `RegisterProperties` here when
-    /// the method changes externally (tray/config), so the panel radio follows
-    /// immediately instead of only on the next keystroke. `None` in tests.
-    focused: Option<Arc<Mutex<Option<zvariant::OwnedObjectPath>>>>,
 }
 
 impl ButtreEngine {
@@ -120,68 +95,46 @@ impl ButtreEngine {
     pub fn new_with_method(method_name: &str) -> Self {
         Self {
             bridge: Arc::new(Mutex::new(EngineBridge::new(method_name))),
-            method_state: None,
-            seen_generation: 0,
+            method: method_name.to_string(),
             use_preedit: None,
-            enabled: None,
             learning: None,
             caps: 0,
             applied_no_preedit: false,
             path: None,
-            focused: None,
         }
     }
 
-    /// Factory constructor: builds from the CURRENT shared method and keeps
-    /// the state handle for per-keystroke switch detection.
-    pub fn new_with_state(state: Arc<MethodState>) -> Self {
-        let mut engine = Self::new_with_method(&state.method());
-        engine.seen_generation = state.generation();
-        engine.method_state = Some(state);
-        engine
-    }
-
-    /// Factory constructor used once shorthand is wired in: same as
-    /// [`Self::new_with_state`], plus the shared macro store and the
-    /// strict-spelling mirror, injected into the bridge at construction so
-    /// they survive every later method-switch `rebuild`
-    /// (`EngineBridge::rebuild` re-applies both).
-    #[allow(clippy::too_many_arguments)] // reason: factory wires every shared handle in one call
-    pub fn new_with_state_and_macros(
-        state: Arc<MethodState>,
+    /// Factory constructor: the engine for `method`, with the shared macro
+    /// store and setting mirrors injected into the bridge at construction.
+    /// `Settings::enabled` is deliberately not wired: on IBus "off" is
+    /// switching to another input source (as on macOS), and honoring a stale
+    /// `false` written by another platform's tray would silence a source the
+    /// user just picked.
+    pub fn new_for_factory(
+        method: &str,
         macros: Arc<Mutex<MacroStore>>,
         strict: Arc<std::sync::atomic::AtomicBool>,
         raw_backspace: Arc<std::sync::atomic::AtomicBool>,
         use_preedit: Arc<std::sync::atomic::AtomicBool>,
-        enabled: Arc<std::sync::atomic::AtomicBool>,
         learning: LearningWiring,
         path: zvariant::OwnedObjectPath,
-        focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>>,
     ) -> Self {
-        let mut bridge = EngineBridge::new_with_macros(&state.method(), macros);
+        let mut bridge = EngineBridge::new_with_macros(method, macros);
         bridge.set_strict_flag(strict);
         bridge.set_raw_backspace_flag(raw_backspace);
-        // Start on the persisted on/off state — without this a keystroke
-        // would have to arrive before a saved "off" took effect.
-        if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
-            bridge.set_enabled(false);
-        }
-        // Same for learning: wire it now if the setting is on, so the very
-        // first committed word already collects.
+        // Wire learning now if the setting is on, so the very first committed
+        // word already collects.
         if learning.enabled.load(std::sync::atomic::Ordering::Relaxed) {
             bridge.set_learning(learning.store.clone(), learning.save_tx.clone());
         }
         Self {
-            seen_generation: state.generation(),
             bridge: Arc::new(Mutex::new(bridge)),
-            method_state: Some(state),
+            method: method.to_string(),
             use_preedit: Some(use_preedit),
-            enabled: Some(enabled),
             learning: Some(learning),
             caps: 0,
             applied_no_preedit: false,
             path: Some(path),
-            focused: Some(focused),
         }
     }
 
@@ -190,49 +143,19 @@ impl ButtreEngine {
         self.bridge.lock().unwrap().preedit().to_string()
     }
 
-    /// The radio the panel should show checked: the current method — unless
-    /// the IME is off, which the panel renders as the English radio (the
-    /// Unikey model: the engine stays active, it just goes silent).
-    fn current_radio(&self) -> String {
-        let on = self
-            .enabled
-            .as_ref()
-            .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(true);
-        if !on {
-            return "english".to_string();
+    /// Record this engine's method as the user's current choice when it
+    /// becomes the active source — method file + `settings.toml` (also "on"),
+    /// the same write the macOS input-mode switch makes — so a later
+    /// tray-owned session (Wayland-native, Windows Hook) starts on it.
+    /// Compared against the file first: `Enable` fires on every source switch
+    /// and per input context, and the write is only needed on a change.
+    fn persist_choice(&self) {
+        if method_sync::read_method() == self.method {
+            return;
         }
-        self.method_state
-            .as_ref()
-            .map(|s| s.method())
-            .unwrap_or_else(|| "telex".to_string())
-    }
-
-    /// Apply the panel's COMMAND: update the in-process mirror, then record it
-    /// in the settings store (`method_menu::persist_command`). ADR-0003: many
-    /// writers, one store, no reflection; `method` is never `"english"` here
-    /// (invariant 1 — the English radio is intercepted before this).
-    fn command_state(&self, on: bool, method: Option<&str>) {
-        if let Some(flag) = &self.enabled {
-            flag.store(on, std::sync::atomic::Ordering::Relaxed);
-        }
-        crate::shared::method_menu::persist_command(on, method);
-    }
-
-    /// Push the current method's radio states to the panel: a full
-    /// `RegisterProperties` (refreshes the daemon's property cache and panels
-    /// that honor re-registration), then one `UpdateProperty` per radio — the
-    /// only signal GNOME Shell applies after an engine's first registration
-    /// (see [`Self::update_property`]). Best-effort: a failed emit only stales
-    /// the panel radio, never typing.
-    pub(crate) async fn publish_method_props(ctx: &SignalContext<'_>, method: &str) {
-        if let Err(e) = Self::register_properties(ctx, ibus_props::method_prop_list(method)).await {
-            tracing::warn!("publish_method_props: RegisterProperties failed: {e}");
-        }
-        for prop in ibus_props::method_prop_updates(method) {
-            if let Err(e) = Self::update_property(ctx, prop).await {
-                tracing::warn!("publish_method_props: UpdateProperty failed: {e}");
-            }
+        match method_sync::write_method(&self.method) {
+            Ok(()) => crate::shared::method_menu::persist_command(true, Some(&self.method)),
+            Err(e) => tracing::warn!("Enable: write_method({}) failed: {e}", self.method),
         }
     }
 }
@@ -307,18 +230,6 @@ impl ButtreEngine {
         props: zvariant::Value<'_>,
     ) -> zbus::Result<()>;
 
-    /// Update ONE property in-place on the panel. `prop` is an `IBusProperty`
-    /// variant ([`ibus_props::method_prop_updates`]). This is the ONLY channel
-    /// GNOME Shell keeps open for radio-state changes after an engine's first
-    /// registration — its `register-properties` handler is one-shot — so every
-    /// method switch must be pushed through here or the top-bar radio never
-    /// repaints (the root cause of "tray switch not reflected in IBus menu").
-    #[dbus_interface(signal)]
-    pub(crate) async fn update_property(
-        ctx: &SignalContext<'_>,
-        prop: zvariant::Value<'_>,
-    ) -> zbus::Result<()>;
-
     /// Replace the candidate popup the panel renders. `table` is an
     /// `IBusLookupTable` variant ([`ibus_props::build_lookup_table`]); `visible`
     /// shows it in the same call. Signature-matched to libibus.
@@ -371,15 +282,6 @@ impl ButtreEngine {
             return false;
         }
 
-        // Apply a pending tray-side method switch before processing (B5).
-        self.sync_method(&ctx).await;
-
-        // Apply a pending on/off change from `settings.toml` AFTER the
-        // method sync: a successful rebuild sets the bridge enabled, and the
-        // settings store must win that disagreement — the store is canonical
-        // for on/off, the method file carries only the method.
-        self.sync_enabled(&ctx).await;
-
         // Apply a pending "Học thông minh" toggle — no visual ops, so this
         // sync is plain (no signal emission).
         self.sync_learning();
@@ -401,37 +303,14 @@ impl ButtreEngine {
             return false;
         }
 
-        // Nôm candidate popup open: intercept selection/cancel keys BEFORE the
-        // break-keysym flush below — Escape and Return are break keysyms, and
-        // Space/digits are printable (they'd otherwise be composed). Other keys
-        // (more letters, backspace) fall through and refine or clear the list.
-        let candidate_count = self.bridge.lock().unwrap().candidate_count();
-        if candidate_count > 0 {
-            let page = ibus_props::LOOKUP_PAGE_SIZE as usize;
-            let outcome = match keyval {
-                KEY_ESCAPE => Some(self.bridge.lock().unwrap().discard()),
-                KEY_RETURN | KEY_SPACE => Some(self.bridge.lock().unwrap().select_current()),
-                // Vertical or horizontal panel: next/prev either way.
-                KEY_DOWN | KEY_RIGHT => Some(self.bridge.lock().unwrap().cursor_next()),
-                KEY_UP | KEY_LEFT => Some(self.bridge.lock().unwrap().cursor_prev()),
-                KEY_PAGE_DOWN => Some(self.bridge.lock().unwrap().cursor_page_down(page)),
-                KEY_PAGE_UP => Some(self.bridge.lock().unwrap().cursor_page_up(page)),
-                // Number keys pick a slot on the current page. Always consume
-                // 1..=9 while the popup is open (out-of-range is a no-op) so a
-                // stray digit never leaks into the Nôm composition.
-                KEY_1..=KEY_9 => Some(
-                    self.bridge
-                        .lock()
-                        .unwrap()
-                        .select_at_page((keyval - KEY_1) as usize, page),
-                ),
-                // Anything else (more letters, backspace) refines the list.
-                _ => None,
-            };
-            if let Some(outcome) = outcome {
-                self.emit_ops(&ctx, outcome.ops).await;
-                return true;
-            }
+        // Nôm candidate popup open: selection/cancel keys go to the list
+        // BEFORE the break-keysym flush below. Other keys (more letters,
+        // backspace) fall through and refine or clear the list.
+        let page = ibus_props::LOOKUP_PAGE_SIZE as usize;
+        let candidate = self.bridge.lock().unwrap().candidate_key(keyval, page);
+        if let Some(outcome) = candidate {
+            self.emit_ops(&ctx, outcome.ops).await;
+            return true;
         }
 
         // Navigation/editing keys end the word and pass through.
@@ -464,82 +343,28 @@ impl ButtreEngine {
         outcome.handled
     }
 
-    /// The daemon focuses a text field: (re)publish the property menu so the
-    /// IBus panel shows the method radios with the current method checked.
-    /// Emitted per focus rather than once at construction because the panel
-    /// tracks properties against the focused engine, not the component.
+    /// The daemon focuses a text field: (re)publish the property menu
+    /// ("Cấu hình buttre…"). Emitted per focus rather than once at
+    /// construction because the panel tracks properties against the focused
+    /// engine, not the component.
     async fn focus_in(&mut self, #[zbus(signal_context)] ctx: SignalContext<'_>) {
         tracing::info!(
-            "FocusIn[{}]",
-            self.path.as_ref().map_or("-", |p| p.as_str())
+            "FocusIn[{}] method={}",
+            self.path.as_ref().map_or("-", |p| p.as_str()),
+            self.method
         );
-        // Mark this engine as the focused one so the async property-refresh
-        // task (ibus_bus) knows which path to re-publish on an external method
-        // change. Cleared on focus_out.
-        if let (Some(focused), Some(path)) = (&self.focused, &self.path) {
-            *focused.lock().unwrap() = Some(path.clone());
+        if let Err(e) = Self::register_properties(&ctx, ibus_props::config_prop_list()).await {
+            tracing::warn!("FocusIn: RegisterProperties failed: {e}");
         }
-        let current = self.current_radio();
-        // Register (consumed by GNOME Shell's one-shot handler after an engine
-        // switch) AND per-radio updates (repaint when already registered) — a
-        // method switched while this engine was unfocused lands either way.
-        Self::publish_method_props(&ctx, &current).await;
     }
 
-    /// IBus panel → engine: the user clicked a property (a method radio). Route
-    /// the click to the shared method file so the tray and every live engine
-    /// converge on the same method (`method_sync`), then re-publish the list so
-    /// the radio check follows the selection immediately (the panel does not
-    /// move a radio on its own — the engine owns that state). Unknown keys are
-    /// ignored; only the engine-buildable ids in `KNOWN_METHODS` are honored.
-    async fn property_activate(
-        &mut self,
-        #[zbus(signal_context)] ctx: SignalContext<'_>,
-        name: &str,
-        state: u32,
-    ) {
+    /// IBus panel → engine: the user clicked a property. The menu's only item
+    /// is the settings launcher; any other key is ignored.
+    fn property_activate(&mut self, name: &str, state: u32) {
         tracing::info!("PropertyActivate: {name} (state={state})");
-        // The settings launcher is a NORMAL item, not a radio — route it by key
-        // (its state is meaningless) and open the config window, then stop.
         if name == ibus_props::CONFIG_KEY {
             Self::open_config_window();
-            return;
         }
-        // A radio-group click arrives as MULTIPLE PropertyActivate calls: the
-        // newly-selected radio (CHECKED) plus every other radio (UNCHECKED).
-        // `method_for_activation` keeps only the checked, known one — acting on
-        // an unchecked de-select would overwrite the real choice (observed:
-        // clicking Telex sent telex=checked then vni=unchecked → stuck on VNI).
-        let Some(method) = ibus_props::method_for_activation(name, state) else {
-            return;
-        };
-        // The English radio is a COMMAND to turn off (ADR-0003), not a method
-        // to store: it lands on `Settings::enabled`, never in the method file
-        // — that file's "english" wire value is legacy-only (stale files, the
-        // fcitx addon's own surface), and this engine stops producing it.
-        if method == "english" {
-            self.command_state(false, None);
-            let ops = self.bridge.lock().unwrap().set_enabled(false).ops;
-            self.emit_ops(&ctx, ops).await;
-            Self::publish_method_props(&ctx, "english").await;
-            return;
-        }
-        // The method file is what engines actually follow; settings.toml only
-        // records the choice when that write LANDED — persisting a method the
-        // engine will never type would leave three surfaces disagreeing.
-        let method_written = match method_sync::write_method(method) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("PropertyActivate: write_method({method}) failed: {e}");
-                false
-            }
-        };
-        // Picking a method expresses intent to TYPE with it, so it also turns
-        // the IME on — the same rule the tray menu and hotkeys follow.
-        self.command_state(true, method_written.then_some(method));
-        let ops = self.bridge.lock().unwrap().set_enabled(true).ops;
-        self.emit_ops(&ctx, ops).await;
-        Self::publish_method_props(&ctx, method).await;
     }
 
     /// Focus loss: the CLIENT commits the visible preedit itself (we send
@@ -552,16 +377,8 @@ impl ButtreEngine {
             "FocusOut[{}]",
             self.path.as_ref().map_or("-", |p| p.as_str())
         );
-        // Relinquish focused-engine ownership so the refresh task doesn't emit
-        // to an unfocused path. Guard on identity: a focus_in on the NEXT
-        // engine may already have overwritten the slot, and clearing it then
-        // would drop that live target.
-        if let (Some(focused), Some(path)) = (&self.focused, &self.path) {
-            let mut slot = focused.lock().unwrap();
-            if slot.as_ref() == Some(path) {
-                *slot = None;
-            }
-        }
+        // The client commits the visible preedit itself (mode=COMMIT); only
+        // reset engine state and hide a lingering candidate popup.
         let had_candidates = {
             let mut bridge = self.bridge.lock().unwrap();
             let had = bridge.candidate_count() > 0;
@@ -574,14 +391,18 @@ impl ButtreEngine {
     }
 
     fn enable(&mut self) {
-        tracing::info!("Enable[{}]", self.path.as_ref().map_or("-", |p| p.as_str()));
-        // Mirror the active state to the tray: buttre just became the global
-        // engine (OS input-source switch or startup). The tray reflects the
-        // real Vietnamese method again. Best-effort — a failed write only means
-        // the tray's English/Vietnamese indicator lags, never a typing fault.
+        tracing::info!(
+            "Enable[{}] method={}",
+            self.path.as_ref().map_or("-", |p| p.as_str()),
+            self.method
+        );
+        // Mirror the active state for `--doctor` and any tray-owned session:
+        // buttre just became the global engine (OS input-source switch or
+        // startup). Best-effort — a failed write never affects typing.
         if let Err(e) = method_sync::write_enabled(true) {
             tracing::warn!("Enable: write_enabled(true) failed: {e}");
         }
+        self.persist_choice();
     }
 
     /// Same contract as [`Self::focus_out`] for the candidate popup: hide it
@@ -591,8 +412,8 @@ impl ButtreEngine {
             "Disable[{}]",
             self.path.as_ref().map_or("-", |p| p.as_str())
         );
-        // buttre stopped being the global engine (OS switched to English/another
-        // source). Tell the tray so it can show the disabled/English state.
+        // buttre stopped being the global engine (OS switched to another
+        // source). Mirror it for `--doctor` and any tray-owned session.
         if let Err(e) = method_sync::write_enabled(false) {
             tracing::warn!("Disable: write_enabled(false) failed: {e}");
         }
@@ -758,65 +579,8 @@ impl ButtreEngine {
         }
     }
 
-    /// Apply a pending tray-side method switch (B5).
-    async fn sync_method(&mut self, ctx: &SignalContext<'_>) {
-        let Some(state) = &self.method_state else {
-            return;
-        };
-        let generation = state.generation();
-        if generation == self.seen_generation {
-            return;
-        }
-        self.seen_generation = generation;
-        let method = state.method();
-        // rebuild returns owned Option — the lock guard is dropped at the
-        // end of this statement, so no lock is held across the await.
-        let outcome = self.bridge.lock().unwrap().rebuild(&method);
-        match outcome {
-            Some(outcome) => {
-                self.emit_ops(ctx, outcome.ops).await;
-                // Move the panel radio to the new method now instead of waiting
-                // for the next focus_in — a switch made from the tray or the
-                // config window would otherwise leave the IBus menu checked on
-                // the old method until the field is refocused.
-                Self::publish_method_props(ctx, &method).await;
-                tracing::info!("Engine switched to method {method}");
-            }
-            // Build failed (already logged): keep the current keyboard rather
-            // than crash. Do NOT re-emit properties here — the method did not
-            // actually change, so the radio should keep reflecting the current
-            // one. seen_generation is advanced so we don't retry the same
-            // broken method every keystroke.
-            None => tracing::warn!("Method switch to {method} failed; keeping current"),
-        }
-    }
-
-    /// Apply a pending on/off change: push the `Settings::enabled`
-    /// mirror into the bridge's passthrough exactly once per change, clearing
-    /// any live preedit/candidates so a mid-word toggle never strands half a
-    /// word, then move the panel radio (English ⇄ method).
-    async fn sync_enabled(&mut self, ctx: &SignalContext<'_>) {
-        let Some(flag) = &self.enabled else {
-            return;
-        };
-        let want = flag.load(std::sync::atomic::Ordering::Relaxed);
-        let ops = {
-            let mut bridge = self.bridge.lock().unwrap();
-            if bridge.is_enabled() == want {
-                return;
-            }
-            bridge.set_enabled(want).ops
-            // Guard dropped here — no lock across the awaits below.
-        };
-        self.emit_ops(ctx, ops).await;
-        Self::publish_method_props(ctx, &self.current_radio()).await;
-        tracing::info!("Engine enabled={want} (settings.toml)");
-    }
-
     /// Apply a pending "Học thông minh" toggle: wire or detach the learning
-    /// store exactly once per change of the `learning_enabled` mirror —
-    /// same lazy per-keystroke pattern as `sync_enabled`, minus the panel
-    /// repaint (learning has no visual state).
+    /// store exactly once per change of the `learning_enabled` mirror.
     fn sync_learning(&mut self) {
         let Some(wiring) = &self.learning else {
             return;
@@ -855,20 +619,7 @@ impl ButtreEngine {
         }
         // set_use_composition commits any pending word before switching models;
         // the guard is dropped before the await (owned outcome returned).
-        let outcome = {
-            let mut bridge = self.bridge.lock().unwrap();
-            // Passthrough: set_use_composition no-ops (nothing to rebuild),
-            // so recording `applied_no_preedit` now would wedge this check
-            // forever — passthrough is ROUTINE here (every English-radio
-            // click), and a use_preedit toggle while off must still apply
-            // after re-enable. sync_enabled runs before this in
-            // process_key_event, so the first key after re-enable
-            // negotiates the model.
-            if !bridge.is_enabled() {
-                return;
-            }
-            bridge.set_use_composition(!effective)
-        };
+        let outcome = self.bridge.lock().unwrap().set_use_composition(!effective);
         self.applied_no_preedit = effective;
         self.emit_ops(ctx, outcome.ops).await;
         tracing::info!("Preedit model: no_preedit={effective}");

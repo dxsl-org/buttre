@@ -10,21 +10,22 @@
 //! 2. serve `org.freedesktop.IBus.Factory` at `/org/freedesktop/IBus/Factory`,
 //! 3. request the component name `org.freedesktop.IBus.buttre`.
 //!
-//! The daemon then calls `CreateEngine("buttre")` once per input context and
-//! routes key events to the object path we return. Connecting to the session
-//! bus instead (the pre-0.8 behavior) made the engine invisible to the
-//! daemon — the original "typing dead on Linux" root cause.
+//! The daemon then calls `CreateEngine(<engine name>)` once per input context
+//! and routes key events to the object path we return. The engine name picks
+//! the method (`ibus_engines`, ADR-0005). Connecting to the session bus
+//! instead (the pre-0.8 behavior) made the engine invisible to the daemon —
+//! the original "typing dead on Linux" root cause.
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
-use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer, SignalContext};
+use zbus::{dbus_interface, zvariant, ConnectionBuilder, ObjectServer};
 
 use super::ibus::ButtreEngine;
+use super::ibus_engines;
 use super::learning_sync::{self, LearningWiring};
 use super::macro_sync;
-use super::method_sync::{self, MethodState};
 use buttre_core::state::macros::MacroStore;
 
 // ============================================================================
@@ -128,37 +129,24 @@ fn strip_guid(addr: &str) -> String {
 /// factory the daemon has no way to reach the engine at all.
 struct ButtreFactory {
     engine_counter: u64,
-    /// Shared with the method-file watcher — new engines start on the
-    /// CURRENT method, live ones rebuild lazily per keystroke (B5).
-    method_state: Arc<MethodState>,
-    /// Shared with `macro_sync`'s watcher (phase-02) — one reload updates
-    /// every live engine at once, same "one Arc, many consumers" wiring as
-    /// `method_state`.
+    /// Shared with `macro_sync`'s watcher — one reload updates every live
+    /// engine at once.
     macros: Arc<Mutex<MacroStore>>,
     /// `Settings::strict_spelling` mirror, kept current by the same
     /// `macro_sync` watcher — every engine's bridge consults it lazily per
     /// keystroke (`EngineBridge::set_strict_flag`).
-    strict: Arc<std::sync::atomic::AtomicBool>,
+    strict: Arc<AtomicBool>,
     /// `Settings::backspace_mode` (raw?) mirror on the same watcher
     /// (`EngineBridge::set_raw_backspace_flag`).
-    raw_backspace: Arc<std::sync::atomic::AtomicBool>,
+    raw_backspace: Arc<AtomicBool>,
     /// `Settings::use_preedit` mirror on the same watcher — each engine reads
     /// it per keystroke to choose the preedit vs commit-as-you-go model
     /// (gated on the client's surrounding-text capability).
-    use_preedit: Arc<std::sync::atomic::AtomicBool>,
-    /// `Settings::enabled` mirror on the same watcher — each engine consults
-    /// it per keystroke (`sync_enabled`) so an on/off toggle written to
-    /// `settings.toml` applies without a tray process relaying it.
-    enabled: Arc<std::sync::atomic::AtomicBool>,
+    use_preedit: Arc<AtomicBool>,
     /// Personal-learning handles (`learning_sync`) — shared store, save
     /// channel, and the `learning_enabled` mirror each engine consults per
     /// keystroke (`sync_learning`).
     learning: LearningWiring,
-    /// Currently focused engine path, shared with every engine and the async
-    /// property-refresh task (`run_engine`). An engine claims it on `focus_in`
-    /// and releases it on `focus_out`; the task emits `RegisterProperties` here
-    /// when the method changes externally so the panel radio follows at once.
-    focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>>,
 }
 
 #[dbus_interface(name = "org.freedesktop.IBus.Factory")]
@@ -168,11 +156,11 @@ impl ButtreFactory {
         #[zbus(object_server)] server: &ObjectServer,
         engine_name: &str,
     ) -> zbus::fdo::Result<zvariant::OwnedObjectPath> {
-        if engine_name != "buttre" {
+        let Some(method) = ibus_engines::method_for_engine(engine_name) else {
             return Err(zbus::fdo::Error::Failed(format!(
                 "unknown engine name: {engine_name}"
             )));
-        }
+        };
         self.engine_counter += 1;
         let path = zvariant::OwnedObjectPath::try_from(format!(
             "/org/freedesktop/IBus/Engine/{}",
@@ -180,16 +168,14 @@ impl ButtreFactory {
         ))
         .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
-        let engine = ButtreEngine::new_with_state_and_macros(
-            self.method_state.clone(),
+        let engine = ButtreEngine::new_for_factory(
+            &method,
             self.macros.clone(),
             self.strict.clone(),
             self.raw_backspace.clone(),
             self.use_preedit.clone(),
-            self.enabled.clone(),
             self.learning.clone(),
             path.clone(),
-            self.focused.clone(),
         );
         server
             .at(&path, engine)
@@ -202,7 +188,10 @@ impl ButtreFactory {
             return Err(zbus::fdo::Error::Failed(e.to_string()));
         }
 
-        tracing::info!("CreateEngine: serving engine at {}", path.as_str());
+        tracing::info!(
+            "CreateEngine({engine_name}): serving {method} at {}",
+            path.as_str()
+        );
         Ok(path)
     }
 }
@@ -241,36 +230,19 @@ pub async fn run_engine() -> Result<()> {
     let addr = resolve_ibus_address()?;
     tracing::info!("Connecting to IBus private bus");
 
-    // Tray↔engine method sync (B5): shared state + config-dir watcher.
-    let method_state = MethodState::load();
-    // Woken by the watcher on every genuine method change so the refresh task
-    // below re-publishes the panel properties immediately (not just on the next
-    // keystroke). Wired before the watcher starts so no early change is missed.
-    let method_changed = Arc::new(Notify::new());
-    {
-        // MethodState is platform-neutral now (the macOS host shares it), so
-        // it takes a plain callback — this engine's tokio Notify rides in it.
-        let method_changed = method_changed.clone();
-        method_state.set_change_notify(move || method_changed.notify_one());
-    }
-    method_sync::spawn_watcher(method_state.clone());
-
-    // Shared focused-engine path (see ButtreFactory::focused).
-    let focused: Arc<Mutex<Option<zvariant::OwnedObjectPath>>> = Arc::new(Mutex::new(None));
-
-    // Shorthand/gõ tắt (phase-02): shared macro store + its own watcher over
-    // macros.toml + settings.toml. The same watcher keeps the enabled mirror
-    // fresh — with no tray on IBus, the engine owns its own on/off.
+    // Shorthand/gõ tắt + setting mirrors: shared macro store and its own
+    // watcher over macros.toml + settings.toml. The watcher also maintains a
+    // `Settings::enabled` mirror for the backends that honor it; IBus does
+    // not (off = another input source, ADR-0005), so that one is not kept.
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
     let raw_backspace = macro_sync::load_initial_raw_backspace();
     let use_preedit = macro_sync::load_initial_use_preedit();
-    let enabled = macro_sync::load_initial_enabled();
     macro_sync::spawn_watcher(
         macros.clone(),
         strict.clone(),
         use_preedit.clone(),
-        enabled.clone(),
+        Arc::new(AtomicBool::new(true)),
         raw_backspace.clone(),
     );
 
@@ -283,19 +255,17 @@ pub async fn run_engine() -> Result<()> {
 
     // ConnectionBuilder registers served objects before requesting names,
     // satisfying the factory-before-name sequence contract (module docs).
-    let connection = ConnectionBuilder::address(addr.as_str())?
+    // The connection must outlive the pending future below.
+    let _connection = ConnectionBuilder::address(addr.as_str())?
         .serve_at(
             "/org/freedesktop/IBus/Factory",
             ButtreFactory {
                 engine_counter: 0,
-                method_state: method_state.clone(),
                 macros,
                 strict,
                 raw_backspace,
                 use_preedit,
-                enabled: enabled.clone(),
                 learning,
-                focused: focused.clone(),
             },
         )?
         .name("org.freedesktop.IBus.buttre")?
@@ -303,32 +273,6 @@ pub async fn run_engine() -> Result<()> {
         .await?;
 
     tracing::info!("buttre registered with ibus-daemon (factory ready)");
-
-    // Property-refresh task (Phase 2): when the method changes externally
-    // (tray menu / config window writes Store B), the watcher wakes
-    // `method_changed`; we re-publish the property list on the focused engine
-    // so the IBus panel radio moves immediately, without waiting for the next
-    // keystroke's `sync_method`. No focused engine ⇒ nothing to emit; the next
-    // `focus_in` republishes with the current method anyway.
-    tokio::spawn(async move {
-        loop {
-            method_changed.notified().await;
-            // The radio the panel should check: the method — unless the IME
-            // is off, which the panel renders as the English radio.
-            let method = if enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                method_state.method()
-            } else {
-                "english".to_string()
-            };
-            let target = focused.lock().unwrap().clone();
-            let Some(path) = target else { continue };
-            match SignalContext::new(&connection, &path) {
-                Ok(ctx) => ButtreEngine::publish_method_props(&ctx, &method).await,
-                Err(e) => tracing::warn!("property-refresh: bad signal context: {e}"),
-            }
-        }
-    });
-
     std::future::pending::<()>().await;
     Ok(())
 }

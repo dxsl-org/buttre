@@ -56,7 +56,8 @@ echo "\$(date +%T.%N) pid=\$\$" >> "$ENGINE_LOG_DIR/spawns"
 exec "$PWD/$BIN" "\$@"
 EOF
 chmod +x "$WRAPPER"
-sed "s|<exec>/usr/bin/buttre --ibus</exec>|<exec>$WRAPPER --ibus</exec>|" \
+# Both the engine `<exec>` and the `<engines exec=…>` list point at the binary.
+sed "s|/usr/bin/buttre|$WRAPPER|g" \
     installers/linux/buttre.xml > "$COMP_DIR/buttre.xml"
 # Registry cache must be invalidated to pick up component XML changes.
 rm -f ~/.cache/ibus/bus/registry*

@@ -348,6 +348,18 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     // BEFORE the first println. See `attach_parent_console`.
     attach_parent_console(&args);
+    // ibus-daemon runs this from the component XML's `<engines exec=…>` and
+    // parses stdout as XML — so it is answered BEFORE `init_tracing`, whose
+    // default writer is stdout: one log line would corrupt the document and
+    // drop every buttre engine from the registry.
+    #[cfg(platform_linux)]
+    if args.iter().any(|a| a == "--ibus-engines") {
+        print!(
+            "{}",
+            buttre_platform::platforms::linux::ibus_engines::engines_xml()
+        );
+        return Ok(());
+    }
     init_tracing(&args);
     // Self-heal a corrupt settings.toml ONCE, before anything loads it: the
     // strict-reading writers refuse to touch an unparseable file, so without
@@ -366,6 +378,7 @@ fn main() -> Result<()> {
              \x20           on OS-owned platforms (IBus, fcitx5, macOS; ADR-0003)\n  \
              --autostart Login launch: tray where a tray exists, silent exit elsewhere\n  \
              --ibus      Run as the IBus engine (spawned by ibus-daemon, not by hand)\n  \
+             --ibus-engines  Print the IBus engine list, one per input method (read by ibus-daemon)\n  \
              --ime       Run as a self-detecting IME (Wayland-native, IBus fallback)\n  \
              --config    Open the settings window\n  \
              --doctor    Print IME-backend diagnosis (fcitx/ibus/wayland) and exit\n  \

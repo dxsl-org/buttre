@@ -22,7 +22,7 @@ pub fn add_keyboard(method_id: &str) -> Result<()> {
         .parent()
         .context("buttre.exe has no parent directory")?
         .join("keyboards");
-    let profile = profiles_in(&keyboards)
+    let profile = profiles_in(&[&keyboards])
         .into_iter()
         .find(|p| p.method_id == method_id)
         .with_context(|| format!("no buttre keyboard '{method_id}'"))?;

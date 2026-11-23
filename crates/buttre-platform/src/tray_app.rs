@@ -13,8 +13,14 @@ use buttre_core::state::{Settings, StateObserver};
 use buttre_core::AppState;
 use buttre_core::Keyboard;
 use buttre_platform::shared::observers::{KeyboardObserver, MainUICallback, UIEvent, UIObserver};
+#[cfg(windows)]
+use buttre_platform::shared::pipe_server;
+#[cfg(target_os = "linux")]
+use buttre_platform::shared::ui::sni_tray::SniTray;
+use buttre_platform::shared::ui::TrayCommand;
+#[cfg(not(target_os = "linux"))]
 use buttre_platform::shared::ui::{build_menu, create_tray_icon, helpers, MenuItems};
-use buttre_platform::shared::{pipe_server, KeyboardManager, MethodRegistry};
+use buttre_platform::shared::{KeyboardManager, MethodRegistry};
 use buttre_platform::{platform_name, Backend, PlatformBackend};
 use log::{error, info, warn};
 use std::sync::mpsc;
@@ -98,6 +104,55 @@ fn select_method(app_state: &Arc<Mutex<AppState>>, method: &str) -> anyhow::Resu
     let mut state = app_state.lock().unwrap();
     state.set_method(method)?;
     state.set_enabled(true)
+}
+
+/// Run one tray click — every tray toolkit funnels here (`TrayCommand`), so
+/// the left-click, "Bật bộ gõ" and the menu rows mean the same everywhere.
+/// Returns `true` for "Thoát": the caller ends the event loop.
+fn run_tray_command(app_state: &Arc<Mutex<AppState>>, command: TrayCommand) -> bool {
+    match command {
+        // Left-click, "Bật bộ gõ" and Ctrl+Shift+Space: one toggle.
+        TrayCommand::Toggle => {
+            info!("Tray: toggling IME");
+            if let Err(e) = app_state.lock().unwrap().toggle() {
+                error!("Failed to toggle from tray: {:?}", e);
+            }
+        }
+        TrayCommand::Select(method) => {
+            if let Err(e) = select_method(app_state, &method) {
+                error!("Failed to set method {method}: {:?}", e);
+            }
+        }
+        // Spawn the config window as a separate PROCESS (same exe,
+        // `--config` arg-dispatch in `main`) — never call
+        // `buttre_config::run()` in-process here, it owns a competing winit
+        // event loop (see `buttre-config`'s crate doc). Non-blocking: the
+        // tray keeps typing live while it's open.
+        TrayCommand::OpenConfig => match std::env::current_exe() {
+            Ok(exe) => {
+                if let Err(e) = std::process::Command::new(exe).arg("--config").spawn() {
+                    error!("Failed to spawn config window: {:?}", e);
+                }
+            }
+            Err(e) => error!("Failed to resolve current_exe for config window: {:?}", e),
+        },
+        TrayCommand::Quit => {
+            // "Thoát" must stop typing too, not just the tray: on Plasma
+            // Wayland KWin owns and RESPAWNS the `--ime` engine. Plasma ≤ 6.6
+            // can stop the process; ≥ 6.7 cannot (kwin_ime docs), so turn
+            // typing off in settings — the engine obeys `Settings::enabled`
+            // live.
+            #[cfg(platform_linux)]
+            if buttre_platform::platforms::linux::kwin_ime::manages_buttre_ime() {
+                if let Err(e) = app_state.lock().unwrap().set_enabled(false) {
+                    error!("Failed to turn the IME off on quit: {e:?}");
+                }
+                buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(false);
+            }
+            return true;
+        }
+    }
+    false
 }
 
 /// Debounce successive personal-learning save requests down to the LATEST
@@ -234,47 +289,12 @@ pub(crate) fn run() -> Result<()> {
     let mut settings = Settings::load();
     info!("Loaded settings: {:?}", settings);
 
-    // Load available input methods (built-in + custom)
-    use buttre_core::vietnamese::config_loader::{ConfigLoader, MethodMetadata};
-
-    // ConfigLoader manual fallback to built-ins if failure
-    let all_methods = ConfigLoader::list_methods_with_metadata().unwrap_or_else(|e| {
-        error!("Failed to list methods: {:?}", e);
-        vec![
-            MethodMetadata {
-                id: "telex".to_string(),
-                name: "Telex".to_string(),
-                description: "Built-in Telex".to_string(),
-                version: "1.0.0".to_string(),
-                author: "buttre".to_string(),
-                icon: None,
-                is_builtin: true,
-            },
-            MethodMetadata {
-                id: "vni".to_string(),
-                name: "VNI".to_string(),
-                description: "Built-in VNI".to_string(),
-                version: "1.0.0".to_string(),
-                author: "buttre".to_string(),
-                icon: None,
-                is_builtin: true,
-            },
-            MethodMetadata {
-                id: "nom".to_string(),
-                name: "Chữ Nôm".to_string(),
-                description: "Built-in Nôm".to_string(),
-                version: "1.0.0".to_string(),
-                author: "buttre".to_string(),
-                icon: None,
-                is_builtin: true,
-            },
-        ]
-    });
-
     // Validate input method. A stale id (its custom TOML was deleted) falls
     // back to telex — the method field must always name a REAL method; "off"
     // is `Settings::enabled`, not a method value (ADR-0003).
-    let is_valid_method = all_methods.iter().any(|m| m.id == settings.input_method);
+    // (Validated against the registry — built-ins incl. Nôm plus every
+    // custom TOML; a built-ins-only list reset a saved Nôm to Telex.)
+    let is_valid_method = method_registry.get(&settings.input_method).is_some();
     if !is_valid_method {
         warn!(
             "Input method '{}' not found, falling back to telex",
@@ -301,22 +321,19 @@ pub(crate) fn run() -> Result<()> {
             .build(&event_loop)?
     };
 
-    // tray-icon and muda render the tray menu through GTK on Linux, so GTK
-    // must be initialised on this (the tray-owning) thread BEFORE any menu or
-    // tray widget is built — otherwise menu construction panics with "GTK has
-    // not been initialized". Its main context is pumped from the winit loop
-    // below (see `AboutToWait`) so tray/menu callbacks are actually delivered.
-    #[cfg(target_os = "linux")]
-    if let Err(e) = gtk::init() {
-        error!("gtk::init failed — system tray unavailable: {e}");
-        return Err(anyhow::anyhow!("gtk::init failed: {e}"));
-    }
+    // Custom keyboards in menu order — Ctrl+Shift+4…0 index into this list
+    // (the same order `build_menu` appends its custom rows in).
+    let customs: Vec<(String, String)> = method_registry
+        .get_custom()
+        .iter()
+        .map(|m| (m.id.clone(), m.name.clone()))
+        .collect();
 
-    // --- Menu Setup ---
-    // Build menu from registry
+    // tray-icon and muda render the tray menu through GTK — not used on
+    // Linux, whose tray is the SNI item below (`sni_tray`).
+    #[cfg(not(target_os = "linux"))]
     let (menu, menu_items) = build_menu(&settings, &method_registry);
-
-    // Extract menu items for event handling
+    #[cfg(not(target_os = "linux"))]
     let MenuItems {
         enable_item,
         chu_viet_menu,
@@ -345,9 +362,22 @@ pub(crate) fn run() -> Result<()> {
     }
 
     // --- Tray Setup ---
+    #[cfg(not(target_os = "linux"))]
     let (mut _tray_icon, tray_icons) = create_tray_icon(&menu, &settings, &custom_items)?;
     // Skip-repaint memory for update_tray_icon (icon flicker guard).
+    #[cfg(not(target_os = "linux"))]
     let mut last_tray_state: Option<(String, bool)> = None;
+    // Linux: clicks arrive as commands on `tray_rx`; state goes back through
+    // `SniTray::set_state` from the same observer events.
+    #[cfg(target_os = "linux")]
+    let (tray_tx, tray_rx) = mpsc::channel::<TrayCommand>();
+    #[cfg(target_os = "linux")]
+    let sni_tray = SniTray::spawn(
+        &settings.input_method,
+        settings.enabled,
+        customs.clone(),
+        tray_tx,
+    )?;
 
     // --- buttre Keyboard Setup ---
     // Arc-shared: the `KeyboardObserver` drives it on method switches, and
@@ -448,12 +478,15 @@ pub(crate) fn run() -> Result<()> {
     info!("Platform backend initialized: {}", platform_name());
 
     // --- Start Pipe Server for TSF ---
-    let pipe_keyboard = keyboard.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = pipe_server::run_pipe_server(pipe_keyboard) {
-            error!("Pipe server error: {:?}", e);
-        }
-    });
+    #[cfg(windows)]
+    {
+        let pipe_keyboard = keyboard.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = pipe_server::run_pipe_server(pipe_keyboard) {
+                error!("Pipe server error: {:?}", e);
+            }
+        });
+    }
 
     // --- Hotkey Setup ---
     // The word-toggle chord goes to whichever layer can actually see it: TSF
@@ -465,7 +498,7 @@ pub(crate) fn run() -> Result<()> {
             .expect("Failed to create hotkey manager");
 
     // Register custom hotkeys (Ctrl+Shift+4..0) based on menu items count
-    if let Err(e) = hotkey_manager.register_custom_methods(custom_items.len()) {
+    if let Err(e) = hotkey_manager.register_custom_methods(customs.len()) {
         tracing::error!("Failed to register custom hotkeys: {:?}", e);
     }
 
@@ -519,10 +552,10 @@ pub(crate) fn run() -> Result<()> {
     // different means a genuine external change (config window), apply it.
     // This avoids the "external edit racing our own autosave gets silently
     // dropped" gap a fixed suppression window would have.
-    // Mirror of the "Thoát" handler below: quitting the tray switches
-    // KWin's IME off (stopping the background `--ime` respawn), so tray
-    // startup switches it back on — relaunching the tray restores typing
-    // on Plasma Wayland. No-op everywhere else.
+    // Mirror of the "Thoát" handler below: on Plasma ≤ 6.6 quitting the
+    // tray stops KWin's `--ime` process, so startup brings it back. The
+    // typing state itself stays what "Thoát" left (`Settings::enabled`
+    // off) — one click / Ctrl+Shift+Space turns it on. No-op elsewhere.
     #[cfg(platform_linux)]
     buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(true);
 
@@ -569,7 +602,9 @@ pub(crate) fn run() -> Result<()> {
     // there is nothing to restore.
 
     // --- Event Loop ---
+    #[cfg(not(target_os = "linux"))]
     let menu_channel = muda::MenuEvent::receiver();
+    #[cfg(not(target_os = "linux"))]
     let tray_channel = tray_icon::TrayIconEvent::receiver();
 
     event_loop.run(move |event, elwt| {
@@ -595,19 +630,10 @@ pub(crate) fn run() -> Result<()> {
             }
 
             Event::AboutToWait => {
-                // Service GTK on Linux: the tray icon and its menu live on the
-                // GTK main context (see `gtk::init` above). winit owns this
-                // thread, so GTK's own events fire only if we pump them here —
-                // without this the tray never appears and menu clicks are never
-                // delivered to `menu_channel` below.
-                #[cfg(target_os = "linux")]
-                while gtk::events_pending() {
-                    gtk::main_iteration_do(false);
-                }
-
                 // Process UI events from observers
                 while let Ok(ui_event) = ui_rx.try_recv() {
                     match ui_event {
+                        #[cfg(not(target_os = "linux"))]
                         UIEvent::UpdateMenuCheckmarks(method, enabled) => {
                             helpers::update_menu_checkmarks(
                                 &method,
@@ -620,6 +646,7 @@ pub(crate) fn run() -> Result<()> {
                                 custom_items.as_slice(),
                             );
                         }
+                        #[cfg(not(target_os = "linux"))]
                         UIEvent::UpdateTrayIcon(method, enabled) => {
                             helpers::update_tray_icon(
                                 &method,
@@ -629,6 +656,13 @@ pub(crate) fn run() -> Result<()> {
                                 &mut last_tray_state,
                                 custom_items.as_slice(),
                             );
+                        }
+                        // The SNI item derives icon, tooltip AND menu checks
+                        // from one state; either event carries it.
+                        #[cfg(target_os = "linux")]
+                        UIEvent::UpdateMenuCheckmarks(method, enabled)
+                        | UIEvent::UpdateTrayIcon(method, enabled) => {
+                            SniTray::set_state(&sni_tray, &method, enabled);
                         }
                     }
                 }
@@ -909,8 +943,8 @@ pub(crate) fn run() -> Result<()> {
                             }
                         }
                         HotkeyAction::Custom(index) => {
-                            if let Some((method_data, _)) = custom_items.get(index) {
-                                if let Err(e) = select_method(&app_state, &method_data.id) {
+                            if let Some((method_id, _)) = customs.get(index) {
+                                if let Err(e) = select_method(&app_state, method_id) {
                                     error!("Failed to set method: {:?}", e);
                                 }
                             }
@@ -922,12 +956,16 @@ pub(crate) fn run() -> Result<()> {
                     }
                 }
 
-                // Tray icon events: left-click (release) toggles the IME —
-                // the single most frequent interaction, one click instead of
+                // Tray clicks, as toolkit-neutral commands.
+                #[cfg(not(target_os = "linux"))]
+                let mut commands: Vec<TrayCommand> = Vec::new();
+                // Left-click (release) toggles the IME — the single most
+                // frequent interaction, one click instead of
                 // click→menu→item. Right-click still opens the menu (the
                 // builder set `with_menu_on_left_click(false)`, so muda only
                 // binds the menu to right-click). Fires on button UP so a
                 // press-and-drag off the icon doesn't toggle.
+                #[cfg(not(target_os = "linux"))]
                 while let Ok(tray_event) = tray_channel.try_recv() {
                     if let tray_icon::TrayIconEvent::Click {
                         button: tray_icon::MouseButton::Left,
@@ -935,59 +973,37 @@ pub(crate) fn run() -> Result<()> {
                         ..
                     } = tray_event
                     {
-                        info!("Tray left-click: toggling IME");
-                        if let Err(e) = app_state.lock().unwrap().toggle() {
-                            error!("Failed to toggle from tray click: {:?}", e);
-                        }
+                        commands.push(TrayCommand::Toggle);
                     }
                 }
-
-                // Menu events
+                #[cfg(not(target_os = "linux"))]
                 if let Ok(event) = menu_channel.try_recv() {
-                    if event.id == thoat_item.id() {
-                        // "Thoát" must stop typing too, not just the tray:
-                        // on Plasma Wayland KWin owns and RESPAWNS the
-                        // `--ime` engine, so tell it to switch the IME off
-                        // (best-effort; startup re-enables it).
-                        #[cfg(platform_linux)]
-                        buttre_platform::platforms::linux::kwin_ime::set_kwin_ime_enabled(false);
-                        elwt.exit();
-                    } else if event.id == nom_item.id() {
-                        let _ = select_method(&app_state, "nom");
+                    let command = if event.id == thoat_item.id() {
+                        Some(TrayCommand::Quit)
                     } else if event.id == enable_item.id() {
-                        // "Bật bộ gõ" — same toggle as tray left-click and
-                        // Ctrl+Shift+Space; three doors, one command.
-                        let _ = app_state.lock().unwrap().toggle();
-                    } else if event.id == telex_item.id() {
-                        let _ = select_method(&app_state, "telex");
-                    } else if event.id == vni_item.id() {
-                        let _ = select_method(&app_state, "vni");
+                        Some(TrayCommand::Toggle)
                     } else if event.id == cau_hinh_item.id() {
-                        // Spawn the config window as a separate PROCESS
-                        // (same exe, `--config` arg-dispatch in `main`) —
-                        // never call `buttre_config::run()` in-process here,
-                        // it owns a competing winit event loop (see
-                        // `buttre-config`'s crate doc). Non-blocking: the
-                        // tray keeps typing live while it's open.
-                        match std::env::current_exe() {
-                            Ok(exe) => {
-                                if let Err(e) =
-                                    std::process::Command::new(exe).arg("--config").spawn()
-                                {
-                                    error!("Failed to spawn config window: {:?}", e);
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to resolve current_exe for config window: {:?}", e)
-                            }
-                        }
+                        Some(TrayCommand::OpenConfig)
+                    } else if event.id == telex_item.id() {
+                        Some(TrayCommand::Select("telex".into()))
+                    } else if event.id == vni_item.id() {
+                        Some(TrayCommand::Select("vni".into()))
+                    } else if event.id == nom_item.id() {
+                        Some(TrayCommand::Select("nom".into()))
                     } else {
-                        for (method_data, item) in &custom_items {
-                            if event.id == item.id() {
-                                let _ = select_method(&app_state, &method_data.id);
-                                break;
-                            }
-                        }
+                        custom_items
+                            .iter()
+                            .find(|(_, item)| event.id == item.id())
+                            .map(|(method_data, _)| TrayCommand::Select(method_data.id.clone()))
+                    };
+                    commands.extend(command);
+                }
+                #[cfg(target_os = "linux")]
+                let commands: Vec<TrayCommand> = tray_rx.try_iter().collect();
+
+                for command in commands {
+                    if run_tray_command(&app_state, command) {
+                        elwt.exit();
                     }
                 }
             }

@@ -195,10 +195,7 @@ impl VietnameseEngine {
             VietnameseMode::Custom(method_id) => {
                 // Load custom config from file (same as Hook)
                 tracing::info!("TSF: Loading custom keyboard: {}", method_id);
-                let custom_dir = buttre_core::vietnamese::get_custom_dir();
-                let config_path = custom_dir.join(format!("{}.toml", method_id));
-
-                if config_path.exists() {
+                if let Some(config_path) = buttre_core::vietnamese::find_keyboard(method_id) {
                     match buttre_core::Config::load(config_path.to_str().unwrap()) {
                         Ok(config) => {
                             tracing::info!("TSF: loaded custom keyboard from {:?}", config_path);
@@ -215,7 +212,7 @@ impl VietnameseEngine {
                         }
                     }
                 } else {
-                    tracing::warn!("TSF: Custom config not found: {:?}", config_path);
+                    tracing::warn!("TSF: Custom keyboard {method_id:?} not found");
                     None
                 }
             }

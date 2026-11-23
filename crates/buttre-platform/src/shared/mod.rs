@@ -14,6 +14,8 @@ pub mod method_menu;
 pub mod method_owner;
 pub mod method_sync;
 pub mod observers;
+/// IPC with the Windows TSF DLL — nothing to serve elsewhere.
+#[cfg(windows)]
 pub mod pipe_server;
 pub mod ui;
 
@@ -21,4 +23,5 @@ pub mod ui;
 pub use config_watcher::{ConfigChangeEvent, ConfigWatcher};
 pub use input::{KeyboardManager, MethodInfo, MethodRegistry, MethodSource};
 pub use observers::{KeyboardObserver, MainUICallback, UIEvent, UIObserver};
+#[cfg(not(target_os = "linux"))]
 pub use ui::{build_menu, create_tray_icon, MenuItems};

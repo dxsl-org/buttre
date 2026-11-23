@@ -305,7 +305,7 @@ pub fn register_tsf_service(dll_path: &Path) -> Result<()> {
         .parent()
         .map(|dir| dir.join("keyboards"))
         .unwrap_or_default();
-    let profiles = profiles_in(&keyboards);
+    let profiles = profiles_in(&[&keyboards]);
     for profile in &profiles {
         tracing::info!(
             "TSF profile {} = {} ({})",

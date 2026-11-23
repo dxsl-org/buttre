@@ -1,56 +1,34 @@
-//! Menu building utilities for buttre application
+//! The muda tray menu (Windows). Linux serves its own StatusNotifierItem
+//! menu (`sni_tray`): libappindicator, muda's Linux backend, never reports
+//! tray clicks.
 
 use crate::shared::input::MethodRegistry;
-#[cfg(not(target_os = "linux"))]
 use crate::shared::ui::{load_menu_icon, CHECK_ICON_BYTES};
 use buttre_core::state::Settings;
 use buttre_core::vietnamese::config_loader::MethodMetadata;
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-/// The widget type of one method row in the tray menu.
-///
-/// Linux is a `CheckMenuItem`, not an `IconMenuItem`: the tray menu is
-/// exported over DBusMenu (libappindicator), whose hosts render an item's
-/// `icon-data` at the TRAILING edge (GNOME's appindicator extension) and do
-/// not reliably clear it when the pixbuf is nulled — so a check drawn as an
-/// icon appears after the label and the previous method's check sticks.
-/// `toggle-type=checkmark` is the protocol's native selection state: leading
-/// ornament, cleared via `toggle-state`. Windows/macOS keep the original
-/// leading check icon.
-#[cfg(target_os = "linux")]
-pub type MethodMenuItem = muda::CheckMenuItem;
-#[cfg(not(target_os = "linux"))]
+/// The widget type of one method row: the check is a leading icon.
 pub type MethodMenuItem = muda::IconMenuItem;
 
-/// One method row, checked or not — the per-OS check representation (see
-/// [`MethodMenuItem`]) is decided here and in [`set_method_checked`] ONLY.
+/// One method row, checked or not — the check representation is decided
+/// here and in [`set_method_checked`] ONLY.
 fn new_method_item(label: &str, checked: bool, accelerator: Option<Accelerator>) -> MethodMenuItem {
-    #[cfg(target_os = "linux")]
-    {
-        muda::CheckMenuItem::new(label, true, checked, accelerator)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        muda::IconMenuItem::new(
-            label,
-            true,
-            if checked {
-                load_menu_icon(CHECK_ICON_BYTES)
-            } else {
-                None
-            },
-            accelerator,
-        )
-    }
+    muda::IconMenuItem::new(
+        label,
+        true,
+        if checked {
+            load_menu_icon(CHECK_ICON_BYTES)
+        } else {
+            None
+        },
+        accelerator,
+    )
 }
 
-/// Reflect selection state on a method row (see [`MethodMenuItem`] for why
-/// this is per-OS).
+/// Reflect selection state on a method row.
 pub fn set_method_checked(item: &MethodMenuItem, checked: bool) {
-    #[cfg(target_os = "linux")]
-    item.set_checked(checked);
-    #[cfg(not(target_os = "linux"))]
     item.set_icon(if checked {
         load_menu_icon(CHECK_ICON_BYTES)
     } else {

@@ -184,12 +184,6 @@ pub fn run_pipe_server(keyboard: Arc<RwLock<Option<Keyboard>>>) -> Result<()> {
             }
         }
     }
-
-    #[cfg(not(windows))]
-    {
-        let _ = keyboard;
-        anyhow::bail!("Pipe server is only supported on Windows");
-    }
 }
 
 /// Build the SECURITY_ATTRIBUTES used for the named pipe.

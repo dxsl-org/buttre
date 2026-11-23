@@ -33,10 +33,11 @@ pub struct ProfileEntry {
 }
 
 /// Every profile to register: the built-in methods, then each keyboard TOML
-/// in `keyboards_dir` (the `keyboards\` folder installed next to the DLL).
-/// A TOML added later gets its profile the next time registration runs.
-pub fn profiles_in(keyboards_dir: &Path) -> Vec<ProfileEntry> {
-    crate::shared::method_menu::method_items_in(keyboards_dir)
+/// in `keyboard_dirs` (registration passes the `keyboards\` folder installed
+/// next to the DLL). A TOML added later gets its profile the next time
+/// registration runs.
+pub fn profiles_in<P: AsRef<Path>>(keyboard_dirs: &[P]) -> Vec<ProfileEntry> {
+    crate::shared::method_menu::method_items_in(keyboard_dirs)
         .into_iter()
         // "English" is the absence of buttre, i.e. the plain EN-US keyboard
         // the user switches to with Ctrl+Shift — never a buttre profile.
@@ -49,9 +50,9 @@ pub fn profiles_in(keyboards_dir: &Path) -> Vec<ProfileEntry> {
         .collect()
 }
 
-/// [`profiles_in`] for the keyboards installed next to this binary.
+/// [`profiles_in`] for this installation's keyboard dirs.
 pub fn profiles() -> Vec<ProfileEntry> {
-    profiles_in(&buttre_core::vietnamese::get_custom_dir())
+    profiles_in(&buttre_core::vietnamese::keyboard_dirs())
 }
 
 /// The method a profile GUID stands for. Built-ins resolve without touching
@@ -153,7 +154,7 @@ mod tests {
     #[test]
     fn english_is_never_a_profile_and_keyboards_are() {
         let keyboards = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../keyboards");
-        let entries = profiles_in(&keyboards);
+        let entries = profiles_in(&[&keyboards]);
 
         let ids: Vec<&str> = entries.iter().map(|e| e.method_id.as_str()).collect();
         assert!(!ids.contains(&"english"));

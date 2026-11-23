@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 pub const KNOWN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 
 /// True when `id` names a method the engine can build: a built-in, or a
-/// custom keyboard whose TOML exists in `get_custom_dir()` right now.
+/// custom keyboard whose TOML exists in one of the keyboard dirs right now.
 ///
 /// Mirrors the engine's own load rule (`EngineBridge::build_keyboard` on
 /// Linux, `KeyboardManager::set_method` on Windows/macOS — both try
@@ -51,17 +51,20 @@ pub const KNOWN_METHODS: [&str; 4] = ["telex", "vni", "nom", "english"];
 /// (the fcitx5 addon) — `build_keyboard` itself is lenient (unknown id →
 /// telex fallback), so rejecting bogus ids must happen at the boundary.
 pub fn is_engine_method(id: &str) -> bool {
-    is_engine_method_in(id, &buttre_core::vietnamese::get_custom_dir())
+    is_engine_method_in(id, &buttre_core::vietnamese::keyboard_dirs())
 }
 
-/// [`is_engine_method`] against an explicit custom dir — the testable core
-/// (`get_custom_dir()` is ambient: exe dir / cwd / XDG data dir).
+/// [`is_engine_method`] against explicit keyboard dirs — the testable core
+/// (`keyboard_dirs()` is ambient: resource / exe / cwd / user / package dir).
 ///
 /// `pub(crate)` so the IBus panel (`ibus_props::method_for_activation`)
 /// validates `PropertyActivate` names with the same rule the sync channel
 /// enforces.
-pub(crate) fn is_engine_method_in(id: &str, custom_dir: &Path) -> bool {
-    KNOWN_METHODS.contains(&id) || is_valid_custom_id_in(id, custom_dir)
+pub(crate) fn is_engine_method_in<P: AsRef<Path>>(id: &str, keyboard_dirs: &[P]) -> bool {
+    KNOWN_METHODS.contains(&id)
+        || keyboard_dirs
+            .iter()
+            .any(|dir| is_valid_custom_id_in(id, dir.as_ref()))
 }
 
 /// True when `{id}.toml` exists in `custom_dir` AND `id` is a safe filename
@@ -99,7 +102,14 @@ pub fn write_method(method: &str) -> Result<()> {
     write_method_to(&path, method)
 }
 
+/// No-op when the file already holds `method`: every watcher of this file
+/// (tray, engines) reads a change event as a NEW choice — the tray turns the
+/// IME on for one — so a same-value rewrite (the tray re-persisting the
+/// method on an on/off toggle) must not produce an event at all.
 fn write_method_to(path: &Path, method: &str) -> Result<()> {
+    if std::fs::read_to_string(path).is_ok_and(|c| c == method) {
+        return Ok(());
+    }
     let dir = path
         .parent()
         .ok_or_else(|| anyhow!("method path has no parent"))?;
@@ -114,14 +124,14 @@ fn write_method_to(path: &Path, method: &str) -> Result<()> {
 /// telex — matching the engine's historical default). Custom ids are matched
 /// lowercase, so custom TOML filenames must be lowercase to round-trip.
 fn read_method_from(path: &Path) -> String {
-    read_method_from_in(path, &buttre_core::vietnamese::get_custom_dir())
+    read_method_from_in(path, &buttre_core::vietnamese::keyboard_dirs())
 }
 
-/// [`read_method_from`] against an explicit custom dir (testable core).
-fn read_method_from_in(path: &Path, custom_dir: &Path) -> String {
+/// [`read_method_from`] against explicit keyboard dirs (testable core).
+fn read_method_from_in<P: AsRef<Path>>(path: &Path, keyboard_dirs: &[P]) -> String {
     if let Ok(content) = std::fs::read_to_string(path) {
         let method = content.trim().to_lowercase();
-        if is_engine_method_in(&method, custom_dir) {
+        if is_engine_method_in(&method, keyboard_dirs) {
             return method;
         }
         if !method.is_empty() {
@@ -284,6 +294,17 @@ mod tests {
     }
 
     #[test]
+    fn same_value_rewrite_leaves_file_untouched() {
+        let path = tmp_method_path("same-value");
+        write_method_to(&path, "nom").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_method_to(&path, "nom").unwrap();
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after, "a same-value write must not touch the file");
+    }
+
+    #[test]
     fn malformed_or_missing_falls_back_to_telex() {
         let path = tmp_method_path("malformed");
         std::fs::write(&path, "not-a-method\n").unwrap();
@@ -315,7 +336,7 @@ mod tests {
         let custom = tmp_custom_dir("roundtrip", &["cham"]);
         let path = tmp_method_path("custom-roundtrip");
         write_method_to(&path, "cham").unwrap();
-        assert_eq!(read_method_from_in(&path, &custom), "cham");
+        assert_eq!(read_method_from_in(&path, &[&custom]), "cham");
     }
 
     #[test]
@@ -323,7 +344,7 @@ mod tests {
         let custom = tmp_custom_dir("absent", &[]);
         let path = tmp_method_path("custom-absent");
         std::fs::write(&path, "cham").unwrap();
-        assert_eq!(read_method_from_in(&path, &custom), "telex");
+        assert_eq!(read_method_from_in(&path, &[&custom]), "telex");
     }
 
     #[test]
@@ -351,9 +372,9 @@ mod tests {
     fn builtins_are_engine_methods_regardless_of_custom_dir() {
         let custom = tmp_custom_dir("builtins", &[]);
         for id in KNOWN_METHODS {
-            assert!(is_engine_method_in(id, &custom));
+            assert!(is_engine_method_in(id, &[&custom]));
         }
-        assert!(!is_engine_method_in("cham", &custom));
+        assert!(!is_engine_method_in("cham", &[&custom]));
     }
 
     #[test]

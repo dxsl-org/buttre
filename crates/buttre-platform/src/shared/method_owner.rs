@@ -45,7 +45,8 @@ pub enum SurfacePath {
     /// nào (gõ tiếng Việt đi qua ibus/wayland, `--doctor` đã cảnh báo xung
     /// đột) — bỏ tray ở đây là để người dùng không còn công tắc nào.
     LinuxFcitx5NoAddon,
-    /// ibus-daemon đang chạy — `ibus_props.rs` đưa radio lên GNOME top-bar.
+    /// ibus-daemon đang chạy — mỗi kiểu gõ là một input source IBus riêng
+    /// (`ibus_engines.rs`, ADR-0005).
     LinuxIbus,
     /// Wayland-native `zwp_input_method_v2`/`v1` — compositor không vẽ menu
     /// kiểu gõ nào cho ta.

@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn slots_follow_the_profile_table() {
-        let entries = profiles::profiles_in(std::path::Path::new("does-not-exist"));
+        let entries = profiles::profiles_in(&[std::path::Path::new("does-not-exist")]);
         assert_eq!(
             profile_for_slot(&entries, 1).map(|e| e.method_id.as_str()),
             Some("telex")

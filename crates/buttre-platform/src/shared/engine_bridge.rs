@@ -39,7 +39,8 @@ pub enum ImeOp {
     /// Show/replace the candidate list (Nôm) with `cursor` highlighted. Empty
     /// is never emitted — use [`ImeOp::HideCandidates`] to clear. `cursor` is a
     /// GLOBAL index into `items`; the backend's page size decides which page is
-    /// shown. Backends without a candidate UI (Wayland, macOS today) ignore it.
+    /// shown. IBus and the KWin (v1) backend draw it; backends without a
+    /// candidate UI (Wayland v2, macOS today) ignore it.
     Candidates {
         items: Vec<CandidateView>,
         cursor: usize,
@@ -104,11 +105,15 @@ fn build_keyboard(method: &str, use_composition: bool) -> Option<Keyboard> {
         .ok()
 }
 
-/// Load a custom keyboard's `Config` from `keyboards/{id}.toml`, `None` (with
-/// a warning) when the file is missing or unparseable. Split from
-/// [`build_keyboard`] so the fallback decision stays readable there.
+/// Load a custom keyboard's `Config` from `{id}.toml` in the first keyboard
+/// dir holding it, `None` (with a warning) when the file is missing or
+/// unparseable. Split from [`build_keyboard`] so the fallback decision stays
+/// readable there.
 fn load_custom_config(id: &str) -> Option<buttre_core::Config> {
-    let path = buttre_core::vietnamese::get_custom_dir().join(format!("{id}.toml"));
+    let Some(path) = buttre_core::vietnamese::find_keyboard(id) else {
+        tracing::warn!("custom keyboard {id:?} not found, falling back to telex");
+        return None;
+    };
     let Some(path_str) = path.to_str() else {
         tracing::warn!("custom keyboard path {path:?} is not UTF-8, falling back to telex");
         return None;
@@ -895,12 +900,55 @@ impl EngineBridge {
             handled: true,
         }
     }
+
+    /// Route a key to the open Nôm candidate list, if one is showing.
+    ///
+    /// Hosts call this BEFORE their break-keysym flush: Escape and the arrows
+    /// are break keysyms, and Space/Return/digits would otherwise be composed.
+    /// `Some` = the key belongs to the list (always handled, digits included
+    /// even when out of range so a stray digit never leaks into the Nôm
+    /// composition); `None` = no list, or a key that refines the composition
+    /// (more letters, Backspace) — process it normally. `page` is the host
+    /// UI's page size; number keys pick a slot on the page holding the cursor.
+    pub fn candidate_key(&mut self, keysym: u32, page: usize) -> Option<KeyOutcome> {
+        if self.candidates.is_empty() {
+            return None;
+        }
+        Some(match keysym {
+            KEY_ESCAPE => self.discard(),
+            KEY_RETURN | KEY_SPACE => self.select_current(),
+            // Vertical or horizontal panel: next/prev either way.
+            KEY_DOWN | KEY_RIGHT => self.cursor_next(),
+            KEY_UP | KEY_LEFT => self.cursor_prev(),
+            KEY_PAGE_DOWN => self.cursor_page_down(page),
+            KEY_PAGE_UP => self.cursor_page_up(page),
+            KEY_1..=KEY_9 => {
+                let mut outcome = self.select_at_page((keysym - KEY_1) as usize, page);
+                outcome.handled = true;
+                outcome
+            }
+            _ => return None,
+        })
+    }
 }
 
 // ============================================================================
 // Keysym classification (shared: IBus keyvals ARE X11 keysyms, which is also
 // what xkbcommon produces — one table serves both backends)
 // ============================================================================
+
+// Keysyms that drive the Nôm candidate list ([`EngineBridge::candidate_key`]).
+const KEY_SPACE: u32 = 0x20;
+const KEY_RETURN: u32 = 0xFF0D;
+const KEY_ESCAPE: u32 = 0xFF1B;
+const KEY_1: u32 = 0x31;
+const KEY_9: u32 = 0x39;
+const KEY_LEFT: u32 = 0xFF51;
+const KEY_UP: u32 = 0xFF52;
+const KEY_RIGHT: u32 = 0xFF53;
+const KEY_DOWN: u32 = 0xFF54;
+const KEY_PAGE_UP: u32 = 0xFF55;
+const KEY_PAGE_DOWN: u32 = 0xFF56;
 
 /// True for modifier-only keysyms (Shift_L/R, Ctrl_L/R, Caps_Lock, …).
 pub fn is_modifier_keysym(keysym: u32) -> bool {

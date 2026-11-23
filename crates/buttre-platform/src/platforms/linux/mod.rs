@@ -7,6 +7,7 @@
 pub mod backend_detect;
 pub mod ibus;
 pub mod ibus_bus;
+pub mod ibus_engines;
 mod ibus_props;
 pub mod kwin_ime;
 pub mod wayland;

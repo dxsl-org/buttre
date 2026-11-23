@@ -1,7 +1,7 @@
-//! Tray icon management for buttre application (Windows + Wayland-native — the
-//! platforms where buttre owns method selection, ADR-0003).
+//! The tray-icon tray (Windows). Linux uses `sni_tray`.
 
 use crate::shared::ui::menu::MethodMenuItem;
+use crate::shared::ui::tooltip::get_tooltip;
 use crate::shared::ui::{
     IconSet, CUSTOM_ICON_BYTES, NOM_ICON_BYTES, TELEX_ICON_BYTES, VIETNAMESE_ICON_BYTES,
     VNI_ICON_BYTES,
@@ -9,7 +9,6 @@ use crate::shared::ui::{
 use anyhow::Result;
 use buttre_core::state::Settings;
 use buttre_core::vietnamese::config_loader::MethodMetadata;
-use buttre_core::vietnamese::get_custom_dir;
 use std::fs;
 use tray_icon::TrayIconBuilder;
 
@@ -52,11 +51,12 @@ impl TrayIcons {
             method_id => {
                 // A custom method may ship its own icon file next to its TOML.
                 if let Some((data, _)) = custom_items.iter().find(|(d, _)| d.id == method_id) {
-                    if let Some(icon_path_str) = &data.icon {
-                        let icon_path = get_custom_dir().join(icon_path_str);
-                        if let Ok(bytes) = fs::read(&icon_path) {
-                            return IconSet::from_bytes(&bytes);
-                        }
+                    let icon_path = data.icon.as_ref().and_then(|icon| {
+                        buttre_core::vietnamese::find_keyboard(method_id)
+                            .and_then(|toml| toml.parent().map(|dir| dir.join(icon)))
+                    });
+                    if let Some(bytes) = icon_path.and_then(|path| fs::read(path).ok()) {
+                        return IconSet::from_bytes(&bytes);
                     }
                 }
                 if custom_items.iter().any(|(d, _)| d.id == method_id) {
@@ -82,7 +82,11 @@ pub fn create_tray_icon(
 ) -> Result<(tray_icon::TrayIcon, TrayIcons)> {
     let icons = TrayIcons::load();
 
-    let initial_tooltip = get_tooltip(&settings.input_method, settings.enabled, custom_items);
+    let initial_tooltip = get_tooltip(
+        &settings.input_method,
+        settings.enabled,
+        custom_name(&settings.input_method, custom_items),
+    );
     let initial_icon = icons
         .for_method(&settings.input_method, custom_items)
         .variant(settings.enabled)
@@ -98,56 +102,13 @@ pub fn create_tray_icon(
     Ok((tray_icon, icons))
 }
 
-/// Tooltip for the current state. OFF still names the chosen method — the
-/// tooltip answers "what will I get when I turn it back on".
-pub fn get_tooltip(
+/// The display name of `method` when it is one of `custom_items`.
+pub fn custom_name<'a>(
     method: &str,
-    enabled: bool,
-    custom_items: &[(MethodMetadata, MethodMenuItem)],
-) -> String {
-    let method_label = match method {
-        "telex" => "Chữ Việt\nTELEX".to_string(),
-        "vni" => "Chữ Việt\nVNI".to_string(),
-        "nom" => "Chữ Nôm".to_string(),
-        method_id => {
-            if let Some((data, _)) = custom_items.iter().find(|(d, _)| d.id == method_id) {
-                format!("Custom\n{}", data.name)
-            } else {
-                format!("Chữ Việt\n{}", method_id.to_uppercase())
-            }
-        }
-    };
-    if enabled {
-        format!("buttre\n{method_label}")
-    } else {
-        format!("buttre\nĐã tắt ({})", method_label.replace('\n', " "))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tooltip_when_off_still_names_the_method() {
-        let on = get_tooltip("telex", true, &[]);
-        let off = get_tooltip("telex", false, &[]);
-        assert!(on.contains("TELEX"));
-        assert!(off.contains("Đã tắt"), "off must say so: {off}");
-        assert!(
-            off.contains("TELEX"),
-            "off must still show what turning on gives: {off}"
-        );
-    }
-
-    #[test]
-    fn tooltip_never_mentions_english() {
-        // "english" is not a method (ADR-0003) — no state renders it.
-        for method in ["telex", "vni", "nom", "sometoml"] {
-            for enabled in [true, false] {
-                let tip = get_tooltip(method, enabled, &[]);
-                assert!(!tip.to_lowercase().contains("english"), "{tip}");
-            }
-        }
-    }
+    custom_items: &'a [(MethodMetadata, MethodMenuItem)],
+) -> Option<&'a str> {
+    custom_items
+        .iter()
+        .find(|(d, _)| d.id == method)
+        .map(|(d, _)| d.name.as_str())
 }

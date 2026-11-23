@@ -640,7 +640,7 @@ buttre không sở hữu lựa chọn kiểu gõ ở mọi nơi — quyết đ�
 
 | Nền tảng | Menu của OS | Sở hữu | Tray | Cửa Sổ Cấu Hình |
 |---|---|---|---|---|
-| Linux IBus | ✅ Properties radio | OS | ❌ Không | Settings window |
+| Linux IBus | ✅ Mỗi kiểu gõ một input source (Super+Space) + mục "Cấu hình buttre…" | OS | ❌ Không | Menu input source + Settings |
 | Linux fcitx5 + addon | ✅ Panel status area | OS | ❌ Không | Settings window |
 | macOS IMKit | ✅ Input Source menu | OS | ❌ Không | Settings window |
 | Linux Wayland-native | ❌ Không có | buttre | ✅ Có | Tray + Settings |
@@ -649,13 +649,13 @@ buttre không sở hữu lựa chọn kiểu gõ ở mọi nơi — quyết đ�
 
 **Hệ quả**:
 
-- **Trên nền tảng OS-sở-hữu**: `buttre` lệnh không tham số hiển thị cửa sổ Cấu hình (không tham số mở config), engine chạy dưới daemon của OS (IBus/fcitx5 launcher hoặc IMKit), không tray trong process tray user. Tuy nhiên, engine Linux tự áp dụng `Settings::enabled` khi file config thay đổi (file-watch via `macro_sync.rs`), nên người dùng vẫn có thể toggle bộ gõ bằng cách chỉnh sửa tay hoặc qua config window.
+- **Trên nền tảng OS-sở-hữu**: `buttre` lệnh không tham số hiển thị cửa sổ Cấu hình (không tham số mở config), engine chạy dưới daemon của OS (IBus/fcitx5 launcher hoặc IMKit), không tray trong process tray user. Trên IBus và macOS "tắt" là chọn input source khác — engine không đọc `Settings::enabled`; fcitx5 addon vẫn có lệnh tắt riêng trên panel.
 - **Trên nền tảng Buttre-sở-hữu**: `buttre` lệnh mở tray trực tiếp; tray sở hữu lựa chọn kiểu gõ (bấm/hotkey nạp `Settings::input_method` và `Settings::enabled`).
 - **Flag `--autostart`**: Login launch khác với click. Trên OS-owned, nó thoát im lặng (engine do OS spawn); trên Buttre-owned, nó khởi động tray.
-- **Radio English**: Trên IBus, nó viết lệnh toggle `Settings::enabled` chứ không phải lựa chọn kiểu gõ — nó tắt engine, không chuyển sang kiểu English fake.
+- **IBus**: kiểu gõ suy ra từ tên engine (`buttre` = Telex, `buttre-vni`, `buttre-nom`, `buttre-<stem TOML>`); danh sách engine do `buttre --ibus-engines` sinh lúc ibus-daemon dựng cache.
 - **`--doctor`**: In owner + surface để tìm phía máy bị lệch nhau.
 
-Xem chi tiết [docs/adr/0003-per-platform-method-ownership.md](adr/0003-per-platform-method-ownership.md) và, cho Windows, [docs/adr/0004-windows-tsf-os-owned-methods.md](adr/0004-windows-tsf-os-owned-methods.md).
+Xem chi tiết [docs/adr/0003-per-platform-method-ownership.md](adr/0003-per-platform-method-ownership.md), cho Windows [docs/adr/0004-windows-tsf-os-owned-methods.md](adr/0004-windows-tsf-os-owned-methods.md), cho IBus [docs/adr/0005-linux-ibus-one-engine-per-method.md](adr/0005-linux-ibus-one-engine-per-method.md).
 
 ---
 
@@ -700,10 +700,10 @@ regsvr32 target/release/buttre_platform.dll
 **Trạng thái**: Đã hoàn thành cho IBus + Wayland native (v0.7.10+)
 
 **Kiến trúc**:
-- **IBus (GNOME/X11)**: Engine đăng ký với IBus daemon, nhận phím qua D-Bus, trả về composition string; custom keyboard TOML tải vào menu IBus radio
+- **IBus (GNOME/X11)**: Engine đăng ký với IBus daemon, nhận phím qua D-Bus, trả về composition string; mỗi kiểu gõ (kể cả custom keyboard TOML) là một engine IBus riêng (`ibus_engines.rs`)
 - **Wayland native (sway/Hyprland/KDE)**: Backend `zwp_input_method_v2` cho sway/Hyprland, fallback `zwp_input_method_v1` cho KDE Plasma (KWin không hỗ trợ v2)
 - **Shared bridge**: `crates/buttre-platform/src/shared/engine_bridge.rs` — xử lý keyboard loading, composition modes; 3-surface method sync (panel ↔ tray ↔ config window) qua `platforms/linux/method_sync.rs`
-- **Custom keyboard**: File `~/.local/share/buttre/keyboards/{id}.toml` tải động, constraint: filename lowercase, `metadata.id` nên match stem, GNOME Shell chỉ nhận RegisterProperties lần đầu nên custom TOML thêm mid-session cần engine restart, tên `config.toml` và `-.toml` reserved (menu-key collision)
+- **Custom keyboard**: File `~/.local/share/buttre/keyboards/{id}.toml` tải động, constraint: filename lowercase, `metadata.id` nên match stem; trên IBus, TOML thêm sau có input source sau khi dựng lại cache (`ibus write-cache` + `ibus restart`, hoặc đăng nhập lại); tên `config.toml` và `-.toml` reserved (menu-key collision)
 
 ---
 

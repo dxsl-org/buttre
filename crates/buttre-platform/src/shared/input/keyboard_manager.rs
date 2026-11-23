@@ -215,10 +215,7 @@ impl KeyboardManager {
             _ => {
                 // Try to load custom keyboard from file
                 tracing::info!("Attempting to load custom keyboard: {}", method);
-                let custom_dir = buttre_core::vietnamese::get_custom_dir();
-                let config_path = custom_dir.join(format!("{}.toml", method));
-
-                if config_path.exists() {
+                if let Some(config_path) = buttre_core::vietnamese::find_keyboard(method) {
                     match buttre_core::Config::load(config_path.to_str().unwrap()) {
                         Ok(config) => {
                             tracing::info!("✓ Loaded custom keyboard from {:?}", config_path);
@@ -235,9 +232,8 @@ impl KeyboardManager {
                     }
                 } else {
                     tracing::warn!(
-                        "Custom keyboard '{}' not found at {:?}, leaving the IME silent",
-                        method,
-                        config_path
+                        "Custom keyboard '{}' not found in any keyboard dir, leaving the IME silent",
+                        method
                     );
                     *self.keyboard.write().unwrap() = None;
                     return Ok(());
