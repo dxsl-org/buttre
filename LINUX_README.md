@@ -159,9 +159,10 @@ spawn-at-startup "/usr/bin/buttre" "--ime"
 spawn-at-startup "/usr/bin/buttre" "--autostart"
 ```
 
-Ubuntu/Debian có IBus: `im-config -n none` như COSMIC (bên dưới), nếu không phiên đặt
-`GTK_IM_MODULE=ibus` và app GTK bỏ qua buttre. Không có Xwayland (niri thiếu `xwayland-satellite`)
-thì tray không bắt phím toàn cục được; phím tắt Ctrl+Shift+… vẫn chạy khi đang gõ trong ô nhập.
+Phiên niri mở từ GDM trên Ubuntu 26.04 không đặt biến IM và không chạy ibus-daemon, nên buttre tự
+nhận Wayland-native. Nếu `buttre --doctor` báo `env IM=Some(Ibus)` thì chạy `im-config -n none` như
+COSMIC (bên dưới). Không có Xwayland (niri thiếu `xwayland-satellite` — Ubuntu chưa đóng gói) thì
+tray không bắt phím toàn cục được; phím tắt Ctrl+Shift+… vẫn chạy khi đang gõ trong ô nhập.
 
 `buttre --doctor` in môi trường buttre nhận diện được (IBus, fcitx5, KWin, Wayland-native) và
 lý do. Lúc đăng nhập tray chờ tối đa 30 giây nếu phiên được cấu hình IBus/fcitx5 mà daemon chưa lên.
