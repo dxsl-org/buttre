@@ -15,7 +15,7 @@ pub(super) const PAGE_SIZE: usize = 9;
 const FONT: &str = "Sans 13";
 const PAD: f64 = 6.0;
 const ROW_GAP: f64 = 2.0;
-/// Breeze palette — the popup lives on Plasma (the only v1 compositor).
+/// Breeze palette: neutral light colors that read fine on any compositor.
 const BG: (f64, f64, f64) = (0.988, 0.988, 0.988);
 const BORDER: (f64, f64, f64) = (0.737, 0.745, 0.753);
 const TEXT: (f64, f64, f64) = (0.137, 0.149, 0.161);
@@ -23,19 +23,21 @@ const HIGHLIGHT: (f64, f64, f64) = (0.239, 0.682, 0.914);
 const HIGHLIGHT_TEXT: (f64, f64, f64) = (1.0, 1.0, 1.0);
 
 /// A rendered popup: premultiplied ARGB32, native endian — byte-identical to
-/// `wl_shm::Format::Argb8888` on every little-endian host.
+/// `wl_shm::Format::Argb8888` on every little-endian host. `width`/`height`
+/// are buffer pixels; the logical size is that divided by `scale`.
 pub(super) struct Pixmap {
     pub width: i32,
     pub height: i32,
+    pub scale: i32,
     pub stride: i32,
     pub data: Vec<u8>,
 }
 
 /// Render the page holding `cursor` (a GLOBAL index into `items`) as a
 /// vertical list `1. 𡗶 (trời)`, the cursor row highlighted, plus a
-/// `‹ 2/5 ›` footer when there is more than one page. `None` when `items`
-/// is empty or cairo cannot allocate.
-pub(super) fn render(items: &[CandidateView], cursor: usize) -> Option<Pixmap> {
+/// `‹ 2/5 ›` footer when there is more than one page, at `scale`× the
+/// logical size. `None` when `items` is empty or cairo cannot allocate.
+pub(super) fn render(items: &[CandidateView], cursor: usize, scale: i32) -> Option<Pixmap> {
     if items.is_empty() {
         return None;
     }
@@ -74,9 +76,14 @@ pub(super) fn render(items: &[CandidateView], cursor: usize) -> Option<Pixmap> {
     let width = (text_w + PAD * 4.0).ceil() as i32;
     let height = (row_h.iter().sum::<f64>() + PAD * 2.0).ceil() as i32;
 
-    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height).ok()?;
+    // Laid out in logical pixels, drawn at `scale`× so a HiDPI output gets
+    // sharp glyphs (the surface declares the same buffer scale).
+    let scale = scale.max(1);
+    let surface =
+        cairo::ImageSurface::create(cairo::Format::ARgb32, width * scale, height * scale).ok()?;
     {
         let cr = cairo::Context::new(&surface).ok()?;
+        cr.scale(f64::from(scale), f64::from(scale));
         set_rgb(&cr, BG);
         cr.paint().ok()?;
         set_rgb(&cr, BORDER);
@@ -106,8 +113,9 @@ pub(super) fn render(items: &[CandidateView], cursor: usize) -> Option<Pixmap> {
     let stride = surface.stride();
     let data = surface.take_data().ok()?.to_vec();
     Some(Pixmap {
-        width,
-        height,
+        width: width * scale,
+        height: height * scale,
+        scale,
         stride,
         data,
     })

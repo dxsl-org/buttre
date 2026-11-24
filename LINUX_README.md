@@ -15,7 +15,7 @@
 - ✅ **Dấu câu/space** — commit từ rồi cho ký tự đi qua
 - ✅ **Wayland-native** — `zwp_input_method_v2` cho sway/Hyprland/KDE; tự fallback IBus cho GNOME/X11
 - ✅ **Ô mật khẩu** — bypass engine (không lọt vào composition/learning)
-- ✅ **Chế độ Nôm** — cửa sổ chọn chữ (candidate) qua IBus (GNOME…) và KDE Plasma: Space/Enter chọn chữ đang sáng, 1–9 chọn theo số, ↑↓/PgUp/PgDn chuyển, Esc huỷ. sway/Hyprland/COSMIC chưa có cửa sổ candidate, nhưng các phím chọn vẫn chạy (Space ra chữ đầu danh sách)
+- ✅ **Chế độ Nôm** — cửa sổ chọn chữ (candidate) qua IBus (GNOME…), KDE Plasma và Wayland-native (sway, Hyprland, labwc, niri, COSMIC — popup `zwp_input_popup_surface_v2`, nét theo scale màn hình): Space/Enter chọn chữ đang sáng, 1–9 chọn theo số, ↑↓/PgUp/PgDn chuyển, Esc huỷ. Compositor không vẽ popup này thì các phím chọn vẫn chạy (Space ra chữ đầu danh sách)
 
 > **Không tap phím toàn cục:** cả hai backend đều để OS/compositor định tuyến phím tới bộ gõ đang chọn — không theo dõi bàn phím toàn hệ thống, nên không bị nghi là keylogger.
 

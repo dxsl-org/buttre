@@ -12,11 +12,14 @@
 
 use super::candidate_render::{self, Pixmap};
 use super::v1::ImeV1State;
+use super::ImeState;
 use crate::shared::candidates::CandidateView;
 use std::io::Write;
 use std::os::fd::AsFd;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::wp::input_method::zv1::client::{
@@ -28,6 +31,7 @@ pub(super) struct CandidatePanel {
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     input_panel: Option<zwp_input_panel_v1::ZwpInputPanelV1>,
+    scales: OutputScales,
     surface: Option<Surface>,
     /// Whether a buffer is attached — lets `hide` skip a pointless commit.
     shown: bool,
@@ -57,6 +61,7 @@ impl CandidatePanel {
             }
             "wl_shm" => self.shm = Some(registry.bind(name, 1, qh, ())),
             "zwp_input_panel_v1" => self.input_panel = Some(registry.bind(name, 1, qh, ())),
+            "wl_output" => self.scales.bind(registry, name, version, qh),
             _ => return false,
         }
         true
@@ -69,19 +74,21 @@ impl CandidatePanel {
         cursor: usize,
         qh: &QueueHandle<ImeV1State>,
     ) {
-        let Some(pixmap) = candidate_render::render(items, cursor) else {
+        let Some(pixmap) = candidate_render::render(items, cursor, self.scales.max()) else {
             return self.hide();
         };
         let Some(surface) = self.surface(qh) else {
             return;
         };
         let wl = surface.wl.clone();
-        let Some(buffer) = self.buffer(&pixmap, qh) else {
+        let Some(buffer) = self
+            .shm
+            .as_ref()
+            .and_then(|shm| one_shot_buffer(shm, &pixmap, qh))
+        else {
             return;
         };
-        wl.attach(Some(&buffer), 0, 0);
-        wl.damage(0, 0, pixmap.width, pixmap.height);
-        wl.commit();
+        present(&wl, &buffer, &pixmap);
         self.shown = true;
     }
 
@@ -111,35 +118,125 @@ impl CandidatePanel {
         }
         self.surface.as_ref()
     }
+}
 
-    /// A one-shot `wl_buffer` holding `pixmap`, backed by an unlinked temp
-    /// file (the pool is destroyed right away; the buffer keeps the memory).
-    fn buffer(&self, pixmap: &Pixmap, qh: &QueueHandle<ImeV1State>) -> Option<wl_buffer::WlBuffer> {
-        let shm = self.shm.as_ref()?;
-        let size = pixmap.data.len();
-        let file = std::env::var_os("XDG_RUNTIME_DIR")
-            .and_then(|dir| tempfile::tempfile_in(dir).ok())
-            .or_else(|| tempfile::tempfile().ok());
-        let Some(mut file) = file else {
-            tracing::warn!("candidate popup: cannot create a shm file");
-            return None;
-        };
-        if let Err(e) = file.write_all(&pixmap.data) {
-            tracing::warn!("candidate popup: shm write failed: {e}");
-            return None;
+/// A one-shot `wl_buffer` holding `pixmap`, backed by an unlinked temp file
+/// (the pool is destroyed right away; the buffer keeps the memory). Shared
+/// by both popup backends; their `wl_buffer` dispatch destroys it on
+/// `release`.
+pub(super) fn one_shot_buffer<D>(
+    shm: &wl_shm::WlShm,
+    pixmap: &Pixmap,
+    qh: &QueueHandle<D>,
+) -> Option<wl_buffer::WlBuffer>
+where
+    D: Dispatch<wl_shm_pool::WlShmPool, ()> + Dispatch<wl_buffer::WlBuffer, ()> + 'static,
+{
+    let size = pixmap.data.len();
+    let file = std::env::var_os("XDG_RUNTIME_DIR")
+        .and_then(|dir| tempfile::tempfile_in(dir).ok())
+        .or_else(|| tempfile::tempfile().ok());
+    let Some(mut file) = file else {
+        tracing::warn!("candidate popup: cannot create a shm file");
+        return None;
+    };
+    if let Err(e) = file.write_all(&pixmap.data) {
+        tracing::warn!("candidate popup: shm write failed: {e}");
+        return None;
+    }
+    let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
+    let buffer = pool.create_buffer(
+        0,
+        pixmap.width,
+        pixmap.height,
+        pixmap.stride,
+        wl_shm::Format::Argb8888,
+        qh,
+        (),
+    );
+    pool.destroy();
+    Some(buffer)
+}
+
+/// Attach `buffer` (rendered as `pixmap`) to `wl` at the pixmap's scale.
+pub(super) fn present(wl: &wl_surface::WlSurface, buffer: &wl_buffer::WlBuffer, pixmap: &Pixmap) {
+    wl.set_buffer_scale(pixmap.scale);
+    wl.attach(Some(buffer), 0, 0);
+    wl.damage(
+        0,
+        0,
+        pixmap.width / pixmap.scale,
+        pixmap.height / pixmap.scale,
+    );
+    wl.commit();
+}
+
+/// Integer scale of every `wl_output`, kept current by its `scale` event.
+/// The popup renders at the LARGEST one: neither input-method protocol says
+/// which output the popup lands on, and a sharp popup downscaled on a 1×
+/// screen beats a blurry one upscaled on a 2× screen (Hyprland at scale 2
+/// also placed the oversized 1× list off-screen). Unplugged outputs keep
+/// their slot — harmless, the scale only errs high.
+#[derive(Default)]
+pub(super) struct OutputScales(Vec<Arc<AtomicI32>>);
+
+impl OutputScales {
+    pub(super) fn bind<D>(
+        &mut self,
+        registry: &wl_registry::WlRegistry,
+        name: u32,
+        version: u32,
+        qh: &QueueHandle<D>,
+    ) where
+        D: Dispatch<wl_output::WlOutput, Arc<AtomicI32>> + 'static,
+    {
+        // `scale` arrived in wl_output v2.
+        if version < 2 {
+            return;
         }
-        let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
-        let buffer = pool.create_buffer(
-            0,
-            pixmap.width,
-            pixmap.height,
-            pixmap.stride,
-            wl_shm::Format::Argb8888,
-            qh,
-            (),
-        );
-        pool.destroy();
-        Some(buffer)
+        let slot = Arc::new(AtomicI32::new(1));
+        let _output: wl_output::WlOutput = registry.bind(name, 2, qh, slot.clone());
+        self.0.push(slot);
+    }
+
+    pub(super) fn max(&self) -> i32 {
+        self.0
+            .iter()
+            .map(|s| s.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(1)
+    }
+}
+
+fn on_output_event(slot: &AtomicI32, event: wl_output::Event) {
+    if let wl_output::Event::Scale { factor } = event {
+        slot.store(factor.max(1), Ordering::Relaxed);
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, Arc<AtomicI32>> for ImeV1State {
+    fn event(
+        _state: &mut Self,
+        _output: &wl_output::WlOutput,
+        event: wl_output::Event,
+        slot: &Arc<AtomicI32>,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        on_output_event(slot, event);
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, Arc<AtomicI32>> for ImeState {
+    fn event(
+        _state: &mut Self,
+        _output: &wl_output::WlOutput,
+        event: wl_output::Event,
+        slot: &Arc<AtomicI32>,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        on_output_event(slot, event);
     }
 }
 

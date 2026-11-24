@@ -37,6 +37,7 @@
 //!   has no IBus-style "commit preedit on focus change" mode.
 
 mod candidate_panel;
+mod candidate_popup;
 mod candidate_render;
 mod dispatch;
 mod hotkeys;
@@ -121,6 +122,12 @@ pub(crate) struct ImeState {
     /// Personal-learning handles (`learning_sync`) — consulted per key
     /// (`sync_learning`) so the "Học thông minh" toggle applies live.
     learning: LearningWiring,
+
+    /// Nôm candidate list (`zwp_input_popup_surface_v2`).
+    popup: candidate_popup::CandidatePopup,
+    /// Needed to create popup objects from `commit_ops`; set once the
+    /// event queue exists.
+    qh: Option<QueueHandle<ImeState>>,
 }
 
 impl ImeState {
@@ -166,6 +173,8 @@ impl ImeState {
             seen_generation,
             enabled,
             learning,
+            popup: candidate_popup::CandidatePopup::default(),
+            qh: None,
         }
     }
 
@@ -213,8 +222,15 @@ impl ImeState {
         let Some(im) = &self.input_method else { return };
         use super::engine_bridge::ImeOp;
         for op in &ops {
-            if let ImeOp::Commit(text) = op {
-                im.commit_string(text.clone());
+            match op {
+                ImeOp::Commit(text) => im.commit_string(text.clone()),
+                ImeOp::Candidates { items, cursor } => {
+                    if let Some(qh) = &self.qh {
+                        self.popup.show(im, items, *cursor, qh);
+                    }
+                }
+                ImeOp::HideCandidates => self.popup.hide(),
+                ImeOp::Preedit(_) | ImeOp::DeleteSurrounding(_) => {}
             }
         }
         let preedit = self.bridge.preedit();
@@ -310,6 +326,7 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     );
     let mut queue = conn.new_event_queue::<ImeState>();
     let qh: QueueHandle<ImeState> = queue.handle();
+    state.qh = Some(qh.clone());
     display.get_registry(&qh, ());
     queue.roundtrip(&mut state)?;
 

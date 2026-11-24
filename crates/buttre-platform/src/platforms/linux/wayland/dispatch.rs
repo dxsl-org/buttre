@@ -56,7 +56,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ImeState {
                         zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1, _, _,
                     >(name, 1, qh, ()));
                 }
-                _ => {}
+                other => {
+                    state.popup.bind_global(registry, name, other, version, qh);
+                }
             }
         }
     }
@@ -103,6 +105,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for ImeState {
                     // mode — an uncommitted preedit is discarded (known v1
                     // limitation, see module docs).
                     state.bridge.discard();
+                    state.popup.hide();
                     state.swallowed.clear();
                     tracing::debug!("text input deactivated");
                 }
@@ -265,8 +268,8 @@ impl ImeState {
 
         // Nôm list open: selection/cancel keys belong to it, BEFORE the
         // break-keysym flush — same contract as the IBus and v1 backends.
-        // No popup on this protocol yet; Space still picks the first
-        // candidate and 1–9 pick by number.
+        // Space picks the first candidate, 1–9 pick by number; the list
+        // itself is drawn by `candidate_popup` where the compositor supports it.
         if let Some(outcome) = self.bridge.candidate_key(keysym, CANDIDATE_PAGE_SIZE) {
             self.commit_ops(outcome.ops);
             self.swallowed.insert(key);
