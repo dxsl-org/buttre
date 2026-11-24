@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.9.5-beta] — 2026-11-24
+
 - linux (Wayland-native: KDE, sway, Hyprland, COSMIC): tick "Gõ thẳng không gạch chân" trong cửa sổ Cấu hình rồi đổi kiểu gõ ở tray/phím tắt là tự mất tick — tray lưu lại cả bản settings nó giữ trong bộ nhớ (cũ hơn file), ghi đè lựa chọn của cửa sổ Cấu hình; engine vẫn gõ không gạch chân tới lần khởi động sau. Giờ mỗi thay đổi của tray đọc lại file rồi chỉ ghi đúng trường của nó (`Settings::update`), các trường khác cửa sổ Cấu hình đã đổi được giữ nguyên
 
 ## [0.9.4-beta] — 2026-11-24
