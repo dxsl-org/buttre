@@ -66,15 +66,18 @@ impl ButtreHotkeyManager {
     pub fn new_with_word_toggle(register_word_toggle: bool) -> Result<Self> {
         info!("Creating hotkey manager");
 
-        // Headless guard: on X11/Wayland-less environments (CI runners,
-        // servers, containers) `GlobalHotKeyManager::new()` does not fail
-        // gracefully — its X11 backend dereferences the null display and
-        // SIGSEGVs the whole process. Detect the absence of a display up
-        // front and return the same error every caller already tolerates.
+        // No X11 display → no manager: `GlobalHotKeyManager::new()` does not
+        // fail gracefully — its X11 backend (the only one on Linux/BSD)
+        // dereferences the null display and SIGSEGVs the whole process.
+        // WAYLAND_DISPLAY alone is not enough: niri without
+        // xwayland-satellite (or any compositor run without Xwayland) has no
+        // DISPLAY, and the tray crashed there at startup. Every caller
+        // already tolerates this error; on Wayland-native sessions
+        // `buttre --ime` matches the chords itself.
         #[cfg(all(unix, not(target_os = "macos")))]
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        if std::env::var_os("DISPLAY").is_none() {
             return Err(HotkeyError::ManagerCreationFailed(
-                "no X11/Wayland display available (headless environment) — \
+                "no X11 display (headless, or Wayland without Xwayland) — \
                  global hotkeys are unavailable"
                     .to_string(),
             ));

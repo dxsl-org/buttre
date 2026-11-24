@@ -493,16 +493,25 @@ pub(crate) fn run() -> Result<()> {
     // handles it in-process, so registering it globally here would swallow the
     // keystroke before the text service ever ran (see
     // `PlatformBackend::owns_word_toggle_chord`).
+    // `None` without an X11 display (Wayland compositor without Xwayland,
+    // e.g. niri without xwayland-satellite): the tray still runs, and on
+    // Wayland-native `buttre --ime` matches the chords itself.
     let mut hotkey_manager =
-        ButtreHotkeyManager::new_with_word_toggle(!backend.owns_word_toggle_chord())
-            .expect("Failed to create hotkey manager");
+        match ButtreHotkeyManager::new_with_word_toggle(!backend.owns_word_toggle_chord()) {
+            Ok(manager) => Some(manager),
+            Err(e) => {
+                warn!("global hotkeys unavailable: {e:?}");
+                None
+            }
+        };
 
     // Register custom hotkeys (Ctrl+Shift+4..0) based on menu items count
-    if let Err(e) = hotkey_manager.register_custom_methods(customs.len()) {
-        tracing::error!("Failed to register custom hotkeys: {:?}", e);
+    if let Some(manager) = hotkey_manager.as_mut() {
+        if let Err(e) = manager.register_custom_methods(customs.len()) {
+            tracing::error!("Failed to register custom hotkeys: {:?}", e);
+        }
+        info!("Hotkey manager initialized");
     }
-
-    info!("Hotkey manager initialized");
 
     // --- AppState Setup with Observers ---
     let app_state = Arc::new(Mutex::new(AppState::with_settings(settings.clone())));
@@ -921,7 +930,7 @@ pub(crate) fn run() -> Result<()> {
                     }
                 }
 
-                if let Some(action) = hotkey_manager.check_hotkey() {
+                if let Some(action) = hotkey_manager.as_ref().and_then(|m| m.check_hotkey()) {
                     match action {
                         HotkeyAction::Toggle => {
                             info!("Hotkey: Toggle Vietnamese/English");

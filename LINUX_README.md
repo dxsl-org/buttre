@@ -150,6 +150,19 @@ end)
 Hyprland bản cũ (`hyprland.conf`): `exec-once = /usr/bin/buttre --ime` và
 `exec-once = /usr/bin/buttre --autostart`. Tray hiện trên waybar (module `tray`).
 
+niri (`~/.config/niri/config.kdl`) — tray chạy theo autostart của gói nếu niri được mở qua
+`niri-session` (systemd chạy XDG autostart); nếu không thì thêm dòng thứ hai. Tray hiện trên bar có
+StatusNotifierItem (waybar module `tray`, Noctalia widget `tray`):
+
+```kdl
+spawn-at-startup "/usr/bin/buttre" "--ime"
+spawn-at-startup "/usr/bin/buttre" "--autostart"
+```
+
+Ubuntu/Debian có IBus: `im-config -n none` như COSMIC (bên dưới), nếu không phiên đặt
+`GTK_IM_MODULE=ibus` và app GTK bỏ qua buttre. Không có Xwayland (niri thiếu `xwayland-satellite`)
+thì tray không bắt phím toàn cục được; phím tắt Ctrl+Shift+… vẫn chạy khi đang gõ trong ô nhập.
+
 `buttre --doctor` in môi trường buttre nhận diện được (IBus, fcitx5, KWin, Wayland-native) và
 lý do. Lúc đăng nhập tray chờ tối đa 30 giây nếu phiên được cấu hình IBus/fcitx5 mà daemon chưa lên.
 
