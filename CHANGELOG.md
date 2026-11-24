@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.9.7-beta] — 2026-11-24
+
 - linux (Wayland-native: sway, Hyprland, labwc, niri, COSMIC): kiểu gõ Nôm có cửa sổ danh sách chữ ngay dưới con trỏ — popup `zwp_input_popup_surface_v2` của giao thức input method, cách fcitx5 làm trên các compositor này; không cần extension. Trước đây chỉ chọn "mù" bằng Space/1–9. Đã kiểm sway 1.10, Hyprland 0.57, labwc, niri 26.04 (lồng), COSMIC (Pop!_OS 24.04)
 - linux (Wayland-native, KDE): cửa sổ danh sách chữ Nôm vẽ theo scale lớn nhất của màn hình (`wl_output.scale`) — nét trên màn HiDPI thay vì bị phóng mờ; ở Hyprland scale 2 bản 1× to gấp đôi và bị đẩy ra ngoài màn hình
 
