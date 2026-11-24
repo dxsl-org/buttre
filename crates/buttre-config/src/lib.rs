@@ -141,6 +141,16 @@ pub fn run(show_autostart: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // See the Linux `slint` entry in Cargo.toml for why. An explicit
+    // `SLINT_BACKEND` still wins, for debugging another renderer.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("SLINT_BACKEND").is_none() {
+        slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name("software".into())
+            .select()?;
+    }
+
     let settings = Settings::load();
 
     let window = ConfigWindow::new()?;

@@ -39,5 +39,11 @@ buttre-autostart = { path = "../buttre-autostart" }
 # `slint` release above (same workspace upstream).
 i-slint-backend-winit = "1.9"
 
+# Linux renders the window on the CPU (`run()` selects it): FemtoVG over
+# Mesa's software GL (VMs, machines without GPU drivers) drew the UI into a
+# corner of a black frame. One small dialog needs no GPU.
+[target.'cfg(target_os = "linux")'.dependencies]
+slint = { version = "1.9", default-features = false, features = ["renderer-software"] }
+
 [build-dependencies]
 slint-build = "1.9"

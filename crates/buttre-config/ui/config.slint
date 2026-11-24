@@ -13,7 +13,9 @@ export struct MacroRow {
 
 export component ConfigWindow inherits Window {
     title: "buttre";
-    preferred-width: 520px;
+    // Fits the longest checkbox label ("Gõ thẳng không gạch chân…") —
+    // labels do not wrap, and at 520px it ran past the right edge.
+    preferred-width: 600px;
     preferred-height: 420px;
     min-width: 460px;
     min-height: 360px;

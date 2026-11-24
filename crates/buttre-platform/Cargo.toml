@@ -113,8 +113,12 @@ objc = "0.2"
 # tray-icon's Linux backend (libappindicator) never reports clicks — hosts
 # open its menu on EVERY button — so left-click could not toggle the IME.
 # `blocking`: the tray runs on ksni's own thread; the winit loop only
-# exchanges commands/state with it.
-ksni = { version = "0.3", features = ["blocking"] }
+# exchanges commands/state with it. `async-io`, NOT ksni's default `tokio`:
+# ksni's `tokio` turns on zbus 5's `tokio` feature for the whole build, and
+# then every zbus 5 connection must run inside a Tokio runtime — Slint's
+# winit backend opens one (xdg-portal color scheme) on the config window's
+# plain thread and `buttre --config` panicked on every Linux desktop.
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 zbus = "3.0"
 tokio = { version = "1.0", features = ["full"] }
 x11 = { version = "2.21", features = ["xlib", "xtest"] }

@@ -2652,6 +2652,7 @@ version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8fd06c00fbdac3dd490cf5c10da7daad3820d775060a19ea277d8ab944a160b"
 dependencies = [
+ "bytemuck",
  "calloop 0.14.4",
  "drm",
  "gbm",
@@ -2660,6 +2661,7 @@ dependencies = [
  "i-slint-core",
  "i-slint-renderer-femtovg",
  "input",
+ "memmap2",
  "nix 0.30.1",
  "raw-window-handle",
  "xkbcommon 0.9.0",
@@ -2685,6 +2687,7 @@ version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69bf9167fb1165942ef1f034e039645b60b07b23c0c76069cb83595f979243a4"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "cfg_aliases 0.2.1",
  "copypasta",
@@ -2697,11 +2700,13 @@ dependencies = [
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
  "i-slint-renderer-skia",
+ "imgref",
  "lyon_path",
  "muda 0.17.2",
  "objc2-app-kit 0.3.2",
  "pin-weak",
  "raw-window-handle",
+ "rgb",
  "scoped-tls-hkt",
  "scopeguard",
  "softbuffer",
@@ -2762,12 +2767,14 @@ checksum = "dc140f1218cfc4451b9e8753306c42afbcaf0386cc888e53664c1a5f5330ae19"
 dependencies = [
  "auto_enums",
  "bitflags 2.10.0",
+ "bytemuck",
  "cfg-if",
  "chrono",
  "clru",
  "const-field-offset",
  "derive_more",
  "euclid",
+ "fontdue",
  "i-slint-common",
  "i-slint-core-macros",
  "image 0.25.10",
@@ -2787,6 +2794,7 @@ dependencies = [
  "rgb",
  "scoped-tls-hkt",
  "scopeguard",
+ "skrifa 0.37.0",
  "slab",
  "strum",
  "sys-locale",
@@ -3326,11 +3334,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bcc1cb43797140f74b711f1c4a49f48a7a7429f211c5fb78264e7bcd1e99caf"
 dependencies = [
  "arc-swap",
+ "async-executor",
+ "async-io 2.6.0",
+ "async-lock 3.4.1",
  "crossbeam-queue",
+ "futures-channel",
+ "futures-lite 2.6.1",
  "futures-util",
  "pastey 0.2.3",
  "serde",
- "tokio",
+ "task-local",
  "zbus 5.17.0",
 ]
 
@@ -5965,6 +5978,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "task-local"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2972044a9e5e448a506a7ff6f0d03b566d8ef4cd6918a58fc59835a0f8666626"
+dependencies = [
+ "pin-project-lite",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6144,7 +6166,6 @@ dependencies = [
  "signal-hook-registry",
  "socket2 0.6.1",
  "tokio-macros",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -7823,7 +7844,6 @@ dependencies = [
  "rustix 1.1.2",
  "serde",
  "serde_repr",
- "tokio",
  "tracing",
  "uds_windows",
  "uuid",
