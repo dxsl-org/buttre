@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.9.9-beta] — 2026-11-24
+
 - linux (Wayland-native, gõ thẳng): phím BackSpace dùng để sửa dấu lấy theo keymap hiện tại thay vì cố định keycode 14 — khi compositor chuyển cho bộ gõ keymap của một bàn phím ảo (`wtype`, điều khiển từ xa), keycode 14 có thể là chữ khác và sửa dấu gõ ra rác
 
 ## [0.9.8-beta] — 2026-11-24
