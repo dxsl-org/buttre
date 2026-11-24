@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.9.4-beta] — 2026-11-24
+
 - linux: cửa sổ Cấu hình (`buttre --config`, và `buttre` trên máy IBus/fcitx5) crash ngay khi mở trên mọi desktop Linux ở 0.9.3-beta (`there is no reactor running, must be called from the context of a Tokio 1.x runtime`). Tray mới (`ksni`) bật feature `tokio` của zbus 5 cho cả build, mà Slint mở kết nối zbus 5 (đọc theme sáng/tối) ngoài Tokio runtime. `ksni` giờ dùng `async-io`
 - linux: cửa sổ Cấu hình vẽ lệch vào một góc khung đen trên máy dùng Mesa GL phần mềm (máy ảo, máy chưa có driver GPU); giờ vẽ bằng CPU (renderer `software` của Slint — `SLINT_BACKEND` vẫn ghi đè được). Cửa sổ rộng 600px cho vừa dòng chữ dài nhất
 - linux (IBus): người dùng Dvorak/Colemak/AZERTY gõ ra chữ rác khi chọn input source buttre — engine khai layout `us` nên GNOME ép bàn phím về US QWERTY. Giờ khai `default` (giữ layout của người dùng); đã kiểm Dvorak trên GNOME
