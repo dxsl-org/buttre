@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+## [0.9.6-beta] — 2026-11-24
+
 - linux: tray crash ngay khi khởi động (SIGSEGV) trên compositor Wayland không có Xwayland — vd. niri chưa cài `xwayland-satellite`. Thư viện phím tắt toàn cục chỉ có backend X11 và đọc display rỗng; trước đây chỉ chặn khi thiếu cả `DISPLAY` lẫn `WAYLAND_DISPLAY`. Giờ thiếu `DISPLAY` là tray chạy không phím tắt toàn cục (Wayland-native vẫn có Ctrl+Shift+… qua `buttre --ime`). LINUX_README thêm cấu hình niri
 
 ## [0.9.5-beta] — 2026-11-24

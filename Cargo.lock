@@ -649,7 +649,7 @@ checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
 
 [[package]]
 name = "buttre-autostart"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "buttre-config"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 dependencies = [
  "anyhow",
  "buttre-autostart",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "buttre-core"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 dependencies = [
  "anyhow",
  "buttre-engine",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "buttre-engine"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 dependencies = [
  "anyhow",
  "criterion",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "buttre-ffi"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 dependencies = [
  "buttre-core",
  "buttre-platform",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "buttre-platform"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "buttre-test"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 dependencies = [
  "anyhow",
  "buttre-core",
