@@ -90,27 +90,22 @@ impl AppState {
 
     /// Persist the "Học thông minh" (personal learning) switch.
     ///
-    /// Lives HERE — not as a fresh `Settings::load`-modify-save at the call
-    /// site — because `AppState` owns the settings object and re-saves it
-    /// whole on every method change: an out-of-band write would be silently
-    /// reverted by the next `set_method`.
+    /// Lives HERE so the in-memory copy (which the settings watcher diffs
+    /// against disk) and the file change together — see [`Self::persist`].
     pub fn set_learning_enabled(&mut self, enabled: bool) -> anyhow::Result<()> {
-        self.settings.learning_enabled = enabled;
-        self.settings.save()
+        self.persist(|s| s.learning_enabled = enabled)
     }
 
     /// Persist the "Tự động khởi động" (OS autostart) switch — same
     /// owner-object rationale as [`Self::set_learning_enabled`].
     pub fn set_startup(&mut self, enabled: bool) -> anyhow::Result<()> {
-        self.settings.startup = enabled;
-        self.settings.save()
+        self.persist(|s| s.startup = enabled)
     }
 
     /// Persist the "Gõ tắt" (shorthand/macro expansion) switch — same
     /// owner-object rationale as [`Self::set_learning_enabled`].
     pub fn set_shorthand(&mut self, enabled: bool) -> anyhow::Result<()> {
-        self.settings.shorthand = enabled;
-        self.settings.save()
+        self.persist(|s| s.shorthand = enabled)
     }
 
     /// Persist the "Kiểm soát gắt gao chính tả tiếng Việt" (strict
@@ -118,8 +113,7 @@ impl AppState {
     /// [`Self::set_learning_enabled`]. Applying it to the LIVE keyboard is
     /// the caller's responsibility (`KeyboardManager::set_strict_spelling`).
     pub fn set_strict_spelling(&mut self, strict: bool) -> anyhow::Result<()> {
-        self.settings.strict_spelling = strict;
-        self.settings.save()
+        self.persist(|s| s.strict_spelling = strict)
     }
 
     /// Persist the backspace-deletion mode (`"grapheme"`/`"raw"`) — same
@@ -128,8 +122,7 @@ impl AppState {
     /// only updates the persisted setting); `buttre-platform`'s config-
     /// window watcher does both together.
     pub fn set_backspace_mode(&mut self, mode: &str) -> anyhow::Result<()> {
-        self.settings.backspace_mode = mode.to_string();
-        self.settings.save()
+        self.persist(|s| s.backspace_mode = mode.to_string())
     }
 
     /// Set the input method and notify observers
@@ -156,8 +149,7 @@ impl AppState {
         // `last_vietnamese_method` stash had to exist to undo it. With the two
         // separate, off/on preserves the method for free — nothing to restore.
         self.current_method = method.to_string();
-        self.settings.input_method = method.to_string();
-        self.settings.save()?;
+        self.persist(|s| s.input_method = method.to_string())?;
 
         self.notify_method_changed();
 
@@ -181,8 +173,7 @@ impl AppState {
         info!("Input method {}", if enabled { "on" } else { "off" });
 
         self.enabled = enabled;
-        self.settings.enabled = enabled;
-        self.settings.save()?;
+        self.persist(|s| s.enabled = enabled)?;
 
         self.notify_method_changed();
 
@@ -195,6 +186,18 @@ impl AppState {
     /// `Ok(())` if successful, or an error if settings could not be saved
     pub fn toggle(&mut self) -> anyhow::Result<()> {
         self.set_enabled(!self.enabled)
+    }
+
+    /// Apply `edit` to the in-memory copy and to the CURRENT settings.toml
+    /// ([`Settings::update`]) — never a save of the whole in-memory struct:
+    /// the config window writes this file too, and a whole-struct save
+    /// reverted its changes ("Gõ thẳng không gạch chân" un-ticked itself on
+    /// the next method switch). The in-memory copy stays the tray's OWN
+    /// view on purpose: the settings watcher diffs it against disk to apply
+    /// external edits.
+    fn persist(&mut self, edit: impl Fn(&mut Settings)) -> anyhow::Result<()> {
+        edit(&mut self.settings);
+        Settings::update(&self.settings, edit)
     }
 
     /// Save current settings to disk

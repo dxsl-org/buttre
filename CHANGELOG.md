@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- linux (Wayland-native: KDE, sway, Hyprland, COSMIC): tick "Gõ thẳng không gạch chân" trong cửa sổ Cấu hình rồi đổi kiểu gõ ở tray/phím tắt là tự mất tick — tray lưu lại cả bản settings nó giữ trong bộ nhớ (cũ hơn file), ghi đè lựa chọn của cửa sổ Cấu hình; engine vẫn gõ không gạch chân tới lần khởi động sau. Giờ mỗi thay đổi của tray đọc lại file rồi chỉ ghi đúng trường của nó (`Settings::update`), các trường khác cửa sổ Cấu hình đã đổi được giữ nguyên
+
 ## [0.9.4-beta] — 2026-11-24
 
 - linux: cửa sổ Cấu hình (`buttre --config`, và `buttre` trên máy IBus/fcitx5) crash ngay khi mở trên mọi desktop Linux ở 0.9.3-beta (`there is no reactor running, must be called from the context of a Tokio 1.x runtime`). Tray mới (`ksni`) bật feature `tokio` của zbus 5 cho cả build, mà Slint mở kết nối zbus 5 (đọc theme sáng/tối) ngoài Tokio runtime. `ksni` giờ dùng `async-io`

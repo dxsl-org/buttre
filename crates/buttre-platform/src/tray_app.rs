@@ -747,20 +747,6 @@ pub(crate) fn run() -> Result<()> {
                     if new_settings != known {
                         info!("settings.toml changed externally — applying");
 
-                        // `auto_correct` has no runtime side effect to apply
-                        // (unused field — engine leniency intentionally does
-                        // no spell-check) but MUST still be synced into
-                        // `AppState`'s in-memory copy first: every setter
-                        // below re-saves the WHOLE settings struct, and
-                        // without this sync a lone external edit to
-                        // `auto_correct` would be silently reverted by the
-                        // next field's setter call (stale in-memory value
-                        // winning over the just-applied external one).
-                        if new_settings.auto_correct != known.auto_correct {
-                            app_state.lock().unwrap().settings_mut().auto_correct =
-                                new_settings.auto_correct;
-                        }
-
                         if new_settings.input_method != known.input_method {
                             if let Err(e) = app_state
                                 .lock()
@@ -861,6 +847,10 @@ pub(crate) fn run() -> Result<()> {
                                 }
                             }
                         }
+                        // Fields with no tray-side effect (`use_preedit`,
+                        // `auto_correct`, …) still join the tray's view, so
+                        // the next diff does not report them again.
+                        *app_state.lock().unwrap().settings_mut() = new_settings;
                     }
                 }
 

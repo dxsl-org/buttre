@@ -318,12 +318,40 @@ impl Settings {
     /// # Errors
     /// Returns an error if the settings file cannot be written.
     pub fn save(&self) -> Result<()> {
-        let path = Self::get_path()?;
+        self.save_to(&Self::get_path()?)
+    }
+
+    fn save_to(&self, path: &std::path::Path) -> Result<()> {
         let content = toml::to_string_pretty(self)?;
-        let tmp_path = super::atomic_write::unique_temp_path(&path, "toml");
+        let tmp_path = super::atomic_write::unique_temp_path(path, "toml");
         fs::write(&tmp_path, content)?;
-        fs::rename(&tmp_path, &path)?;
+        fs::rename(&tmp_path, path)?;
         Ok(())
+    }
+
+    /// Persist ONE change: re-read the CURRENT file, apply `edit`, save.
+    ///
+    /// For long-lived writers (the tray's `AppState`) whose in-memory copy
+    /// goes stale while another process — the config window — edits the
+    /// same file. Saving that whole copy reverted every field changed
+    /// since it was loaded. `fallback` is the base when the file does not
+    /// exist yet.
+    ///
+    /// # Errors
+    /// Same as [`Self::read_strict`] (a present-but-unparseable file is
+    /// left untouched) and [`Self::save`].
+    pub fn update(fallback: &Self, edit: impl FnOnce(&mut Self)) -> Result<()> {
+        Self::update_at(&Self::get_path()?, fallback, edit)
+    }
+
+    fn update_at(
+        path: &std::path::Path,
+        fallback: &Self,
+        edit: impl FnOnce(&mut Self),
+    ) -> Result<()> {
+        let mut current = Self::read_strict_from(path)?.unwrap_or_else(|| fallback.clone());
+        edit(&mut current);
+        current.save_to(path)
     }
 }
 
@@ -352,6 +380,42 @@ mod tests {
         // stops a load-modify-save writer from rewriting the user's file.
         fs::write(&path, "not valid toml {{{").unwrap();
         assert!(Settings::read_strict_from(&path).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_keeps_fields_another_writer_changed() {
+        let dir = std::env::temp_dir().join("buttre-settings-update-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+
+        // The tray's copy, loaded before the config window ticked no-preedit.
+        let stale = Settings::default();
+        let on_disk = Settings {
+            use_preedit: false,
+            ..Settings::default()
+        };
+        on_disk.save_to(&path).unwrap();
+
+        Settings::update_at(&path, &stale, |s| s.input_method = "vni".into()).unwrap();
+        let after = Settings::read_strict_from(&path).unwrap().unwrap();
+        assert_eq!(after.input_method, "vni");
+        assert!(
+            !after.use_preedit,
+            "a method switch must not revert use_preedit"
+        );
+
+        // Absent file: the fallback is the base.
+        fs::remove_file(&path).unwrap();
+        Settings::update_at(&path, &on_disk, |s| s.enabled = false).unwrap();
+        let fresh = Settings::read_strict_from(&path).unwrap().unwrap();
+        assert!(!fresh.enabled && !fresh.use_preedit);
+
+        // Corrupt file: refused, left byte-identical.
+        fs::write(&path, "not valid toml {{{").unwrap();
+        assert!(Settings::update_at(&path, &stale, |s| s.enabled = true).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "not valid toml {{{");
         let _ = fs::remove_dir_all(&dir);
     }
 
