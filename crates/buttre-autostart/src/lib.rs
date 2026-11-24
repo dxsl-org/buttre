@@ -80,15 +80,19 @@ mod linux_impl {
         // `buttre` opens the config window, so the flag lets main.rs tell a
         // login launch (exit quietly, the daemon spawns the engine) from a
         // user clicking the app (show the window).
+        // `TryExec`: after the package is removed the session skips this
+        // per-user entry instead of trying to launch a missing binary at
+        // every login (uninstall cannot reach files in users' homes).
         let content = if enabled {
             format!(
                 "[Desktop Entry]\n\
                  Type=Application\n\
                  Name=buttre\n\
                  Comment=Bộ gõ tiếng Việt\n\
-                 Exec=\"{}\" --autostart\n\
+                 TryExec={exe}\n\
+                 Exec=\"{exe}\" --autostart\n\
                  X-GNOME-Autostart-enabled=true\n",
-                exe.display()
+                exe = exe.display()
             )
         } else {
             // `Hidden=true` is the freedesktop "deleted at this level" marker;

@@ -25,7 +25,22 @@ pub use crate::shared::engine_bridge;
 /// no other IME owns the seat; otherwise IBus (GNOME/Mutter, X11). The
 /// `--ibus` flag still forces the IBus component — that is what ibus-daemon
 /// spawns per the component XML.
+///
+/// Exits without serving when the session's typing path is IBus or fcitx5
+/// — the same verdict the tray stands down on. fcitx5 binds the
+/// compositor's single input-method slot too: with both started at login
+/// (`exec fcitx5` + `exec buttre --ime` in a Hyprland/sway config) whichever
+/// won the race typed, and fcitx5 — the framework the tray deferred to —
+/// could be left with no input at all. Waits like `--autostart` for a
+/// configured daemon still starting.
 pub fn run_engine_auto() -> anyhow::Result<()> {
+    use crate::shared::method_owner::{settled_surface, SurfacePath as S};
+    if let surface @ (S::LinuxIbus | S::LinuxFcitx5 | S::LinuxFcitx5NoAddon) =
+        settled_surface(std::time::Duration::from_secs(30))
+    {
+        tracing::info!("{surface:?} serves this session; buttre --ime not needed, exiting");
+        return Ok(());
+    }
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
         match wayland::run_engine() {
             Err(e) if e.downcast_ref::<wayland::Unavailable>().is_some() => {

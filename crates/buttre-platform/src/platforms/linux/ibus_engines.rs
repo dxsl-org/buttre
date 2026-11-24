@@ -136,7 +136,11 @@ fn render_engines_xml(entries: &[EngineEntry]) -> String {
             ("license", "GPL-3.0"),
             ("author", "buttre project"),
             ("icon", e.icon),
-            ("layout", "us"),
+            // "default", not "us": with a fixed layout GNOME switches the
+            // keyboard to US QWERTY whenever a buttre source is picked, so
+            // Dvorak/Colemak/AZERTY users typed garbage. The engine works on
+            // keyvals and needs no particular layout.
+            ("layout", "default"),
             ("longname", e.longname.as_str()),
             ("description", e.longname.as_str()),
             ("symbol", e.symbol.as_str()),
