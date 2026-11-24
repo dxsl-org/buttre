@@ -196,6 +196,11 @@ printf '[Desktop Entry]\nType=Application\nName=buttre IME\nTryExec=/usr/bin/but
 
 Tray do autostart của gói chạy. Phím tắt Ctrl+Shift+… hoạt động khi đang gõ trong một ô nhập.
 
+App riêng của COSMIC (cosmic-edit, cosmic-term) không vẽ chữ đang gõ dở (gạch chân) — chữ chỉ
+hiện khi bấm Space. Bật **"Gõ thẳng không gạch chân"** trong cửa sổ Cấu hình: buttre gõ thẳng vào
+app và sửa dấu bằng cách xoá lại (qua giao thức, hoặc gửi BackSpace với app không báo nội dung ô
+nhập như app COSMIC và terminal). Ô nhập GTK cũng đã kiểm ở chế độ này.
+
 ### Các chế độ chạy (flags)
 
 | Lệnh | Vai trò |

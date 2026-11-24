@@ -75,8 +75,14 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for ImeState {
     ) {
         use zwp_input_method_v2::Event;
         match event {
-            // Activation state is double-buffered — applied on Done.
-            Event::Activate => state.pending_active = true,
+            // Activation state is double-buffered — applied on Done. A new
+            // activation is a new field: its surrounding-text proof and the
+            // no-preedit word shadow start over.
+            Event::Activate => {
+                state.pending_active = true;
+                state.saw_surrounding = false;
+                state.committed_word.clear();
+            }
             Event::Deactivate => state.pending_active = false,
             Event::ContentType { purpose, .. } => {
                 state.pending_purpose = match purpose {
@@ -84,10 +90,14 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for ImeState {
                     WEnum::Unknown(u) => u,
                 };
             }
-            Event::SurroundingText { .. } | Event::TextChangeCause { .. } => {}
+            // Only "the field reports real text" matters (see `preedit_model`);
+            // an empty string proves nothing.
+            Event::SurroundingText { text, .. } => state.pending_surrounding = !text.is_empty(),
+            Event::TextChangeCause { .. } => {}
             Event::Done => {
                 state.serial = state.serial.wrapping_add(1);
                 state.content_purpose = state.pending_purpose;
+                state.saw_surrounding |= std::mem::take(&mut state.pending_surrounding);
                 if state.pending_active && !state.active {
                     state.active = true;
                     // Grab ONLY while a text input is active — holding it
@@ -107,6 +117,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for ImeState {
                     state.bridge.discard();
                     state.popup.hide();
                     state.swallowed.clear();
+                    state.committed_word.clear();
                     tracing::debug!("text input deactivated");
                 }
             }
@@ -214,11 +225,13 @@ impl ImeState {
             return;
         }
 
+        self.last_key_time = time;
         self.sync_method();
         // AFTER the method sync: a successful rebuild re-enables the bridge,
         // and the settings store must win that disagreement.
         self.sync_enabled();
         self.sync_learning();
+        self.sync_use_preedit();
 
         let Some(keysym) = self
             .xkb_state
@@ -248,6 +261,7 @@ impl ImeState {
         if let Some(action) = super::hotkeys::chord_for(key, ctrl, shift, alt || logo) {
             let outcome = self.bridge.flush_pending();
             self.commit_ops(outcome.ops);
+            self.committed_word.clear();
             self.run_chord(action);
             self.swallowed.insert(key);
             return;
@@ -257,6 +271,7 @@ impl ImeState {
         if ctrl || alt || logo {
             let outcome = self.bridge.flush_pending();
             self.commit_ops(outcome.ops);
+            self.committed_word.clear();
             self.forward_key(time, key, true);
             return;
         }
@@ -279,6 +294,8 @@ impl ImeState {
         if is_break_keysym(keysym) {
             let outcome = self.bridge.flush_pending();
             self.commit_ops(outcome.ops);
+            // Word boundary: the shadow only ever describes the CURRENT word.
+            self.committed_word.clear();
             self.forward_key(time, key, true);
             return;
         }
@@ -299,6 +316,7 @@ impl ImeState {
         if outcome.handled {
             self.swallowed.insert(key);
         } else {
+            self.track_forwarded_char(ch);
             self.forward_key(time, key, true);
         }
     }

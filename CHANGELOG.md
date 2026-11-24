@@ -4,6 +4,8 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- linux (Wayland-native: sway, Hyprland, labwc, niri, COSMIC): "Gõ thẳng không gạch chân" giờ chạy trên giao thức này (trước chỉ IBus và KDE) — cần cho app COSMIC (cosmic-edit, cosmic-term) vì chúng không vẽ chữ đang gõ dở, chữ chỉ hiện khi bấm Space. Sửa dấu bằng `delete_surrounding_text` khi ô nhập báo nội dung, còn lại (app COSMIC, terminal) gửi BackSpace qua bàn phím ảo. Đã kiểm cosmic-edit, cosmic-term, ô nhập GTK trên COSMIC
+
 ## [0.9.7-beta] — 2026-11-24
 
 - linux (Wayland-native: sway, Hyprland, labwc, niri, COSMIC): kiểu gõ Nôm có cửa sổ danh sách chữ ngay dưới con trỏ — popup `zwp_input_popup_surface_v2` của giao thức input method, cách fcitx5 làm trên các compositor này; không cần extension. Trước đây chỉ chọn "mù" bằng Space/1–9. Đã kiểm sway 1.10, Hyprland 0.57, labwc, niri 26.04 (lồng), COSMIC (Pop!_OS 24.04)

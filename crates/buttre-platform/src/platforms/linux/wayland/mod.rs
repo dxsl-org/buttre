@@ -41,6 +41,7 @@ mod candidate_popup;
 mod candidate_render;
 mod dispatch;
 mod hotkeys;
+mod preedit_model;
 mod probe;
 mod v1;
 
@@ -107,6 +108,9 @@ pub(crate) struct ImeState {
     content_purpose: u32,
     pending_purpose: u32,
     unavailable: bool,
+    /// Timestamp of the key being handled — stamps synthesized BackSpace
+    /// events (no-preedit deletes in apps without surrounding text).
+    last_key_time: u32,
 
     /// Keycodes whose PRESS we consumed — their release is swallowed too.
     swallowed: HashSet<u32>,
@@ -123,6 +127,20 @@ pub(crate) struct ImeState {
     /// (`sync_learning`) so the "Học thông minh" toggle applies live.
     learning: LearningWiring,
 
+    // --- composition model (see `preedit_model`) ---
+    /// `Settings::use_preedit` mirror (`macro_sync` keeps it live).
+    use_preedit: Arc<std::sync::atomic::AtomicBool>,
+    /// The focused field reported non-empty surrounding text since it was
+    /// activated — required before `delete_surrounding_text` is trusted.
+    saw_surrounding: bool,
+    /// Surrounding text arrived in the current (double-buffered) batch.
+    pending_surrounding: bool,
+    /// Composition model last pushed into the bridge (`true` = preedit).
+    applied_composition: bool,
+    /// Shadow of the app-side current word in no-preedit mode: converts
+    /// the bridge's CHARACTER deletes into the protocol's BYTE count.
+    committed_word: String,
+
     /// Nôm candidate list (`zwp_input_popup_surface_v2`).
     popup: candidate_popup::CandidatePopup,
     /// Needed to create popup objects from `commit_ops`; set once the
@@ -138,6 +156,7 @@ impl ImeState {
         raw_backspace: Arc<std::sync::atomic::AtomicBool>,
         enabled: Arc<std::sync::atomic::AtomicBool>,
         learning: LearningWiring,
+        use_preedit: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let method = method_state.method();
         let seen_generation = method_state.generation();
@@ -167,12 +186,18 @@ impl ImeState {
             content_purpose: 0,
             pending_purpose: 0,
             unavailable: false,
+            last_key_time: 0,
             swallowed: HashSet::new(),
             bridge,
             method_state,
             seen_generation,
             enabled,
             learning,
+            use_preedit,
+            saw_surrounding: false,
+            pending_surrounding: false,
+            applied_composition: true,
+            committed_word: String::new(),
             popup: candidate_popup::CandidatePopup::default(),
             qh: None,
         }
@@ -206,6 +231,7 @@ impl ImeState {
         if self.bridge.is_enabled() != want {
             let outcome = self.bridge.set_enabled(want);
             self.commit_ops(outcome.ops);
+            self.committed_word.clear();
             tracing::info!("Wayland engine enabled={want}");
         }
     }
@@ -218,20 +244,35 @@ impl ImeState {
     /// Push the bridge's current state to the compositor and commit.
     /// input-method-v2 pending state resets after every commit, so the
     /// preedit must be re-declared each cycle it should stay visible.
+    ///
+    /// `commit_string` is double-buffered (a second one in the same cycle
+    /// REPLACES the first), so commits are concatenated; a delete flushes the
+    /// commits before it in their own cycle first (see
+    /// [`Self::delete_word_chars`]).
     fn commit_ops(&mut self, ops: Vec<super::engine_bridge::ImeOp>) {
-        let Some(im) = &self.input_method else { return };
+        let Some(im) = self.input_method.clone() else {
+            return;
+        };
         use super::engine_bridge::ImeOp;
+        let mut text = String::new();
         for op in &ops {
             match op {
-                ImeOp::Commit(text) => im.commit_string(text.clone()),
+                ImeOp::Commit(t) => {
+                    self.committed_word.push_str(t);
+                    text.push_str(t);
+                }
+                ImeOp::DeleteSurrounding(chars) => self.delete_word_chars(*chars, &mut text),
                 ImeOp::Candidates { items, cursor } => {
                     if let Some(qh) = &self.qh {
-                        self.popup.show(im, items, *cursor, qh);
+                        self.popup.show(&im, items, *cursor, qh);
                     }
                 }
                 ImeOp::HideCandidates => self.popup.hide(),
-                ImeOp::Preedit(_) | ImeOp::DeleteSurrounding(_) => {}
+                ImeOp::Preedit(_) => {}
             }
+        }
+        if !text.is_empty() {
+            im.commit_string(text);
         }
         let preedit = self.bridge.preedit();
         if !preedit.is_empty() {
@@ -261,6 +302,7 @@ impl ImeState {
         match self.bridge.rebuild(&method) {
             Some(outcome) => {
                 self.commit_ops(outcome.ops);
+                self.committed_word.clear();
                 tracing::info!("Wayland engine switched to method {method}");
             }
             None => tracing::warn!("Method switch to {method} failed; keeping current"),
@@ -307,9 +349,6 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
     let macros = macro_sync::load_initial();
     let strict = macro_sync::load_initial_strict();
     let raw_backspace = macro_sync::load_initial_raw_backspace();
-    // Wayland stays on the preedit model for now; it loads the flag only so the
-    // shared settings watcher keeps its signature, and the no-preedit model can
-    // be wired to this backend later without touching macro_sync again.
     let use_preedit = macro_sync::load_initial_use_preedit();
     let enabled = macro_sync::load_initial_enabled();
     // Pure loads only — the writer thread and watcher are deferred with the
@@ -323,6 +362,7 @@ fn run_engine_v2(conn: Connection) -> Result<()> {
         raw_backspace.clone(),
         enabled.clone(),
         learning.clone(),
+        use_preedit.clone(),
     );
     let mut queue = conn.new_event_queue::<ImeState>();
     let qh: QueueHandle<ImeState> = queue.handle();
