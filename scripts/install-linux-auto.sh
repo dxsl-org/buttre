@@ -91,6 +91,21 @@ EOF
     sudo cmake --install "$build" >/dev/null
 }
 
+# KWin runs buttre: IM env vars (im-config on Kubuntu) would route GTK/Qt
+# apps to fcitx5/IBus instead, and Plasma 5 keeps Ctrl+Shift chords away
+# from the tray's X11 key grab.
+kde_notes() {
+    case "${GTK_IM_MODULE:-}${QT_IM_MODULE:-}" in
+        *fcitx* | *ibus*)
+            echo "   ⚠️  GTK_IM_MODULE/QT_IM_MODULE đang trỏ fcitx/ibus — app GTK/Qt sẽ bỏ qua buttre."
+            echo "      Chạy: im-config -n none   (hoặc xoá các biến đó), rồi đăng nhập lại." ;;
+    esac
+    if plasmashell --version 2>/dev/null | grep -q ' 5\.'; then
+        echo "   Plasma 5: để Ctrl+Shift+… chạy, System Settings → Applications → Legacy X11 App Support"
+        echo "      → \"As above, plus any key typed while the Control, Alt, or Meta keys are pressed\"."
+    fi
+}
+
 install_files
 
 case "$SURFACE" in
@@ -119,12 +134,13 @@ case "$SURFACE" in
     wayland-native)
         if desktop_is KDE; then
             echo "✅ Xong. KWin đang chạy buttre (Virtual Keyboard). Đăng xuất/đăng nhập lại để dùng bản vừa cài."
+            kde_notes
         elif desktop_is COSMIC; then
             cat <<'EOF'
 ✅ Đã cài. COSMIC: bỏ cấu hình IBus của im-config, cho phiên tự chạy buttre --ime, rồi đăng nhập lại:
      im-config -n none
      mkdir -p ~/.config/autostart
-     printf '[Desktop Entry]\nType=Application\nName=buttre IME\nExec=/usr/bin/buttre --ime\nNoDisplay=true\n' \
+     printf '[Desktop Entry]\nType=Application\nName=buttre IME\nTryExec=/usr/bin/buttre\nExec=/usr/bin/buttre --ime\nNoDisplay=true\n' \
        > ~/.config/autostart/buttre-ime.desktop
 EOF
         else
@@ -144,6 +160,7 @@ EOF
         ;;
     kwin-unconfigured)
         echo "✅ Đã cài. System Settings → Keyboard → Virtual Keyboard → chọn \"buttre (Wayland IME)\" → Apply."
+        kde_notes
         ;;
     none)
         echo "⚠️  Đã cài, nhưng phiên này chưa có IBus/fcitx5 và compositor không hỗ trợ input-method Wayland."

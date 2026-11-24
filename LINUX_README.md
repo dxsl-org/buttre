@@ -154,11 +154,20 @@ Hyprland bản cũ (`hyprland.conf`): `exec-once = /usr/bin/buttre --ime` và
 lý do. Lúc đăng nhập tray chờ tối đa 30 giây nếu phiên được cấu hình IBus/fcitx5 mà daemon chưa lên.
 
 `--ime` tự dò: dùng Wayland-native nếu compositor hỗ trợ, tự fallback sang IBus nếu không (hoặc nếu một IME khác đã giữ seat).
+Nếu phiên đang dùng IBus hoặc fcitx5 (vd. Hyprland có `exec-once = fcitx5 -d`), `--ime` tự thoát
+để không giành input method với fcitx5 — gõ qua addon fcitx5-buttre, đổi kiểu gõ ở menu fcitx5.
 
 **KDE Plasma:** KWin tự chạy `buttre --ime` theo `~/.config/kwinrc` (System Settings → Keyboard →
 Virtual Keyboard → "buttre (Wayland IME)"). "Thoát" trên tray tắt gõ tiếng Việt (`Settings::enabled`
 = tắt): từ Plasma 6.7 KWin không còn cách tắt tiến trình IME qua D-Bus nên engine vẫn chạy nền, chỉ
 không gõ dấu. Mở lại tray rồi bấm "Bật bộ gõ" (hoặc Ctrl+Shift+Space) để gõ lại.
+
+- Kubuntu (và distro dùng im-config) có cài fcitx5/IBus đặt sẵn `GTK_IM_MODULE`/`QT_IM_MODULE`
+  = fcitx/ibus — app GTK/Qt khi đó gõ qua fcitx5/IBus, bỏ qua buttre của KWin. Khi đã chọn buttre ở
+  Virtual Keyboard, chạy `im-config -n none` rồi đăng nhập lại.
+- Plasma 5.27 (Kubuntu 24.04, Debian 12): phím tắt Ctrl+Shift+… cần System Settings → Applications
+  → Legacy X11 App Support → "As above, plus any key typed while the Control, Alt, or Meta keys are
+  pressed" (Plasma 6 đã mặc định như vậy).
 
 **COSMIC (Pop!_OS 24.04):** dùng Wayland-native. Pop!_OS đặt sẵn `GTK_IM_MODULE=ibus` nhưng
 ibus-daemon không tự chạy trong phiên COSMIC, và app riêng của COSMIC (cosmic-edit…) không nhận
@@ -167,7 +176,7 @@ IBus. Bỏ cấu hình IBus của im-config và cho phiên tự chạy `buttre -
 ```bash
 im-config -n none
 mkdir -p ~/.config/autostart
-printf '[Desktop Entry]\nType=Application\nName=buttre IME\nExec=/usr/bin/buttre --ime\nNoDisplay=true\n' \
+printf '[Desktop Entry]\nType=Application\nName=buttre IME\nTryExec=/usr/bin/buttre\nExec=/usr/bin/buttre --ime\nNoDisplay=true\n' \
   > ~/.config/autostart/buttre-ime.desktop
 ```
 
@@ -240,11 +249,14 @@ Mong đợi: tiếng việts
 
 ### Ứng Dụng Đã Kiểm Thử
 
-- ✅ **gedit** — Hỗ trợ đầy đủ
-- ✅ **Firefox** — Hỗ trợ đầy đủ
-- ✅ **VS Code** — Hỗ trợ đầy đủ
-- ✅ **LibreOffice** — Hỗ trợ đầy đủ
-- ✅ **Terminal** — Hỗ trợ đầy đủ
+- ✅ **GTK** (gedit, ô nhập GTK3), **Qt6** (Wayland lẫn X11), **LibreOffice**, **VS Code**
+- ✅ **Firefox** (gói distro và Flatpak), **Chromium** 156 (Wayland mặc định, không cần cờ)
+- ✅ **Terminal**: foot, kitty
+- ⚠️ **App chạy qua XWayland trên Wayland-native** (sway, Hyprland, labwc, COSMIC): Java/Swing
+  (JetBrains), Qt ép `QT_QPA_PLATFORM=xcb`, Chromium `--ozone-platform=x11` — gõ ra chữ thô; giao
+  thức input-method của Wayland không tới được XWayland. Chạy app ở chế độ Wayland, hoặc dùng IBus/fcitx5.
+- ⚠️ **Java/Swing qua IBus** (JetBrains trên GNOME): mất ký tự khi gõ (vd. "đường" → "đng") — lỗi
+  XIM của Java, ibus-unikey cũng bị y hệt.
 
 ---
 
@@ -288,14 +300,24 @@ RUST_LOG=debug /usr/bin/buttre --ibus   # IBus (GNOME/X11)
 RUST_LOG=debug /usr/bin/buttre --ime    # Wayland-native (sway/Hyprland/KDE)
 ```
 
+### Vấn Đề: Ctrl+Shift+Space / Ctrl+Shift+1…9 không ăn (Wayland-native)
+
+Nếu bạn đặt **Ctrl+Shift để đổi layout bàn phím** (`grp:ctrl_shift_toggle`, vd. sway
+`xkb_options grp:ctrl_shift_toggle`), XKB biến phím Shift thứ hai thành phím đổi layout
+nên buttre không còn thấy tổ hợp Ctrl+Shift — và mỗi lần bấm layout bị đổi. Chọn phím
+đổi layout khác (`grp:win_space_toggle`, `grp:alt_shift_toggle`, `grp:caps_toggle`…)
+hoặc đổi kiểu gõ từ tray. Trên IBus/fcitx5 không có xung đột này (đổi kiểu gõ qua menu
+của OS, Super+Space).
+
 ---
 
 ## 🗑️ Gỡ Cài Đặt
 
 ```bash
 # Nếu cài qua package
-sudo apt remove buttre        # Debian/Ubuntu
-sudo dnf remove buttre        # Fedora/RHEL
+sudo apt remove buttre fcitx5-buttre   # Debian/Ubuntu (fcitx5-buttre nếu có cài)
+sudo dnf remove buttre                 # Fedora/RHEL
+sudo zypper rm buttre                  # openSUSE
 
 # Thủ công
 sudo rm /usr/bin/buttre
@@ -303,6 +325,17 @@ sudo rm /usr/share/ibus/component/buttre.xml
 
 # Khởi động lại IBus
 ibus restart
+```
+
+Gói không chạm được file trong thư mục người dùng — dọn thêm nếu muốn sạch hẳn:
+
+```bash
+# KDE Plasma đang chọn buttre ở Virtual Keyboard: bỏ chọn (gõ phím vẫn bình
+# thường nếu để nguyên — KWin chỉ không có bộ gõ)
+kwriteconfig6 --file kwinrc --group Wayland --key InputMethod --delete
+# Autostart, kiểu gõ đang chọn, từ đã học, gõ tắt
+rm -f ~/.config/autostart/buttre.desktop ~/.config/autostart/buttre-ime.desktop
+rm -rf ~/.config/buttre ~/.local/share/buttre ~/.cache/buttre
 ```
 
 ---

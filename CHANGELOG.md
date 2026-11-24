@@ -4,6 +4,13 @@ Tất cả thay đổi đáng chú ý của buttre được ghi lại tại đâ
 
 ## [Unreleased]
 
+- linux: cửa sổ Cấu hình (`buttre --config`, và `buttre` trên máy IBus/fcitx5) crash ngay khi mở trên mọi desktop Linux ở 0.9.3-beta (`there is no reactor running, must be called from the context of a Tokio 1.x runtime`). Tray mới (`ksni`) bật feature `tokio` của zbus 5 cho cả build, mà Slint mở kết nối zbus 5 (đọc theme sáng/tối) ngoài Tokio runtime. `ksni` giờ dùng `async-io`
+- linux: cửa sổ Cấu hình vẽ lệch vào một góc khung đen trên máy dùng Mesa GL phần mềm (máy ảo, máy chưa có driver GPU); giờ vẽ bằng CPU (renderer `software` của Slint — `SLINT_BACKEND` vẫn ghi đè được). Cửa sổ rộng 600px cho vừa dòng chữ dài nhất
+- linux (IBus): người dùng Dvorak/Colemak/AZERTY gõ ra chữ rác khi chọn input source buttre — engine khai layout `us` nên GNOME ép bàn phím về US QWERTY. Giờ khai `default` (giữ layout của người dùng); đã kiểm Dvorak trên GNOME
+- linux: `buttre --ime` tự thoát khi phiên dùng IBus/fcitx5 (cùng phán quyết làm tray đứng ngoài). Trên Hyprland/niri có `exec fcitx5` cùng `buttre --ime`, hai bên giành nhau input method của compositor — buttre thắng thì fcitx5 (thứ tray đã nhường) không gõ được gì
+- linux: entry autostart có `TryExec` — gỡ gói xong phiên không còn cố chạy binary đã mất ở mỗi lần đăng nhập. LINUX_README thêm phần dọn file trong thư mục người dùng (kwinrc, autostart, dữ liệu)
+- docs (Linux): KDE dùng buttre ở Virtual Keyboard cần `im-config -n none` nếu im-config đặt `GTK_IM_MODULE`/`QT_IM_MODULE` (Kubuntu có fcitx5); Plasma 5.27 cần bật Legacy X11 App Support cho phím tắt Ctrl+Shift — `install-linux-auto.sh` nhắc cả hai. Xung đột Ctrl+Shift đổi layout (`grp:ctrl_shift_toggle`). Danh sách app đã kiểm và giới hạn (app XWayland trên Wayland-native, Java qua IBus)
+
 ## [0.9.3-beta] — 2026-11-24
 
 - linux (.rpm): không còn bắt buộc IBus (`Requires: ibus`) — trên openSUSE KDE việc này kéo IBus về và KWin chuyển sang IBus thay vì gợi ý chọn buttre; người dùng fcitx5 cũng bị cài thêm IBus. Giờ chỉ `Suggests: (ibus >= 1.5 or fcitx5)` (không tự cài; zypper giải `or` của Recommends bằng cách cài fcitx5 và bỏ qua `unless`). Script post-install/uninstall (`ibus write-cache`, cache icon) trước đây nằm trong bảng `scripts` mà cargo-generate-rpm không đọc nên chưa bao giờ chạy; giờ khai báo đúng `post_install_script`/`post_uninstall_script`. Nâng cargo-generate-rpm 0.14 → 0.21; bản này không nhận `-` trong version nên version rpm là dạng `0.9.3~beta` (xếp trước `0.9.3`, sau `0.9.2-beta` — nâng cấp từ gói cũ bình thường)
